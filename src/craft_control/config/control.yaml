@@ -1,0 +1,15 @@
+# control_master params: OpenCR ports + arm motor physical limits.
+# ros2 run craft_control control_master --ros-args --params-file $(ros2 pkg prefix craft_control)/share/craft_control/config/control.yaml
+# Every OpenCR reports the same USB serial (FFFFFFFEFFFF), so ttyACM0/1 order is not fixed and by-id
+# cannot tell them apart. Pin each board by USB port: ls -l /dev/serial/by-path/
+
+control_master:
+  ros__parameters:
+    arm_port: /dev/ttyACM0    # arm x5 + LM guide OpenCR
+    clock_port: /dev/ttyACM1  # clock + wheel x2 OpenCR
+
+    # index 0..4 = arm_j0..arm_j4 [rad, rad/s], 5 = LM guide [m, m/s]
+    # TODO: measure on the real arm, values below are placeholders.
+    arm_min_angle: [-3.14, -1.57, -1.57, -1.57, -3.14, 0.0]
+    arm_max_angle: [3.14, 1.57, 1.57, 1.57, 3.14, 0.3]
+    arm_max_vel: [1.0, 1.0, 1.0, 1.0, 1.0, 0.05]
