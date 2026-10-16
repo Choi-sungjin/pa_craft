@@ -10,7 +10,7 @@ find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
-find_package(OpenCV REQUIRED COMPONENTS core videoio)
+find_package(realsense2 REQUIRED)
 
 add_executable(lidar_processor src/lidar_processor.cpp)
 target_link_libraries(lidar_processor
@@ -20,12 +20,11 @@ target_link_libraries(lidar_processor
 )
 
 add_executable(realsense_processor src/realsense_processor.cpp)
-target_include_directories(realsense_processor PRIVATE ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(realsense_processor
   rclcpp::rclcpp
   ${sensor_msgs_TARGETS}
   ${std_msgs_TARGETS}
-  ${OpenCV_LIBS}
+  realsense2::realsense2
 )
 
 add_executable(c310_processor src/c310_processor.cpp)

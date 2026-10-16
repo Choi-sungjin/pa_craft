@@ -39,6 +39,11 @@ pa_craft/
     │   ├── package.xml
     │   ├── config/
     │   │   └── slam.yaml
+    │   ├── scripts/
+    │   │   ├── aruco_reader.py
+    │   │   ├── depth_heatmap.py
+    │   │   ├── knob_depth.py
+    │   │   └── knob_lever.py
     │   └── src/
     │       ├── object_detector.cpp
     │       ├── object_pose_estimator.cpp
