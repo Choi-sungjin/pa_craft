@@ -17,9 +17,11 @@ NODES = {
 
 def generate_launch_description():
     slam_yaml = os.path.join(get_package_share_directory('craft_perception'), 'config', 'slam.yaml')
+    camera_yaml = os.path.join(get_package_share_directory('craft_sensors'), 'config', 'camera.yaml')
     map_file = os.path.join(get_package_share_directory('craft_planning'), 'maps', 'map.pgm')
 
-    nodes = [Node(package=pkg, executable=exe, output='screen')
+    nodes = [Node(package=pkg, executable=exe, output='screen',
+                  parameters=[camera_yaml] if pkg == 'craft_sensors' else [])
              for pkg, exes in NODES.items() for exe in exes]
     nodes.append(Node(package='craft_planning', executable='planning_master', output='screen',
                       parameters=[{'map_file': map_file}]))

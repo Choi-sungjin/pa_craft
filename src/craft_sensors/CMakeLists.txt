@@ -10,6 +10,7 @@ find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(OpenCV REQUIRED COMPONENTS core videoio)
 find_package(realsense2 REQUIRED)
 
 add_executable(lidar_processor src/lidar_processor.cpp)
@@ -63,5 +64,7 @@ install(TARGETS
   wheel_encoder_processor
   arm_encoder_processor
   DESTINATION lib/${PROJECT_NAME})
+
+install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
 
 ament_package()
