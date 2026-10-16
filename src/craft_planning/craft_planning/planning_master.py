@@ -1,16 +1,14 @@
 """planning_master node.
 
 sub: /planning/mission, /state/odom, /lidar/obstacle, /vision/object_pose, /vision/object_detection
-pub: /planning/target_path, /planning/odom, /planning/arm_target_pose, /planning/clock_target_pose, /arm_state
+pub: /planning/target_path, /planning/odom
 """
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseArray, PoseStamped
 from nav_msgs.msg import Odometry, Path
-from std_msgs.msg import Float64, String
+from std_msgs.msg import String
 
-from craft_planning.arm_planner import ArmPlanner
-from craft_planning.clock_planner import ClockPlanner
 from craft_planning.path_planner import PathPlanner
 
 
@@ -20,17 +18,12 @@ class PlanningMaster(Node):
         map_file = self.declare_parameter('map_file', '').value
 
         self.path_planner = PathPlanner(map_file)
-        self.clock_planner = ClockPlanner()
-        self.arm_planner = ArmPlanner(self)
 
         self.mission = ''
         self.odom = None
 
         self.target_path_pub = self.create_publisher(Path, '/planning/target_path', 10)
         self.odom_pub = self.create_publisher(Odometry, '/planning/odom', 10)
-        self.arm_target_pose_pub = self.create_publisher(PoseStamped, '/planning/arm_target_pose', 10)
-        self.clock_target_pose_pub = self.create_publisher(Float64, '/planning/clock_target_pose', 10)
-        self.arm_state_pub = self.create_publisher(String, '/arm_state', 10)
 
         self.create_subscription(String, '/planning/mission', self.on_mission, 10)
         self.create_subscription(Odometry, '/state/odom', self.on_odom, 10)
@@ -61,9 +54,6 @@ class PlanningMaster(Node):
             return
         self.odom_pub.publish(self.odom)
         self.target_path_pub.publish(self.path_planner.get_target_path())
-        self.arm_target_pose_pub.publish(self.arm_planner.get_arm_pose())
-        self.clock_target_pose_pub.publish(Float64(data=self.clock_planner.get_clock_pose()))
-        # TODO: publish /arm_state when arm action finishes
 
 
 def main():

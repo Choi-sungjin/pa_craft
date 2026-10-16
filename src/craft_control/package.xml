@@ -2,7 +2,7 @@
 <package format="3">
   <name>craft_control</name>
   <version>0.0.0</version>
-  <description>Control: control_master + longitudinal/lateral controllers</description>
+  <description>Control: control_master + longitudinal/lateral controllers + arm/clock planners</description>
   <maintainer email="sssgggjjj4895@gmail.com">pa29</maintainer>
   <license>TODO</license>
 
