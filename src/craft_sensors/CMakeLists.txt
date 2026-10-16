@@ -29,10 +29,12 @@ target_link_libraries(realsense_processor
 )
 
 add_executable(c310_processor src/c310_processor.cpp)
+target_include_directories(c310_processor PRIVATE ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(c310_processor
   rclcpp::rclcpp
   ${sensor_msgs_TARGETS}
-  ${nav_msgs_TARGETS}
+  ${std_msgs_TARGETS}
+  ${OpenCV_LIBS}
 )
 
 add_executable(imu_processor src/imu_processor.cpp)
@@ -64,5 +66,7 @@ install(TARGETS
   wheel_encoder_processor
   arm_encoder_processor
   DESTINATION lib/${PROJECT_NAME})
+
+install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
 
 ament_package()
