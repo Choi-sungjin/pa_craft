@@ -1,0 +1,18 @@
+# Camera resolution / fps for the sensor processors.
+# ros2 run craft_sensors <node> --ros-args --params-file $(ros2 pkg prefix craft_sensors)/share/craft_sensors/config/camera.yaml
+# Perception readers take width/height from the *_image_offset message, so nothing else changes.
+
+c310_processor:
+  ros__parameters:
+    camera: auto  # auto = first C310 (046d:081b) in /dev/v4l/by-id, or a /dev/videoN path
+    width: 640    # C310 YUYV: 160x120 ~ 1280x720 (30 fps up to 640x480)
+    height: 480
+    fps: 30
+
+realsense_processor:
+  ros__parameters:
+    width: 640          # color; aligned depth comes out at this size too
+    height: 360
+    depth_width: 424    # depth sensor mode before alignment
+    depth_height: 240
+    fps: 30             # color and depth must both support it at the chosen sizes
