@@ -11,7 +11,8 @@ find_package(nav_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 
-add_executable(control_master src/control_master.cpp src/longitudinal_controller.cpp src/lateral_controller.cpp)
+add_executable(control_master src/control_master.cpp src/longitudinal_controller.cpp src/lateral_controller.cpp
+  src/arm_planner.cpp src/clock_planner.cpp)
 target_include_directories(control_master PRIVATE include)
 target_link_libraries(control_master
   rclcpp::rclcpp
@@ -23,5 +24,6 @@ target_link_libraries(control_master
 install(TARGETS
   control_master
   DESTINATION lib/${PROJECT_NAME})
+install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
 
 ament_package()

@@ -6,6 +6,7 @@
 #include <string>
 
 #include "rclcpp/rclcpp.hpp"
+#include "std_msgs/msg/int32.hpp"
 #include "std_msgs/msg/int32_multi_array.hpp"
 #include "std_msgs/msg/string.hpp"
 
@@ -20,8 +21,8 @@ public:
     mission_pub_ = create_publisher<std_msgs::msg::String>("/planning/mission", 10);
     aruco_sub_ = create_subscription<std_msgs::msg::Int32MultiArray>(
       "/vision/aruco", 10, [this](const std_msgs::msg::Int32MultiArray & msg) {on_aruco(msg);});
-    arm_state_sub_ = create_subscription<std_msgs::msg::String>(
-      "/arm_state", 10, [this](const std_msgs::msg::String & msg) {on_arm_state(msg);});
+    arm_state_sub_ = create_subscription<std_msgs::msg::Int32>(
+      "/arm_state", 10, [this](const std_msgs::msg::Int32 & msg) {on_arm_state(msg);});
     timer_ = create_wall_timer(100ms, [this]() {on_timer();});
   }
 
@@ -34,7 +35,7 @@ private:
     // TODO: decide mission order (Main -> Sub / Sub -> Main)
   }
 
-  void on_arm_state(const std_msgs::msg::String & msg)
+  void on_arm_state(const std_msgs::msg::Int32 & msg)  // 0 idle, 1 using, 2 fault
   {
     (void)msg;
     // TODO: count loaded pucks / knob turned, advance state
@@ -62,7 +63,7 @@ private:
   State state_ = State::INIT;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr mission_pub_;
   rclcpp::Subscription<std_msgs::msg::Int32MultiArray>::SharedPtr aruco_sub_;
-  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr arm_state_sub_;
+  rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr arm_state_sub_;
   rclcpp::TimerBase::SharedPtr timer_;
 };
 
