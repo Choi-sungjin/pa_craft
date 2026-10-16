@@ -1,0 +1,9 @@
+# 2D SLAM (slam_toolbox): sub /lidar/merged
+# NOTE: slam_toolbox publishes map->odom TF, not /lidar/odom (state_estimator expects /lidar/odom)
+slam_toolbox:
+  ros__parameters:
+    scan_topic: /lidar/merged
+    odom_frame: odom
+    map_frame: map
+    base_frame: base_link
+    mode: mapping

@@ -1,0 +1,8 @@
+# venv-craft: python3 -m venv --system-site-packages venv-craft && venv-craft/bin/pip install -r requirements.txt
+# versions pinned to what works in ~/git/yolo26_kant/.venv (RTX 5060, CUDA 13 torch wheels)
+ultralytics==8.4.166
+torch==2.14.0
+torchvision==0.29.0
+opencv-python==5.0.0.93
+numpy==2.5.3
+pyrealsense2==2.59.1.11053

@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>craft_bringup</name>
+  <version>0.0.0</version>
+  <description>Launch files for craft robot</description>
+  <maintainer email="sssgggjjj4895@gmail.com">pa29</maintainer>
+  <license>TODO</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>craft_sensors</exec_depend>
+  <exec_depend>craft_perception</exec_depend>
+  <exec_depend>craft_mission</exec_depend>
+  <exec_depend>craft_planning</exec_depend>
+  <exec_depend>craft_control</exec_depend>
+  <exec_depend>slam_toolbox</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

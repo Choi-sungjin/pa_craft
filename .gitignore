@@ -1,0 +1,19 @@
+# ROS 2 / colcon build outputs
+/build/
+/install/
+/log/
+
+# Local Python environments and generated files
+/venv-craft/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local environment settings
+.env
+.env.*
