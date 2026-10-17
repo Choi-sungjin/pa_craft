@@ -14,9 +14,11 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -121,6 +123,16 @@ public:
     }
     arm_planner_.set_limits(min_angle, max_angle, max_vel);
 
+    // wheel: TurtleBot3 Waffle Pi, XM430-W210-T
+    const double wheel_radius = declare_parameter("wheel_radius", 0.033);  // [m]
+    const double max_v = declare_parameter("max_v", 0.26);                 // [m/s]
+    const double max_acc_v = declare_parameter("max_acc_v", 0.5);          // [m/s^2]
+    max_wheel_ = declare_parameter("max_wheel", 7.8);                      // [rad/s]
+    if (wheel_radius <= 0.0 || max_v <= 0.0 || max_acc_v <= 0.0 || max_wheel_ <= 0.0) {
+      throw std::runtime_error("wheel_radius, max_v, max_acc_v, max_wheel must be > 0");
+    }
+    longitudinal_.set_params(wheel_radius, max_v, max_acc_v);
+
     arm_serial_ = std::make_unique<OpencrSerial>(declare_parameter<std::string>("arm_port"));
     clock_serial_ = std::make_unique<OpencrSerial>(declare_parameter<std::string>("clock_port"));
 
@@ -176,6 +188,13 @@ private:
 
   void on_timer()
   {
+    const auto t = now();
+    const double dt = last_t_ ? (t - *last_t_).seconds() : kDt;  // real dt
+    last_t_ = t;
+    if (dt <= 0.0) {
+      return;
+    }
+
     read_arm();
     read_clock();
 
@@ -192,10 +211,14 @@ private:
 
     if (have_clock_fb_) {
       longitudinal_.set_target_v(0.0);  // TODO: target v from path
-      auto v = longitudinal_.get_wheel_speed();
+      auto v = longitudinal_.get_wheel_speed(dt);
       auto w = lateral_.get_wheel_speed();
+      const double wl = v[0] + w[0];  // [rad/s]
+      const double wr = v[1] + w[1];
+      // over wheel limit: scale both by the same ratio to keep curvature
+      const double k = std::max({1.0, std::abs(wl) / max_wheel_, std::abs(wr) / max_wheel_});
       const double clock_pose = clock_planner_.get_clock_pose(clock_angle_);
-      if (!clock_serial_->write_values({v[0] + w[0], v[1] + w[1], clock_pose})) {
+      if (!clock_serial_->write_values({wl / k, wr / k, clock_pose})) {
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "clock OpenCR write failed");
       }
       std_msgs::msg::Int32 msg;
@@ -206,6 +229,8 @@ private:
 
   craft_control::LongitudinalController longitudinal_;
   craft_control::LateralController lateral_;
+  double max_wheel_ = 7.8;
+  std::optional<rclcpp::Time> last_t_;
   craft_control::ArmPlanner arm_planner_;
   craft_control::ClockPlanner clock_planner_;
 
