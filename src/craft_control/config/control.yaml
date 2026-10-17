@@ -8,8 +8,31 @@ control_master:
     arm_port: /dev/ttyACM0    # arm x5 + LM guide OpenCR
     clock_port: /dev/ttyACM1  # clock + wheel x2 OpenCR
 
-    # index 0..4 = arm_j0..arm_j4 [rad, rad/s], 5 = LM guide [m, m/s]
-    # TODO: measure on the real arm, values below are placeholders.
+    # OpenCR command/feedback units are motor angles [rad] for all channels.
+    # TODO: replace placeholder motor-angle limits with measured hardware limits.
     arm_min_angle: [-3.14, -1.57, -1.57, -1.57, -3.14, 0.0]
     arm_max_angle: [3.14, 1.57, 1.57, 1.57, 3.14, 0.3]
-    arm_max_vel: [1.0, 1.0, 1.0, 1.0, 1.0, 0.05]
+
+    # IK output order and corresponding OpenCR motor channel for each arm joint.
+    # TODO: confirm channel order against the OpenCR firmware before enabling this mapping.
+    arm_ik_joint_names: [slide_joint, shoulder_joint, elbow_joint, wrist_pitch_joint, tool_roll_joint]
+    arm_motor_channels: [5, 0, 1, 2, 3]
+    arm_ik_mapping_confirmed: false
+    # TODO: calibrate direction and zero offset in IK joint order against the URDF's q=0 pose.
+    arm_joint_directions: [1.0, 1.0, 1.0, 1.0, 1.0]
+    arm_joint_offsets: [0.0, 0.0, 0.0, 0.0, 0.0]
+    lm_linear_joint_name: slide_joint
+    # TODO: measure pulley radius [m] and motor-radians per pulley-radian ratio.
+    lm_pulley_radius: 0.0
+    lm_gear_ratio: 0.0
+
+    # Gripper uses a separate Bool command: true=close/grasp, false=open/release.
+    # TODO: confirm the gripper channel and measure its open/close motor angles.
+    gripper_motor_channel: 4
+    gripper_open_angle: 0.0
+    gripper_close_angle: 0.0
+    gripper_mapping_confirmed: false
+    # TODO: append gripper_current_a [A] to arm OpenCR feedback and calibrate these thresholds.
+    # All-zero values disable current-based grasp estimation.
+    grasp_current_threshold_a: 0.0
+    grasp_current_debounce: 0.0
