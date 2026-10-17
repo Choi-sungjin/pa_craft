@@ -15,11 +15,11 @@ public:
   : Node("wheel_encoder_processor")
   {
     wheel_odom_pub_ = create_publisher<nav_msgs::msg::Odometry>("/wheel/odom", 10);
-    timer_ = create_wall_timer(10ms, [this]() {on_timer();});
+    timer_ = create_wall_timer(10ms, [this]() {wheel_encoder_loop();});
   }
 
 private:
-  void on_timer()
+  void wheel_encoder_loop()
   {
     // TODO: read encoder tick, integrate odometry
   }

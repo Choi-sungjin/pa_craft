@@ -23,7 +23,7 @@ public:
       "/vision/aruco", 10, [this](const std_msgs::msg::Int32MultiArray & msg) {on_aruco(msg);});
     arm_state_sub_ = create_subscription<std_msgs::msg::Int32>(
       "/arm_state", 10, [this](const std_msgs::msg::Int32 & msg) {on_arm_state(msg);});
-    timer_ = create_wall_timer(100ms, [this]() {on_timer();});
+    timer_ = create_wall_timer(100ms, [this]() {mission_loop();});
   }
 
 private:
@@ -41,7 +41,7 @@ private:
     // TODO: count loaded pucks / knob turned, advance state
   }
 
-  void on_timer()
+  void mission_loop()
   {
     std_msgs::msg::String msg;
     msg.data = to_string(state_);

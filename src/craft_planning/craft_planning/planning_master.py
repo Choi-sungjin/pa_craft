@@ -15,6 +15,10 @@ from std_msgs.msg import String
 
 from craft_planning.path_planner import PathPlanner
 
+IK_OUTPUT_JOINT_ORDER = (
+    'slide_joint', 'shoulder_joint', 'elbow_joint', 'wrist_pitch_joint', 'tool_roll_joint'
+)
+
 
 class PlanningMaster(Node):
     def __init__(self):
@@ -39,7 +43,7 @@ class PlanningMaster(Node):
         self.create_subscription(PoseStamped, '/planning/target_tcp_pose', self.on_tcp_pose_goal, 10)
         self.create_subscription(JointState, '/ik_solution', self.on_ik_solution, 10)
 
-        self.create_timer(0.05, self.on_timer)
+        self.create_timer(0.05, self.planning_loop)
 
     def on_mission(self, msg: String):
         self.mission = msg.data
@@ -77,15 +81,19 @@ class PlanningMaster(Node):
         self.ik_target_pub.publish(msg)
 
     def on_ik_solution(self, msg: JointState):
-        if not msg.name or len(msg.name) != len(msg.position):
+        if len(msg.name) != len(IK_OUTPUT_JOINT_ORDER) or len(msg.name) != len(msg.position):
             self.get_logger().warning('ignoring invalid /ik_solution joint names/positions')
             return
         if any(not math.isfinite(position) for position in msg.position):
             self.get_logger().warning('ignoring non-finite /ik_solution positions')
             return
+        if tuple(msg.name) != IK_OUTPUT_JOINT_ORDER:
+            self.get_logger().warning('ignoring /ik_solution with unexpected arm joint names')
+            return
+
         self.arm_joint_target_pub.publish(msg)
 
-    def on_timer(self):
+    def planning_loop(self):
         if self.odom is None:
             return
         self.odom_pub.publish(self.odom)

@@ -15,11 +15,11 @@ public:
   : Node("arm_encoder_processor")
   {
     arm_odom_pub_ = create_publisher<sensor_msgs::msg::JointState>("/arm/odom", 10);
-    timer_ = create_wall_timer(10ms, [this]() {on_timer();});
+    timer_ = create_wall_timer(10ms, [this]() {arm_encoder_loop();});
   }
 
 private:
-  void on_timer()
+  void arm_encoder_loop()
   {
     // TODO: read arm encoder raw
   }

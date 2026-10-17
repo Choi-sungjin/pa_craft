@@ -15,11 +15,11 @@ public:
   : Node("imu_processor")
   {
     imu_data_pub_ = create_publisher<sensor_msgs::msg::Imu>("/imu/data", 10);
-    timer_ = create_wall_timer(10ms, [this]() {on_timer();});
+    timer_ = create_wall_timer(10ms, [this]() {imu_loop();});
   }
 
 private:
-  void on_timer()
+  void imu_loop()
   {
     // TODO: read IMU raw
   }

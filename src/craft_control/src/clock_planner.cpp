@@ -18,9 +18,9 @@ double ClockPlanner::get_clock_pose(double clock_angle) const
   return clock_pose_;
 }
 
-int ClockPlanner::get_clock_status(int clock_state) const
+int ClockPlanner::get_clock_wheel_status(int state) const
 {
-  return clock_state;
+  return state;
 }
 
 }  // namespace craft_control

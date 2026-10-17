@@ -90,7 +90,7 @@ public:
     vision_image_offset_pub_ = create_publisher<std_msgs::msg::UInt64MultiArray>("/vision/image_offset", 1);
     camera_info_pub_ = create_publisher<sensor_msgs::msg::CameraInfo>("/vision/camera_info", 10);
     lidar_merged_pub_ = create_publisher<sensor_msgs::msg::LaserScan>("/lidar/merged", 10);
-    timer_ = create_wall_timer(5ms, [this]() {on_timer();});
+    timer_ = create_wall_timer(5ms, [this]() {realsense_loop();});
   }
 
   ~RealsenseProcessor() override
@@ -100,7 +100,7 @@ public:
   }
 
 private:
-  void on_timer()
+  void realsense_loop()
   {
     rs2::frameset frames;
     if (!pipe_.poll_for_frames(&frames)) {

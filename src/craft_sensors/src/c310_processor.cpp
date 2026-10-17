@@ -88,13 +88,13 @@ public:
 
     vision_c310_image_pub_ = create_publisher<sensor_msgs::msg::Image>("/vision/c310_image", 10);
     vision_c310_image_offset_pub_ = create_publisher<std_msgs::msg::UInt64MultiArray>("/vision/c310_image_offset", 1);
-    timer_ = create_wall_timer(10ms, [this]() {on_timer();});
+    timer_ = create_wall_timer(10ms, [this]() {c310_loop();});
   }
 
   ~C310Processor() override {shm_unlink(kShmName);}
 
 private:
-  void on_timer()
+  void c310_loop()
   {
     const size_t offset = slot_ * slot_size_;
     uint8_t * dst = shm_.get() + offset;
