@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>lidar_processor</name>
+  <version>0.1.0</version>
+  <description>CRAFT 로봇 전/후방 LDS-03 구동 + lidar_processor(FOV 필터, 로봇 중앙 기준 360도 병합 → /lidar/merged)</description>
+  <maintainer email="polarnight1212@users.noreply.github.com">Han Jihoon</maintainer>
+  <license>TODO</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>tf2_ros</depend>
+
+  <exec_depend>coin_d4_driver</exec_depend>
+  <exec_depend>rviz2</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
