@@ -8,10 +8,11 @@
 //      reached topics publish false immediately when a new target is stored
 // param: config/control.yaml (OpenCR ports, arm motor limits)
 // serial (ASCII CSV, '\n' terminated, OpenCR must stream rx on its own):
+//   shared channels first (same order as tx), board-specific state/current last
 //   arm+LM OpenCR      tx: slide,shoulder,elbow,wrist_pitch,tool_roll,gripper
-//                      rx: arm_lm_state,slide,shoulder,elbow,wrist_pitch,tool_roll,gripper[,gripper_current_a]
+//                      rx: slide,shoulder,elbow,wrist_pitch,tool_roll,gripper,arm_lm_state,gripper_current_a
 //   clock+wheel OpenCR tx: wheel_l,wheel_r,clock
-//                      rx: wheel_state,clock_state,wheel_l,wheel_r,clock
+//                      rx: wheel_l,wheel_r,clock,wheel_state,clock_state
 
 #include <fcntl.h>
 #include <termios.h>
@@ -289,7 +290,7 @@ private:
       std::vector<double> v;
 
       // Validate the line: must be CSV, correct number of values, all finite
-      if (!parse_csv(line, v) || v.size() != 8) // state + LM + four arm motors + gripper + current
+      if (!parse_csv(line, v) || v.size() != 8) // LM + four arm motors + gripper + state + current
       {
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "bad arm+LM OpenCR line: %s", line.c_str());
         continue;
@@ -302,14 +303,14 @@ private:
         continue;
       }
 
-      // Parse the line: arm_lm_state, slide, shoulder, elbow, wrist_pitch, tool_roll, gripper, [gripper_current_a]
-      arm_lm_state_ = static_cast<int>(v[0]);
-      lm_angle_ = v[1];
-      arm_joints_[0] = v[2];  // shoulder
-      arm_joints_[1] = v[3];  // elbow
-      arm_joints_[2] = v[4];  // wrist pitch
-      arm_joints_[3] = v[5];  // tool roll
-      gripper_angle_ = v[6];
+      // Parse the line: slide, shoulder, elbow, wrist_pitch, tool_roll, gripper, arm_lm_state, gripper_current_a
+      lm_angle_ = v[0];
+      arm_joints_[0] = v[1];  // shoulder
+      arm_joints_[1] = v[2];  // elbow
+      arm_joints_[2] = v[3];  // wrist pitch
+      arm_joints_[3] = v[4];  // tool roll
+      gripper_angle_ = v[5];
+      arm_lm_state_ = static_cast<int>(v[6]);
       gripper_current_a_ = v[7];
 
       have_arm_lm_feedback_ = true; // 정상 arm+LM 피드백을 한 번이라도 받은 적이 있는가
@@ -327,7 +328,7 @@ private:
       std::vector<double> v;
 
       // Validate the line: must be CSV, contain five values, and contain only finite numbers.
-      if (!parse_csv(line, v) || v.size() != 5) { // 5: wheel_state, clock_state, wheel_l, wheel_r, clock
+      if (!parse_csv(line, v) || v.size() != 5) { // 5: wheel_l, wheel_r, clock, wheel_state, clock_state
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "bad clock+wheel OpenCR line: %s", line.c_str());
         continue;
       }
@@ -341,12 +342,12 @@ private:
         continue;
       }
 
-      // Parse the line: wheel_state, clock_state, wheel_l, wheel_r, clock.
-      wheel_state_ = static_cast<int>(v[0]);
-      clock_state_ = static_cast<int>(v[1]);
-      wheel_left_feedback_ = v[2];
-      wheel_right_feedback_ = v[3];
-      clock_angle_ = v[4];
+      // Parse the line: wheel_l, wheel_r, clock, wheel_state, clock_state.
+      wheel_left_feedback_ = v[0];
+      wheel_right_feedback_ = v[1];
+      clock_angle_ = v[2];
+      wheel_state_ = static_cast<int>(v[3]);
+      clock_state_ = static_cast<int>(v[4]);
 
       have_clock_wheel_feedback_ = true; // 정상 clock & wheel 피드백을 한 번이라도 받은 적이 있는가
       return true;

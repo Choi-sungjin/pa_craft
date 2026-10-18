@@ -143,11 +143,12 @@ does not recalculate or change the latched target angle during motion.
 
 OpenCR must accept and report **unwrapped motor angles in radians**, including
 negative angles and angles above 2*pi, and track the commanded absolute angle.
-Firmware is outside this change. The serial format remains:
+Firmware is outside this change. Feedback lists the channels shared with the
+command first, in the same order, then the board-specific state:
 
 ```text
 host -> OpenCR: wheel_l,wheel_r,clock_motor_angle
-OpenCR -> host: wheel_state,clock_state,wheel_l_feedback,wheel_r_feedback,clock_motor_angle
+OpenCR -> host: wheel_l_feedback,wheel_r_feedback,clock_motor_angle,wheel_state,clock_state
 ```
 
 The control node reports on each new valid serial sample:
@@ -184,7 +185,7 @@ previous `true` is never mistaken for completion of the new target.
 | `/clock_target_reached` | See Clock storage |
 
 Planning republishes the same path each tick, so only a changed path resets
-`/wheel_target_reached`. All tolerances come from `config/control.yaml`, are
+`/wheel_target_reached`. Every motor tolerance is 2 degrees. All tolerances come from `config/control.yaml`, are
 validated as positive by ControlMaster, and are stored in each controller at
 configuration, so every controller exposes `is_target_reached(feedback)`.
 Clock completion additionally requires `clock_state` idle, checked by ControlMaster.
