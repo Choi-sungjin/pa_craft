@@ -9,8 +9,8 @@ public:
   void set_clock_pose(double pose);
   // clock_angle: clock OpenCR feedback
   double get_clock_pose(double clock_angle) const;
-  // state: combined clock+wheel OpenCR state (0 idle, 1 using, 2 fault)
-  int get_clock_wheel_status(int state) const;
+  // state: clock actuator state (0 idle, 1 using, 2 fault)
+  int get_clock_status(int state) const;
 
 private:
   double clock_pose_ = 0.0;

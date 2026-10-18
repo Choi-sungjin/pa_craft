@@ -18,7 +18,7 @@ double ClockPlanner::get_clock_pose(double clock_angle) const
   return clock_pose_;
 }
 
-int ClockPlanner::get_clock_wheel_status(int state) const
+int ClockPlanner::get_clock_status(int state) const
 {
   return state;
 }
