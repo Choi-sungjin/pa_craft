@@ -59,5 +59,8 @@ install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
 
 install(PROGRAMS scripts/aruco_reader.py DESTINATION lib/${PROJECT_NAME} RENAME aruco_reader)
 install(PROGRAMS scripts/depth_heatmap.py DESTINATION lib/${PROJECT_NAME} RENAME depth_heatmap)
+install(PROGRAMS scripts/knob_depth.py DESTINATION lib/${PROJECT_NAME} RENAME knob_depth)
+install(PROGRAMS scripts/knob_lever.py DESTINATION lib/${PROJECT_NAME} RENAME knob_lever)
+install(FILES scripts/depth_heatmap.py DESTINATION lib/${PROJECT_NAME})  # imported by knob_depth
 
 ament_package()
