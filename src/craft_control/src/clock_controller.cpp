@@ -38,18 +38,18 @@ bool ClockController::set_target_slot(int slot, double clock_angle)
   }
   const double slot_angle = zero_angle_ + direction_ * (slot % slot_count_) * slot_angle_;
   const double delta = std::remainder(slot_angle - clock_angle, revolution_angle_);
-  clock_pose_ = clock_angle + delta;  // nearest equivalent angle; fixed during motion
+  target_angle_ = clock_angle + delta;  // nearest equivalent angle; fixed during motion
   target_slot_ = slot;
   has_target_ = true;
   return true;
 }
 
-double ClockController::get_clock_pose(double clock_angle) const
+double ClockController::compute_clock_command(double clock_angle) const
 {
   if (!has_target_) {
     return clock_angle;  // hold current angle
   }
-  return clock_pose_;
+  return target_angle_;
 }
 
 int ClockController::get_current_slot(double clock_angle) const
@@ -67,10 +67,10 @@ int ClockController::get_current_slot(double clock_angle) const
   return slot == 0 ? slot_count_ : slot;
 }
 
-bool ClockController::is_complete(double clock_angle, int clock_state) const
+bool ClockController::is_target_reached(double clock_angle, int clock_state) const
 {
   return has_target_ && clock_state == 0 && std::isfinite(clock_angle) &&
-         std::abs(clock_pose_ - clock_angle) <= angle_tolerance_;
+         std::abs(target_angle_ - clock_angle) <= angle_tolerance_;
 }
 
 int ClockController::get_clock_status(int state) const

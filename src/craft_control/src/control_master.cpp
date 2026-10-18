@@ -313,6 +313,8 @@ private:
     for (auto it = lines.rbegin(); it != lines.rend(); ++it) { // reverse order: newest first
       const auto & line = *it;
       std::vector<double> v;
+
+      // Validate the line: must be CSV, contain five values, and contain only finite numbers.
       if (!parse_csv(line, v) || v.size() != 5) { // 5: wheel_state, clock_state, wheel_l, wheel_r, clock
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "bad clock+wheel OpenCR line: %s", line.c_str());
         continue;
@@ -326,6 +328,8 @@ private:
           "non-finite clock+wheel OpenCR feedback: %s", line.c_str());
         continue;
       }
+
+      // Parse the line: wheel_state, clock_state, wheel_l, wheel_r, clock.
       wheel_state_ = static_cast<int>(v[0]);
       clock_state_ = static_cast<int>(v[1]);
       wheel_left_feedback_ = v[2];
@@ -441,8 +445,8 @@ private:
       const double wr = v[1] + w[1];
       // over wheel limit: scale both by the same ratio to keep curvature
       const double k = std::max({1.0, std::abs(wl) / max_wheel_, std::abs(wr) / max_wheel_});
-      const double clock_pose = clock_controller_.get_clock_pose(clock_angle_);
-      const bool command_sent = clock_wheel_serial_->write_values({wl / k, wr / k, clock_pose});
+      const double clock_motor_command = clock_controller_.compute_clock_command(clock_angle_);
+      const bool command_sent = clock_wheel_serial_->write_values({wl / k, wr / k, clock_motor_command});
       if (!command_sent) {
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "clock+wheel OpenCR write failed");
       }
@@ -461,7 +465,7 @@ private:
         clock_slot_pub_->publish(slot_msg);
         std_msgs::msg::Bool reached_msg;
         reached_msg.data = clock_target_sent_ && !pending_clock_slot_ && command_sent &&
-          clock_controller_.is_complete(clock_angle_, clock_state_);
+          clock_controller_.is_target_reached(clock_angle_, clock_state_);
         clock_target_reached_pub_->publish(reached_msg);
       }
     }

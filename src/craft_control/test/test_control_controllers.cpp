@@ -95,8 +95,8 @@ TEST(ClockController, HoldsBeforeTargetAndNeverReportsUncommandedCompletion)
 {
   craft_control::ClockController controller;
   ASSERT_TRUE(controller.configure(12, kPi / 6.0, 0.0, 1.0, 0.01));
-  EXPECT_DOUBLE_EQ(controller.get_clock_pose(1.2), 1.2);
-  EXPECT_FALSE(controller.is_complete(0.0, 0));
+  EXPECT_DOUBLE_EQ(controller.compute_clock_command(1.2), 1.2);
+  EXPECT_FALSE(controller.is_target_reached(0.0, 0));
   EXPECT_EQ(controller.get_current_slot(0.0), 12);
 }
 
@@ -105,7 +105,7 @@ TEST(ClockController, TwelveToSevenUsesClockwiseShortestTurn)
   craft_control::ClockController controller;
   ASSERT_TRUE(controller.configure(12, kPi / 6.0, 0.0, 1.0, 0.01));
   ASSERT_TRUE(controller.set_target_slot(7, 0.0));
-  EXPECT_NEAR(controller.get_clock_pose(0.0), -5.0 * kPi / 6.0, 1e-12);
+  EXPECT_NEAR(controller.compute_clock_command(0.0), -5.0 * kPi / 6.0, 1e-12);
   EXPECT_EQ(controller.get_current_slot(-5.0 * kPi / 6.0), 7);
 }
 
@@ -117,10 +117,10 @@ TEST(ClockController, AllSlotPairsUseAtMostHalfATurnAndPreserveWinding)
       ASSERT_TRUE(controller.configure(12, kPi / 6.0, 0.0, 1.0, 0.01));
       const double current = 4.0 * kPi + (from % 12) * kPi / 6.0;
       ASSERT_TRUE(controller.set_target_slot(to, current));
-      const double target = controller.get_clock_pose(current);
+      const double target = controller.compute_clock_command(current);
       EXPECT_LE(std::abs(target - current), kPi + 1e-12);
       EXPECT_EQ(controller.get_current_slot(target), to);
-      EXPECT_TRUE(controller.is_complete(target, 0));
+      EXPECT_TRUE(controller.is_target_reached(target, 0));
     }
   }
 }
@@ -132,9 +132,9 @@ TEST(ClockController, SlotBoundaryCrossingUsesShortTurnAndRepeatedTargetStaysFix
   const double current = 11.0 * kPi / 6.0;
   ASSERT_TRUE(controller.set_target_slot(1, current));
   const double target = 13.0 * kPi / 6.0;
-  EXPECT_NEAR(controller.get_clock_pose(current), target, 1e-12);
+  EXPECT_NEAR(controller.compute_clock_command(current), target, 1e-12);
   ASSERT_TRUE(controller.set_target_slot(1, current - 4.0));
-  EXPECT_NEAR(controller.get_clock_pose(current), target, 1e-12);
+  EXPECT_NEAR(controller.compute_clock_command(current), target, 1e-12);
 }
 
 TEST(ClockController, CompletionRequiresTargetAngleAndIdleState)
@@ -142,11 +142,11 @@ TEST(ClockController, CompletionRequiresTargetAngleAndIdleState)
   craft_control::ClockController controller;
   ASSERT_TRUE(controller.configure(12, kPi / 6.0, 0.0, 1.0, 0.01));
   ASSERT_TRUE(controller.set_target_slot(3, 0.0));
-  EXPECT_FALSE(controller.is_complete(0.0, 0));
-  EXPECT_FALSE(controller.is_complete(kPi / 2.0, 1));
-  EXPECT_FALSE(controller.is_complete(kPi / 2.0, 2));
-  EXPECT_TRUE(controller.is_complete(kPi / 2.0 + 0.005, 0));
-  EXPECT_FALSE(controller.is_complete(kPi / 2.0 + 0.02, 0));
+  EXPECT_FALSE(controller.is_target_reached(0.0, 0));
+  EXPECT_FALSE(controller.is_target_reached(kPi / 2.0, 1));
+  EXPECT_FALSE(controller.is_target_reached(kPi / 2.0, 2));
+  EXPECT_TRUE(controller.is_target_reached(kPi / 2.0 + 0.005, 0));
+  EXPECT_FALSE(controller.is_target_reached(kPi / 2.0 + 0.02, 0));
   EXPECT_EQ(controller.get_current_slot(kPi / 12.0), 0);
   EXPECT_EQ(controller.get_current_slot(kPi / 2.0 + 0.005), 3);
 }
@@ -173,10 +173,10 @@ TEST(ClockController, UsesConfiguredSlotGeometryZeroAndDirection)
   EXPECT_EQ(controller.get_current_slot(0.3), 8);
   ASSERT_TRUE(controller.set_target_slot(7, 0.3));
   const double target = 0.3 + kPi / 2.0;
-  EXPECT_NEAR(controller.get_clock_pose(0.3), target, 1e-12);
+  EXPECT_NEAR(controller.compute_clock_command(0.3), target, 1e-12);
   EXPECT_EQ(controller.get_current_slot(target), 7);
-  EXPECT_TRUE(controller.is_complete(target + 0.015, 0));
-  EXPECT_FALSE(controller.is_complete(target + 0.025, 0));
+  EXPECT_TRUE(controller.is_target_reached(target + 0.015, 0));
+  EXPECT_FALSE(controller.is_target_reached(target + 0.025, 0));
   EXPECT_FALSE(controller.set_target_slot(9, 0.3));
 }
 
