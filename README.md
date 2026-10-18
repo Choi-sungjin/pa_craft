@@ -56,17 +56,20 @@ pa_craft/
     │       ├── obstacle_detector.cpp
     │       └── state_estimator.cpp
     ├── craft_planning/
+    │   ├── CMakeLists.txt
     │   ├── package.xml
-    │   ├── setup.cfg
-    │   ├── setup.py
-    │   ├── craft_planning/
-    │   │   ├── __init__.py
-    │   │   ├── path_planner.py
+    │   ├── config/
+    │   │   └── planning.yaml
+    │   ├── scripts/
     │   │   └── planning_master.py
-    │   ├── maps/
-    │   │   └── .gitkeep
-    │   └── resource/
-    │       └── craft_planning
+    │   ├── src/
+    │   │   ├── __init__.py
+    │   │   ├── kant_astar_arc.py
+    │   │   └── path_planner.py
+    │   ├── maps/maze.stl          # 기본 경로 계획 맵 (Gazebo 월드 좌표)
+    │   ├── maps/kant/             # 원본 예제 맵
+    │   ├── test/
+    │   └── third_party/           # 원본 저장소 및 커밋 기록
     └── craft_sensors/
         ├── CMakeLists.txt
         ├── package.xml

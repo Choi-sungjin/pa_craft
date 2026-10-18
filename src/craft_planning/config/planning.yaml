@@ -1,0 +1,27 @@
+planning_master:
+  ros__parameters:
+    # Gazebo binary .stl in metres, Z-up; relative paths resolve against the package share.
+    # Required: the planning map is fixed; SLAM only localizes, /map is not subscribed.
+    map_file: maps/maze.stl
+    map_frame: map
+    stl_slice_heights: [0.10, 0.20, 0.30]  # [m] union of horizontal wall intersections
+    occupancy_threshold: 65
+    # KANT supports cardinal goal headings and an approach straight; requires STOP_TURN/ALIGN FSM.
+    goal_heading_required: false
+    path_planner:
+      block_size: 0.05  # [m] supplied ZIP default; legacy map20 text examples require 0.25
+      res: 0.05  # [m] STL/block-map raster resolution; OccupancyGrid/YAML retain their resolution
+      r_robot: 0.21  # [m] circumscribed radius, including the carried load; measure on hardware
+      margin: 0.03  # [m] additional obstacle clearance
+      lam: 0.60  # [m equivalent] 90-degree turn cost
+      w_prox: 1.0
+      prox_band: 0.15  # [m]
+      r_min: 0.08  # [m] smaller corners require STOP_TURN
+      r_hi_global: 0.40  # [m]
+      r_tol: 0.01  # [m]
+      arc_sample: 0.02  # [m]
+      v_ref: 0.26  # [m/s] planning speed limit, not a motor command
+      w_max: 1.82  # [rad/s]
+      a_lat_max: 0.50  # [m/s^2]
+      approach_len: 0.30  # [m]
+      a_lon_max: 0.50  # [m/s^2] time-cost estimate only; motor profiles remain firmware-owned
