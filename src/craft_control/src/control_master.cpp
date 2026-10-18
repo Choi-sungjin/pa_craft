@@ -2,16 +2,16 @@
 // sub: /planning/target_path, /planning/odom, /planning/target_arm_joints
 //      /planning/target_v (Float64, m/s), /planning/target_clock_slot (Int32, 1..12)
 //      target_arm_joints: JointState from URDF IK, positions [rad] or [m]
-// pub: /arm_state, /wheel_state, /clock_state (Int32: 0 idle, 1 using, 2 fault, every tick)
+// pub: /arm_lm_state, /wheel_state, /clock_state (Int32: 0 idle, 1 using, 2 fault, every tick)
 //      /clock_slot (Int32: 1..12, 0 between slots), /clock_target_reached (Bool)
 //      /arm_target_reached, /lm_target_reached, /gripper_target_reached, /wheel_target_reached (Bool)
 //      reached topics publish false immediately when a new target is stored
 // param: config/control.yaml (OpenCR ports, arm motor limits)
 // serial (ASCII CSV, '\n' terminated, OpenCR must stream rx on its own):
-//   arm OpenCR   tx: slide,shoulder,elbow,wrist_pitch,tool_roll,gripper
-//                rx: arm_state,slide,shoulder,elbow,wrist_pitch,tool_roll,gripper[,gripper_current_a]
+//   arm+LM OpenCR      tx: slide,shoulder,elbow,wrist_pitch,tool_roll,gripper
+//                      rx: arm_lm_state,slide,shoulder,elbow,wrist_pitch,tool_roll,gripper[,gripper_current_a]
 //   clock+wheel OpenCR tx: wheel_l,wheel_r,clock
-//                         rx: wheel_state,clock_state,wheel_l,wheel_r,clock
+//                      rx: wheel_state,clock_state,wheel_l,wheel_r,clock
 
 #include <fcntl.h>
 #include <termios.h>
@@ -214,11 +214,11 @@ public:
     }
 
     // OpenCR serial ports
-    arm_serial_ = std::make_unique<OpencrSerial>(declare_parameter<std::string>("arm_port"));
+    arm_lm_serial_ = std::make_unique<OpencrSerial>(declare_parameter<std::string>("arm_lm_port"));
     clock_wheel_serial_ = std::make_unique<OpencrSerial>(declare_parameter<std::string>("clock_wheel_port"));
 
     // ROS2 publishers and subscribers
-    arm_state_pub_ = create_publisher<std_msgs::msg::Int32>("/arm_state", 10);
+    arm_lm_state_pub_ = create_publisher<std_msgs::msg::Int32>("/arm_lm_state", 10);
     gripper_grasped_pub_ = create_publisher<std_msgs::msg::Bool>("/gripper_grasped", 10);
     wheel_state_pub_ = create_publisher<std_msgs::msg::Int32>("/wheel_state", 10);
     clock_state_pub_ = create_publisher<std_msgs::msg::Int32>("/clock_state", 10);
@@ -280,9 +280,9 @@ private:
     return value;
   }
 
-  bool read_arm_feedback()
+  bool read_arm_lm_feedback()
   {
-    const auto lines = arm_serial_->read_lines();
+    const auto lines = arm_lm_serial_->read_lines();
 
     for (auto it = lines.rbegin(); it != lines.rend(); ++it) { // reverse order: newest first
       const auto & line = *it;
@@ -291,19 +291,19 @@ private:
       // Validate the line: must be CSV, correct number of values, all finite
       if (!parse_csv(line, v) || v.size() != 8) // state + LM + four arm motors + gripper + current
       {
-        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "bad arm OpenCR line: %s", line.c_str());
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "bad arm+LM OpenCR line: %s", line.c_str());
         continue;
       }
       if (!std::all_of(v.begin(), v.end(), [](double value) {
         return std::isfinite(value);
       }))
       {
-        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "non-finite arm OpenCR feedback: %s", line.c_str());
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "non-finite arm+LM OpenCR feedback: %s", line.c_str());
         continue;
       }
 
-      // Parse the line: arm_state, slide, shoulder, elbow, wrist_pitch, tool_roll, gripper, [gripper_current_a]
-      arm_state_ = static_cast<int>(v[0]);
+      // Parse the line: arm_lm_state, slide, shoulder, elbow, wrist_pitch, tool_roll, gripper, [gripper_current_a]
+      arm_lm_state_ = static_cast<int>(v[0]);
       lm_angle_ = v[1];
       arm_joints_[0] = v[2];  // shoulder
       arm_joints_[1] = v[3];  // elbow
@@ -312,7 +312,7 @@ private:
       gripper_angle_ = v[6];
       gripper_current_a_ = v[7];
 
-      have_arm_feedback_ = true; // 정상 arm 피드백을 한 번이라도 받은 적이 있는가
+      have_arm_lm_feedback_ = true; // 정상 arm+LM 피드백을 한 번이라도 받은 적이 있는가
       return true;
     }
     return false;
@@ -593,7 +593,7 @@ private:
       pending_odom_.reset();
     }
 
-    const bool arm_feedback_updated = read_arm_feedback();
+    const bool arm_lm_feedback_updated = read_arm_lm_feedback();
     const bool clock_wheel_feedback_updated = read_clock_wheel_feedback();
     // Validate clock slot, then store it once fresh feedback fixes the shortest turn.
     if (clock_wheel_feedback_updated && pending_clock_slot_) {
@@ -604,8 +604,8 @@ private:
       }
       pending_clock_slot_.reset();
     }
-    if (have_arm_feedback_) {
-      if (arm_feedback_updated) {
+    if (have_arm_lm_feedback_) {
+      if (arm_lm_feedback_updated) {
         gripper_controller_.update_current_feedback(gripper_current_a_, dt);
         std_msgs::msg::Bool grasped_msg;
         grasped_msg.data = gripper_controller_.is_grasped();
@@ -616,20 +616,20 @@ private:
       const double lm_motor_command = lm_controller_.compute_command(lm_angle_);
       const double gripper_motor_command = gripper_controller_.compute_command(gripper_angle_);
       // Shared OpenCR transport only: independent controllers, fixed hardware channel order.
-      if (!arm_serial_->write_values({
+      if (!arm_lm_serial_->write_values({
           lm_motor_command, arm_motor_commands[0], arm_motor_commands[1],
           arm_motor_commands[2], arm_motor_commands[3], gripper_motor_command}))
       {
-        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "arm OpenCR write failed");
-      } else if (arm_feedback_updated) {
+        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "arm+LM OpenCR write failed");
+      } else if (arm_lm_feedback_updated) {
         // Fresh feedback against the targets just sent; planning sequences the axes.
         publish_bool(arm_target_reached_pub_, arm_controller_.is_target_reached(arm_joints_));
         publish_bool(lm_target_reached_pub_, lm_controller_.is_target_reached(lm_angle_));
         publish_bool(gripper_target_reached_pub_, gripper_controller_.is_target_reached(gripper_angle_));
       }
       std_msgs::msg::Int32 msg;
-      msg.data = arm_state_;
-      arm_state_pub_->publish(msg);
+      msg.data = arm_lm_state_;
+      arm_lm_state_pub_->publish(msg);
     }
 
     if (have_clock_wheel_feedback_) {
@@ -691,7 +691,7 @@ private:
   craft_control::GripperController gripper_controller_;
   craft_control::ClockController clock_controller_;
 
-  std::unique_ptr<OpencrSerial> arm_serial_;
+  std::unique_ptr<OpencrSerial> arm_lm_serial_;
   std::unique_ptr<OpencrSerial> clock_wheel_serial_;
   craft_control::ArmJoints arm_joints_{};
   bool arm_ik_mapping_confirmed_ = false;
@@ -701,8 +701,8 @@ private:
   double gripper_angle_ = 0.0;
   bool gripper_mapping_confirmed_ = false;
   double gripper_current_a_ = 0.0;
-  int arm_state_ = 0;
-  bool have_arm_feedback_ = false;
+  int arm_lm_state_ = 0;
+  bool have_arm_lm_feedback_ = false;
   double wheel_left_feedback_ = 0.0;
   double wheel_right_feedback_ = 0.0;
   double clock_angle_ = 0.0;
@@ -713,7 +713,7 @@ private:
   int clock_slot_count_ = 0;
   bool clock_target_sent_ = false;
 
-  rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr arm_state_pub_;
+  rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr arm_lm_state_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr gripper_grasped_pub_;
   rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr wheel_state_pub_;
   rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr clock_state_pub_;

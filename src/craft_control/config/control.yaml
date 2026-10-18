@@ -6,7 +6,7 @@
 control_master:
   ros__parameters:
     # TODO: update port names
-    arm_port: /dev/ttyACM0    # LM + four rotational arm motors + gripper OpenCR
+    arm_lm_port: /dev/ttyACM0    # LM + four rotational arm motors + gripper OpenCR
     clock_wheel_port: /dev/ttyACM1  # clock + wheel x2 OpenCR
 
     # TurtleBot3 Waffle Pi drive parameters.
@@ -65,7 +65,7 @@ control_master:
     gripper_close_angle: 0.0
     gripper_mapping_confirmed: false
     gripper_angle_tolerance: 0.05  # [motor rad] open/close arrival; tune on hardware
-    # TODO: append gripper_current_a [A] to arm OpenCR feedback and calibrate these thresholds.
+    # TODO: append gripper_current_a [A] to arm+LM OpenCR feedback and calibrate these thresholds.
     # All-zero values disable current-based grasp estimation.
     grasp_current_threshold_a: 0.0
     grasp_current_debounce: 0.0
