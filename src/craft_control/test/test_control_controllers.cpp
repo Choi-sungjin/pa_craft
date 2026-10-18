@@ -6,6 +6,7 @@
 #include "craft_control/arm_controller.hpp"
 #include "craft_control/clock_controller.hpp"
 #include "craft_control/lateral_controller.hpp"
+#include "craft_control/lm_controller.hpp"
 #include "craft_control/longitudinal_controller.hpp"
 
 namespace
@@ -51,22 +52,22 @@ TEST(ArmController, ValidationDoesNotStoreOrChangeTargets)
 {
   craft_control::ArmController controller;
   const craft_control::ArmIkJointNames names = {
-    "slide_joint", "shoulder_joint", "elbow_joint", "wrist_pitch_joint", "tool_roll_joint"};
+    "shoulder_joint", "elbow_joint", "wrist_pitch_joint", "tool_roll_joint"};
   const std::vector<std::string> joint_names(names.begin(), names.end());
-  const std::vector<double> positions = {0.1, 0.2, 0.3, 0.4, 0.5};
+  const std::vector<double> positions = {0.1, 0.2, 0.3, 0.4};
   EXPECT_FALSE(controller.is_valid_target(joint_names, positions));
-  ASSERT_TRUE(controller.set_angle_limits({-10, -10, -10, -10, -10}, {10, 10, 10, 10, 10}));
+  ASSERT_TRUE(controller.set_angle_limits({-10, -10, -10, -10}, {10, 10, 10, 10}));
   ASSERT_TRUE(controller.set_actuator_mapping(
-    names, {1, 1, 1, 1, 1}, {0, 0, 0, 0, 0}, "slide_joint", 0.1, 1.0));
+    names, {1, 1, 1, 1}, {0, 0, 0, 0}));
 
   const craft_control::ArmJoints feedback{};
   const auto hold = controller.compute_arm_command(feedback);
   ASSERT_TRUE(controller.is_valid_target(joint_names, positions));
   EXPECT_EQ(controller.compute_arm_command(feedback), hold);
 
-  controller.set_target_arm_pose({0.1, 0.2, 0.3, 0.4, 0.5});
+  controller.set_target_arm_pose({0.1, 0.2, 0.3, 0.4});
   const auto command = controller.compute_arm_command(feedback);
-  EXPECT_NEAR(command[0], 1.0, 1e-12);  // LM conversion is performed when computing commands.
+  EXPECT_DOUBLE_EQ(command[0], 0.1);  // Rotational arm positions need no LM calibration.
   EXPECT_DOUBLE_EQ(command[1], 0.2);
   EXPECT_FALSE(controller.is_valid_target(joint_names, {0.1}));
   EXPECT_EQ(controller.compute_arm_command(feedback), command);
@@ -78,17 +79,67 @@ TEST(ArmController, RejectsWrongNamesAndNonFinitePositions)
 {
   craft_control::ArmController controller;
   const craft_control::ArmIkJointNames names = {
-    "slide_joint", "shoulder_joint", "elbow_joint", "wrist_pitch_joint", "tool_roll_joint"};
+    "shoulder_joint", "elbow_joint", "wrist_pitch_joint", "tool_roll_joint"};
   ASSERT_TRUE(controller.set_actuator_mapping(
-    names, {1, 1, 1, 1, 1}, {0, 0, 0, 0, 0}, "slide_joint", 0.1, 1.0));
+    names, {1, 1, 1, 1}, {0, 0, 0, 0}));
   std::vector<std::string> joint_names(names.begin(), names.end());
-  std::vector<double> positions(5, 0.0);
+  std::vector<double> positions(4, 0.0);
   ASSERT_TRUE(controller.is_valid_target(joint_names, positions));
   joint_names[0] = "wrong_joint";
   EXPECT_FALSE(controller.is_valid_target(joint_names, positions));
   joint_names[0] = names[0];
   positions[2] = std::numeric_limits<double>::quiet_NaN();
   EXPECT_FALSE(controller.is_valid_target(joint_names, positions));
+}
+
+TEST(ArmController, AppliesOnlyRotationalMappingAndLimits)
+{
+  craft_control::ArmController controller;
+  ASSERT_TRUE(controller.set_angle_limits({-1, -1, -1, -1}, {1, 1, 1, 1}));
+  ASSERT_TRUE(controller.set_actuator_mapping(
+    {"shoulder_joint", "elbow_joint", "wrist_pitch_joint", "tool_roll_joint"},
+    {-1, 1, 1, 1}, {0.1, 0, 0, 0}));
+  controller.set_target_arm_pose({0.2, 0.3, 2.0, -2.0});
+  const auto command = controller.compute_arm_command({0, 0, 0, 0});
+  EXPECT_NEAR(command[0], -0.1, 1e-12);
+  EXPECT_DOUBLE_EQ(command[1], 0.3);
+  EXPECT_DOUBLE_EQ(command[2], 1.0);
+  EXPECT_DOUBLE_EQ(command[3], -1.0);
+}
+
+TEST(LmController, ConvertsLinearDisplacementUsingItsOwnMappingAndLimits)
+{
+  craft_control::LmController controller;
+  ASSERT_TRUE(controller.configure("slide_joint", -5.0, 5.0, -1.0, 0.2, 0.01, 2.0));
+  EXPECT_DOUBLE_EQ(controller.compute_lm_command(0.4), 0.4);
+  ASSERT_TRUE(controller.is_valid_target("slide_joint", 0.01));
+  controller.set_target_position(0.01);
+  EXPECT_NEAR(controller.compute_lm_command(0.4), -1.8, 1e-12);
+  controller.set_target_position(1.0);
+  EXPECT_DOUBLE_EQ(controller.compute_lm_command(0.4), -5.0);
+  controller.clear_target();
+  EXPECT_DOUBLE_EQ(controller.compute_lm_command(0.4), 0.4);
+}
+
+TEST(LmController, PlaceholderCalibrationHoldsAndRejectsTargets)
+{
+  craft_control::LmController controller;
+  ASSERT_TRUE(controller.configure("slide_joint", -1.0, 1.0, 1.0, 0.0, 0.0, 0.0));
+  EXPECT_FALSE(controller.is_valid_target("slide_joint", 0.1));
+  EXPECT_DOUBLE_EQ(controller.compute_lm_command(0.3), 0.3);
+}
+
+TEST(LmController, RejectsWrongNamesInvalidCalibrationAndNonFiniteTargets)
+{
+  craft_control::LmController controller;
+  EXPECT_FALSE(controller.configure("slide_joint", -1, 1, 0, 0, 0.01, 1));
+  EXPECT_FALSE(controller.configure("slide_joint", 1, -1, 1, 0, 0.01, 1));
+  EXPECT_FALSE(controller.configure("slide_joint", -1, 1, 1, 0, 0, 1));
+  EXPECT_FALSE(controller.configure("slide_joint", -1, 1, 1, 0, -0.01, 1));
+  ASSERT_TRUE(controller.configure("slide_joint", -1, 1, 1, 0, 0.01, 1));
+  EXPECT_FALSE(controller.is_valid_target("shoulder_joint", 0.1));
+  EXPECT_FALSE(controller.is_valid_target("slide_joint", std::numeric_limits<double>::quiet_NaN()));
+  EXPECT_FALSE(controller.is_valid_target("slide_joint", std::numeric_limits<double>::infinity()));
 }
 
 TEST(ClockController, HoldsBeforeTargetAndNeverReportsUncommandedCompletion)

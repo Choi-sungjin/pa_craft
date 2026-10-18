@@ -6,7 +6,7 @@
 control_master:
   ros__parameters:
     # TODO: update port names
-    arm_port: /dev/ttyACM0    # arm x5 + LM guide OpenCR
+    arm_port: /dev/ttyACM0    # LM + four rotational arm motors + gripper OpenCR
     clock_wheel_port: /dev/ttyACM1  # clock + wheel x2 OpenCR
 
     # TurtleBot3 Waffle Pi drive parameters.
@@ -31,18 +31,25 @@ control_master:
     clock_direction: 1.0  # +1: CCW motor rotation increases slot numbers; -1: reverse
     clock_angle_tolerance: 0.017453292519943295  # [rad] 1 degree; tune alignment tolerance
 
-    # OpenCR frame follows v75 IK output order, then gripper; every value is a motor angle [rad].
+    # Rotational arm motors only: shoulder, elbow, wrist_pitch, tool_roll [motor rad].
     # TODO: update the firmware receiver and replace these placeholder limits with measured limits.
-    arm_min_angle: [0.0, -3.14, -1.57, -1.57, -1.57]
-    arm_max_angle: [0.3, 3.14, 1.57, 1.57, 1.57]
+    arm_min_angle: [-3.14, -1.57, -1.57, -1.57]
+    arm_max_angle: [3.14, 1.57, 1.57, 1.57]
 
-    # Must match the /ik_solution joint order exactly.
-    arm_ik_joint_names: [slide_joint, shoulder_joint, elbow_joint, wrist_pitch_joint, tool_roll_joint]
+    # Rotational part of /ik_solution; ControlMaster routes slide_joint to LmController.
+    arm_ik_joint_names: [shoulder_joint, elbow_joint, wrist_pitch_joint, tool_roll_joint]
     arm_ik_mapping_confirmed: false
     # TODO: calibrate direction and zero offset in IK output order against the URDF's q=0 pose.
-    arm_joint_directions: [1.0, 1.0, 1.0, 1.0, 1.0]
-    arm_joint_offsets: [0.0, 0.0, 0.0, 0.0, 0.0]
+    arm_joint_directions: [1.0, 1.0, 1.0, 1.0]
+    arm_joint_offsets: [0.0, 0.0, 0.0, 0.0]
+
+    # Independent LM controller: target displacement [m] -> motor angle [rad].
     lm_linear_joint_name: slide_joint
+    lm_mapping_confirmed: false
+    lm_min_angle: 0.0  # [motor rad] preserved from the former first arm channel
+    lm_max_angle: 0.3  # [motor rad] TODO: measure actual motor travel limits
+    lm_motor_direction: 1.0
+    lm_motor_offset: 0.0  # [motor rad]
     # TODO: measure pulley radius [m] and motor-radians per pulley-radian ratio.
     lm_pulley_radius: 0.0
     lm_gear_ratio: 0.0

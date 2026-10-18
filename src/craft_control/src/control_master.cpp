@@ -38,10 +38,10 @@
 #include "craft_control/clock_controller.hpp"
 #include "craft_control/gripper_controller.hpp"
 #include "craft_control/lateral_controller.hpp"
+#include "craft_control/lm_controller.hpp"
 #include "craft_control/longitudinal_controller.hpp"
 
 constexpr double kDt = 0.02;  // control period [s], TODO: check computing time and OpenCR serial latency
-constexpr std::size_t kGripperMotorChannel = craft_control::kArmIkJoints;
 
 class OpencrSerial
 {
@@ -126,11 +126,16 @@ public:
     const auto arm_max_angle = load_array_param<craft_control::kArmIkJoints>("arm_max_angle");
     const auto arm_ik_joint_names = declare_parameter<std::vector<std::string>>(
       "arm_ik_joint_names", std::vector<std::string>{
-        "slide_joint", "shoulder_joint", "elbow_joint", "wrist_pitch_joint", "tool_roll_joint"});
+        "shoulder_joint", "elbow_joint", "wrist_pitch_joint", "tool_roll_joint"});
     const auto arm_joint_directions = load_array_param<craft_control::kArmIkJoints>("arm_joint_directions");
     const auto arm_joint_offsets = load_array_param<craft_control::kArmIkJoints>("arm_joint_offsets");
     arm_ik_mapping_confirmed_ = declare_parameter("arm_ik_mapping_confirmed", false);
-    const auto lm_linear_joint_name = declare_parameter<std::string>("lm_linear_joint_name", "slide_joint");
+    lm_linear_joint_name_ = declare_parameter<std::string>("lm_linear_joint_name", "slide_joint");
+    lm_mapping_confirmed_ = declare_parameter("lm_mapping_confirmed", false);
+    const double lm_min_angle = declare_parameter<double>("lm_min_angle");
+    const double lm_max_angle = declare_parameter<double>("lm_max_angle");
+    const double lm_motor_direction = declare_parameter<double>("lm_motor_direction");
+    const double lm_motor_offset = declare_parameter<double>("lm_motor_offset");
     const double lm_pulley_radius = declare_parameter("lm_pulley_radius", 0.0);
     const double lm_gear_ratio = declare_parameter("lm_gear_ratio", 0.0);
     const double gripper_min_angle = declare_parameter("gripper_min_angle", 0.0);
@@ -144,7 +149,7 @@ public:
     // Validate parameters: arm, gripper, lm guide
     if (arm_ik_joint_names.size() != craft_control::kArmIkJoints)
     {
-      throw std::runtime_error("arm_ik_joint_names needs 5 entries");
+      throw std::runtime_error("arm_ik_joint_names needs 4 rotational joint entries");
     }
     if (!arm_controller_.set_angle_limits(arm_min_angle, arm_max_angle)) {
       throw std::runtime_error("invalid arm angle limits in config/control.yaml");
@@ -153,10 +158,16 @@ public:
     craft_control::ArmIkJointNames ik_joint_name_array;
     std::copy(arm_ik_joint_names.begin(), arm_ik_joint_names.end(), ik_joint_name_array.begin());
     if (!arm_controller_.set_actuator_mapping(
-      ik_joint_name_array, arm_joint_directions, arm_joint_offsets,
-      lm_linear_joint_name, lm_pulley_radius, lm_gear_ratio))
+      ik_joint_name_array, arm_joint_directions, arm_joint_offsets))
     {
       throw std::runtime_error("invalid arm IK joint or motor mapping in config/control.yaml");
+    }
+    if (std::find(arm_ik_joint_names.begin(), arm_ik_joint_names.end(), lm_linear_joint_name_) !=
+      arm_ik_joint_names.end() || !lm_controller_.configure(
+        lm_linear_joint_name_, lm_min_angle, lm_max_angle, lm_motor_direction, lm_motor_offset,
+        lm_pulley_radius, lm_gear_ratio))
+    {
+      throw std::runtime_error("invalid LM limits, mapping or calibration in config/control.yaml");
     }
     if (!gripper_controller_.configure(
       gripper_min_angle, gripper_max_angle,
@@ -165,7 +176,10 @@ public:
       throw std::runtime_error("invalid gripper angle limits or open/close targets");
     }
     if (!arm_ik_mapping_confirmed_) {
-      RCLCPP_WARN(get_logger(), "arm IK-to-motor mapping is unconfirmed; IK targets will be ignored");
+      RCLCPP_WARN(get_logger(), "arm IK-to-motor mapping is unconfirmed; rotational arm targets will be ignored");
+    }
+    if (!lm_mapping_confirmed_) {
+      RCLCPP_WARN(get_logger(), "LM mapping is unconfirmed; linear targets will be ignored");
     }
     if (!gripper_mapping_confirmed_) {
       RCLCPP_WARN(get_logger(), "gripper mapping is unconfirmed; gripper commands will be ignored");
@@ -225,13 +239,13 @@ public:
       });
     wheel_target_sub_ = create_subscription<std_msgs::msg::Float64>(
       "/planning/target_v", 10,
-      [this](const std_msgs::msg::Float64 & msg) {update_wheel_target(msg);});
+      [this](const std_msgs::msg::Float64 & msg) {pending_wheel_target_velocity_ = msg.data;});
     clock_target_sub_ = create_subscription<std_msgs::msg::Int32>(
       "/planning/target_clock_slot", 10,
       [this](const std_msgs::msg::Int32 & msg) {update_clock_target(msg);});
     arm_target_sub_ = create_subscription<sensor_msgs::msg::JointState>(
       "/planning/target_arm_joints", 10,
-      [this](const sensor_msgs::msg::JointState & msg) {update_arm_target(msg);});
+      [this](const sensor_msgs::msg::JointState & msg) {pending_manipulator_target_ = msg;});
     gripper_target_sub_ = create_subscription<std_msgs::msg::Bool>(
       "/planning/gripper_command", 10, [this](const std_msgs::msg::Bool & msg) {
         if (!gripper_mapping_confirmed_) {
@@ -277,7 +291,7 @@ private:
       std::vector<double> v;
 
       // Validate the line: must be CSV, correct number of values, all finite
-      if (!parse_csv(line, v) || v.size() != 2 + craft_control::kArmMotors) // 2: arm_state + gripper_current_a
+      if (!parse_csv(line, v) || v.size() != 8) // state + LM + four arm motors + gripper + current
       {
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "bad arm OpenCR line: %s", line.c_str());
         continue;
@@ -292,12 +306,12 @@ private:
 
       // Parse the line: arm_state, slide, shoulder, elbow, wrist_pitch, tool_roll, gripper, [gripper_current_a]
       arm_state_ = static_cast<int>(v[0]);
-      arm_joints_[0] = v[1];  // slide
-      arm_joints_[1] = v[2];  // shoulder
-      arm_joints_[2] = v[3];  // elbow
-      arm_joints_[3] = v[4];  // wrist pitch
-      arm_joints_[4] = v[5];  // tool roll
-      arm_joints_[5] = v[6];  // gripper
+      lm_angle_ = v[1];
+      arm_joints_[0] = v[2];  // shoulder
+      arm_joints_[1] = v[3];  // elbow
+      arm_joints_[2] = v[4];  // wrist pitch
+      arm_joints_[3] = v[5];  // tool roll
+      gripper_angle_ = v[6];
       gripper_current_a_ = v[7];
 
       have_arm_feedback_ = true; // 정상 arm 피드백을 한 번이라도 받은 적이 있는가
@@ -342,38 +356,64 @@ private:
     return false;
   }
 
-  void update_arm_target(const sensor_msgs::msg::JointState & msg)
+  bool validate_arm_target_pose(const sensor_msgs::msg::JointState & msg)
   {
     // Validate the mapping and incoming joint target.
     if (!arm_ik_mapping_confirmed_) {
-      return;
+      return false;
     }
     if (msg.name.empty() || msg.name.size() != msg.position.size()) {
       RCLCPP_WARN(get_logger(), "ignoring invalid arm IK JointState");
-      return;
+      return false;
     }
     if (!arm_controller_.is_valid_target(msg.name, msg.position)) {
-      arm_controller_.clear_target();
-      RCLCPP_WARN(get_logger(), "ignoring arm IK solution: joint mapping or LM calibration is incomplete");
-      return;
+      RCLCPP_WARN(get_logger(), "ignoring invalid rotational arm joint target or incomplete mapping");
+      return false;
     }
+    return true;
+  }
 
+  void set_arm_target_pose(const sensor_msgs::msg::JointState & msg)
+  {
     // Store the validated target; motor conversion and transmission happen in control_loop().
     craft_control::ArmIkJointValues target;
     std::copy(msg.position.begin(), msg.position.end(), target.begin());
     arm_controller_.set_target_arm_pose(target);
   }
 
-  void update_wheel_target(const std_msgs::msg::Float64 & msg)
+  bool validate_lm_target_pose(const std::string & joint_name, double position)
+  {
+    // Validate only the LM target; its calibration does not gate the rotational arm.
+    if (!lm_mapping_confirmed_) {
+      return false;
+    }
+    if (!lm_controller_.is_valid_target(joint_name, position)) {
+      RCLCPP_WARN(get_logger(), "ignoring invalid LM target or incomplete LM calibration");
+      return false;
+    }
+    return true;
+  }
+
+  void set_lm_target_pose(double position)
+  {
+    // Store the validated linear target; motor-angle conversion happens in control_loop().
+    lm_controller_.set_target_position(position);
+  }
+
+  bool validate_wheel_target_velocity(double velocity)
   {
     // Validate the incoming wheel target velocity.
-    if (!std::isfinite(msg.data)) {
+    if (!std::isfinite(velocity)) {
       RCLCPP_WARN(get_logger(), "ignoring non-finite wheel target velocity");
-      return;
+      return false;
     }
+    return true;
+  }
 
+  void set_wheel_target_velocity(double velocity)
+  {
     // Store the validated target; wheel-speed conversion happens in control_loop().
-    wheel_target_v_ = msg.data;
+    wheel_target_v_ = velocity;
   }
 
   void update_clock_target(const std_msgs::msg::Int32 & msg)
@@ -401,6 +441,44 @@ private:
       return;
     }
 
+    // Planning callbacks keep only the newest message; validate and store targets here.
+    if (pending_manipulator_target_) {
+      const auto & msg = *pending_manipulator_target_;
+      // Existing planning JointState: LM [m], then four rotational joints [rad].
+      if (msg.name.size() == 1 + craft_control::kArmIkJoints &&
+        msg.name.size() == msg.position.size() && msg.name[0] == lm_linear_joint_name_)
+      {
+        sensor_msgs::msg::JointState arm_target;
+        arm_target.name.assign(msg.name.begin() + 1, msg.name.end());
+        arm_target.position.assign(msg.position.begin() + 1, msg.position.end());
+
+        // Validate arm target pose, then store it.
+        if (validate_arm_target_pose(arm_target)) {
+          set_arm_target_pose(arm_target);
+        } else if (arm_ik_mapping_confirmed_) {
+          arm_controller_.clear_target();
+        }
+
+        // Validate LM target pose, then store it independently.
+        if (validate_lm_target_pose(msg.name[0], msg.position[0])) {
+          set_lm_target_pose(msg.position[0]);
+        } else if (lm_mapping_confirmed_) {
+          lm_controller_.clear_target();
+        }
+      } else {
+        RCLCPP_WARN(get_logger(), "ignoring invalid manipulator JointState: expected LM then four arm joints");
+      }
+      pending_manipulator_target_.reset();
+    }
+
+    // Validate wheel target velocity, then store it. Invalid input retains the previous target.
+    if (pending_wheel_target_velocity_) {
+      if (validate_wheel_target_velocity(*pending_wheel_target_velocity_)) {
+        set_wheel_target_velocity(*pending_wheel_target_velocity_);
+      }
+      pending_wheel_target_velocity_.reset();
+    }
+
     const bool arm_feedback_updated = read_arm_feedback();
     const bool clock_wheel_feedback_updated = read_clock_wheel_feedback();
     if (clock_wheel_feedback_updated && pending_clock_slot_) {
@@ -417,12 +495,13 @@ private:
       }
 
       const auto arm_motor_commands = arm_controller_.compute_arm_command(arm_joints_);
-      const double gripper_motor_command = gripper_controller_.compute_gripper_command(
-        arm_joints_[kGripperMotorChannel]);
-      craft_control::ArmJoints opencr_commands{};
-      std::copy(arm_motor_commands.begin(), arm_motor_commands.end(), opencr_commands.begin());
-      opencr_commands[kGripperMotorChannel] = gripper_motor_command;
-      if (!arm_serial_->write_values({opencr_commands.begin(), opencr_commands.end()})) {
+      const double lm_motor_command = lm_controller_.compute_lm_command(lm_angle_);
+      const double gripper_motor_command = gripper_controller_.compute_gripper_command(gripper_angle_);
+      // Shared OpenCR transport only: independent controllers, fixed hardware channel order.
+      if (!arm_serial_->write_values({
+          lm_motor_command, arm_motor_commands[0], arm_motor_commands[1],
+          arm_motor_commands[2], arm_motor_commands[3], gripper_motor_command}))
+      {
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "arm OpenCR write failed");
       }
       std_msgs::msg::Int32 msg;
@@ -476,8 +555,11 @@ private:
   double max_wheel_ = 0.0;
   double wheel_radius_ = 0.0;
   double wheel_target_v_ = 0.0;
+  std::optional<sensor_msgs::msg::JointState> pending_manipulator_target_;
+  std::optional<double> pending_wheel_target_velocity_;
   std::optional<rclcpp::Time> last_t_;
   craft_control::ArmController arm_controller_;
+  craft_control::LmController lm_controller_;
   craft_control::GripperController gripper_controller_;
   craft_control::ClockController clock_controller_;
 
@@ -485,6 +567,10 @@ private:
   std::unique_ptr<OpencrSerial> clock_wheel_serial_;
   craft_control::ArmJoints arm_joints_{};
   bool arm_ik_mapping_confirmed_ = false;
+  std::string lm_linear_joint_name_;
+  bool lm_mapping_confirmed_ = false;
+  double lm_angle_ = 0.0;
+  double gripper_angle_ = 0.0;
   bool gripper_mapping_confirmed_ = false;
   double gripper_current_a_ = 0.0;
   int arm_state_ = 0;

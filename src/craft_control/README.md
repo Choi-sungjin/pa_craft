@@ -11,9 +11,47 @@ The control node consumes these planning inputs:
 
 Physical dimensions, limits, tracking tolerances, and clock geometry are defined
 in `config/control.yaml`. `ControlMaster` reads and validates the ROS parameters,
-then passes them to `ArmController`, `GripperController`, `ClockController`,
+then passes them to `ArmController`, `LmController`, `GripperController`, `ClockController`,
 `LongitudinalController`, and `LateralController`. Controllers do not read YAML
 or declare ROS parameters themselves.
+
+## Arm, LM and gripper responsibilities
+
+`ArmController` handles four rotational joints only: shoulder, elbow, wrist_pitch,
+and tool_roll. Its limits, joint names, directions and offsets each contain four
+values in YAML. `LmController` handles the slide joint independently, converting
+linear displacement in metres to motor radians:
+
+```text
+lm_motor_angle = lm_motor_offset + lm_motor_direction * lm_gear_ratio * position_m / lm_pulley_radius
+```
+
+LM motor limits and calibration use separate `lm_*` parameters, including
+`lm_mapping_confirmed`. Zero pulley radius and gear ratio disable LM targets and
+hold its measured motor angle; they do not disable the rotational arm controller.
+LM limits retain the former slide channel's values, in motor radians, pending
+hardware calibration. `GripperController` remains independent.
+
+The existing planning topic `/planning/target_arm_joints` still carries the full
+five-joint IK result: slide [m], shoulder, elbow, wrist_pitch, tool_roll [rad].
+The subscription callback keeps the newest message pending. `control_loop()`
+splits it into LM and four rotational positions and applies these stages:
+
+```text
+validate_arm_target_pose -> set_arm_target_pose
+validate_lm_target_pose -> set_lm_target_pose
+validate_wheel_target_velocity -> set_wheel_target_velocity
+```
+
+Each setter runs only if its validation succeeds. Arm and LM use independent
+confirmation flags; invalid targets clear only their own controller target.
+An invalid wheel velocity leaves the previous velocity unchanged. Pending
+messages are consumed once, rather than reapplying targets on every timer tick.
+Planning remains responsible for coordinating these independently controlled axes.
+
+Only the transport is shared. Feedback positions are stored separately as
+`lm_angle_`, four `arm_joints_`, and `gripper_angle_`; commands are assembled in
+the existing OpenCR order: slide, shoulder, elbow, wrist_pitch, tool_roll, gripper.
 
 ## Differential drive
 
