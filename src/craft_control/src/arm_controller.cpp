@@ -61,17 +61,15 @@ bool ArmController::set_actuator_mapping(
   return true;
 }
 
-bool ArmController::set_target_arm_pose(
-  const std::vector<std::string> & joint_names, const std::vector<double> & joint_positions)
+void ArmController::set_target_arm_pose(const ArmIkJointValues & joint_positions)
+{
+  target_joint_positions_ = joint_positions;
+  has_target_ = true;
+}
+
+void ArmController::clear_target()
 {
   has_target_ = false;
-  if (!is_valid_target(joint_names, joint_positions)) {
-    return false;
-  }
-
-  std::copy(joint_positions.begin(), joint_positions.end(), target_joint_positions_.begin());
-  has_target_ = true;
-  return true;
 }
 
 bool ArmController::is_valid_target(

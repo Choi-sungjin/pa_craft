@@ -13,8 +13,10 @@ control_master:
     wheel_radius: 0.033  # [m] nominal Waffle Pi wheel radius
     wheel_separation: 0.288  # [m] left/right wheel center-to-center distance
     max_v: 0.26           # [m/s] nominal Waffle Pi maximum linear speed
-    # TODO: confirm acceleration and wheel angular-speed limits for this robot's motors/gearing.
-    max_acc_v: 0.5        # [m/s^2] project starting value
+    # Host limits target speed. OpenCR firmware must configure DYNAMIXEL Profile Acceleration(108)
+    # and owns the motor velocity PID, feedforward, acceleration profile, and motor-level tracking.
+    # Profile Acceleration must be nonzero; zero makes target-velocity changes effectively immediate.
+    # TODO: confirm the wheel angular-speed limit for this robot's motors/gearing.
     max_wheel: 7.8        # [rad/s] project starting value at the wheel
     # Pure Pursuit tuning: path and odometry must use the same frame, at the axle center.
     lookahead_distance: 0.3  # [m] starting value; tune on the robot

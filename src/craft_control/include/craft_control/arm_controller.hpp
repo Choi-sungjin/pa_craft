@@ -24,18 +24,18 @@ public:
     const ArmIkJointNames & ik_joint_names,
     const ArmIkJointValues & motor_directions, const ArmIkJointValues & motor_offsets,
     const std::string & lm_linear_joint_name, double lm_pulley_radius, double lm_gear_ratio);
-  bool set_target_arm_pose(
-    const std::vector<std::string> & joint_names, const std::vector<double> & joint_positions);
+  bool is_valid_target(
+    const std::vector<std::string> & joint_names,
+    const std::vector<double> & joint_positions) const;
+  // Store positions after is_valid_target() succeeds; no validation or conversion here.
+  void set_target_arm_pose(const ArmIkJointValues & joint_positions);
+  void clear_target();
   // current_pose: six OpenCR positions; returns the five arm commands
   ArmIkJointValues compute_arm_command(const ArmJoints & current_pose) const;
   // arm_state: arm OpenCR state (0 idle, 1 using, 2 fault)
   int get_arm_status(int arm_state) const;
 
 private:
-  bool is_valid_target(
-    const std::vector<std::string> & joint_names,
-    const std::vector<double> & joint_positions) const;
-
   ArmIkJointValues min_angle_{};
   ArmIkJointValues max_angle_{};
   ArmIkJointNames ik_joint_names_{};

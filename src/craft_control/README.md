@@ -22,7 +22,7 @@ planning before publishing if necessary. Pose coordinates follow ROS convention:
 forward +x, left +y, counterclockwise positive yaw. Pose orientations in the path
 are not used; this controller tracks positions, without a final heading maneuver.
 
-The longitudinal controller limits `target_v` and its acceleration. Pure Pursuit
+The longitudinal controller limits `target_v`. Pure Pursuit
 selects a path point at least `lookahead_distance` away, starting at the nearest
 path point; it uses the last available point if the remaining path is shorter.
 With that point transformed into the chassis frame `(x, y)`:
@@ -39,11 +39,18 @@ Commands are wheel angular velocities in rad/s. Wheel centers are 0.288 m apart;
 wheel radius is 0.033 m. Tune lookahead and endpoint tolerance on the robot.
 
 Empty/invalid paths, missing/invalid odometry, differing frames, and endpoint
-arrival stop the wheels and reset the velocity ramp. The next valid path uses
+arrival stop the wheels. The next valid path uses
 the most recently received `target_v`; planning should publish zero when canceling
 a driving task. Negative target speeds pursue path points behind the chassis.
 Pure Pursuit does not generate an in-place turn at zero linear speed or when no
 point lies in the requested direction of travel.
+
+The host owns path tracking, differential-drive conversion, and `max_v` /
+`max_wheel` limits. OpenCR firmware owns DYNAMIXEL configuration and must set a
+nonzero `Profile Acceleration(108)` in Velocity Control Mode. The DYNAMIXEL then
+owns the acceleration profile, velocity PID, feedforward, and motor-level
+tracking. Keeping an additional host acceleration ramp would duplicate that
+profile and make the resulting acceleration depend on two independent layers.
 
 ## Clock storage
 
@@ -106,5 +113,5 @@ colcon test-result --verbose
 ```
 
 Tests cover clock shortest turns and alignment, completion/fault handling, wheel
-acceleration limits, straight/curved/reverse paths, coordinate transforms, goal
+speed limits, straight/curved/reverse paths, coordinate transforms, goal
 arrival, and invalid input cancellation.

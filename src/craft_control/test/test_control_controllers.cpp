@@ -3,6 +3,7 @@
 #include <utility>
 
 #include "gtest/gtest.h"
+#include "craft_control/arm_controller.hpp"
 #include "craft_control/clock_controller.hpp"
 #include "craft_control/lateral_controller.hpp"
 #include "craft_control/longitudinal_controller.hpp"
@@ -45,6 +46,50 @@ craft_control::LateralController lateral()
   return controller;
 }
 }  // namespace
+
+TEST(ArmController, ValidationDoesNotStoreOrChangeTargets)
+{
+  craft_control::ArmController controller;
+  const craft_control::ArmIkJointNames names = {
+    "slide_joint", "shoulder_joint", "elbow_joint", "wrist_pitch_joint", "tool_roll_joint"};
+  const std::vector<std::string> joint_names(names.begin(), names.end());
+  const std::vector<double> positions = {0.1, 0.2, 0.3, 0.4, 0.5};
+  EXPECT_FALSE(controller.is_valid_target(joint_names, positions));
+  ASSERT_TRUE(controller.set_angle_limits({-10, -10, -10, -10, -10}, {10, 10, 10, 10, 10}));
+  ASSERT_TRUE(controller.set_actuator_mapping(
+    names, {1, 1, 1, 1, 1}, {0, 0, 0, 0, 0}, "slide_joint", 0.1, 1.0));
+
+  const craft_control::ArmJoints feedback{};
+  const auto hold = controller.compute_arm_command(feedback);
+  ASSERT_TRUE(controller.is_valid_target(joint_names, positions));
+  EXPECT_EQ(controller.compute_arm_command(feedback), hold);
+
+  controller.set_target_arm_pose({0.1, 0.2, 0.3, 0.4, 0.5});
+  const auto command = controller.compute_arm_command(feedback);
+  EXPECT_NEAR(command[0], 1.0, 1e-12);  // LM conversion is performed when computing commands.
+  EXPECT_DOUBLE_EQ(command[1], 0.2);
+  EXPECT_FALSE(controller.is_valid_target(joint_names, {0.1}));
+  EXPECT_EQ(controller.compute_arm_command(feedback), command);
+  controller.clear_target();
+  EXPECT_EQ(controller.compute_arm_command(feedback), hold);
+}
+
+TEST(ArmController, RejectsWrongNamesAndNonFinitePositions)
+{
+  craft_control::ArmController controller;
+  const craft_control::ArmIkJointNames names = {
+    "slide_joint", "shoulder_joint", "elbow_joint", "wrist_pitch_joint", "tool_roll_joint"};
+  ASSERT_TRUE(controller.set_actuator_mapping(
+    names, {1, 1, 1, 1, 1}, {0, 0, 0, 0, 0}, "slide_joint", 0.1, 1.0));
+  std::vector<std::string> joint_names(names.begin(), names.end());
+  std::vector<double> positions(5, 0.0);
+  ASSERT_TRUE(controller.is_valid_target(joint_names, positions));
+  joint_names[0] = "wrong_joint";
+  EXPECT_FALSE(controller.is_valid_target(joint_names, positions));
+  joint_names[0] = names[0];
+  positions[2] = std::numeric_limits<double>::quiet_NaN();
+  EXPECT_FALSE(controller.is_valid_target(joint_names, positions));
+}
 
 TEST(ClockController, HoldsBeforeTargetAndNeverReportsUncommandedCompletion)
 {
@@ -148,7 +193,7 @@ TEST(ClockController, RejectsInvalidGeometry)
     12, std::numeric_limits<double>::infinity(), 0.0, 1.0, 0.01));
 }
 
-TEST(WheelControl, StraightPathKeepsWheelsEqualAndLongitudinalLimitsAcceleration)
+TEST(WheelControl, StraightPathKeepsWheelsEqualAndLongitudinalLimitsSpeed)
 {
   auto controller = lateral();
   ASSERT_TRUE(controller.set_path(path({{0, 0}, {1, 0}, {2, 0}})));
@@ -157,15 +202,13 @@ TEST(WheelControl, StraightPathKeepsWheelsEqualAndLongitudinalLimitsAcceleration
   EXPECT_DOUBLE_EQ(turn[0], 0.0);
   EXPECT_DOUBLE_EQ(turn[1], 0.0);
   craft_control::LongitudinalController longitudinal;
-  longitudinal.set_params(kRadius, 0.26, 0.5);
+  longitudinal.set_params(kRadius, 0.26);
   longitudinal.set_target_v(1.0);
-  const auto first = longitudinal.get_wheel_speed(0.02);
-  EXPECT_NEAR(first[0] * kRadius, 0.01, 1e-12);
-  EXPECT_DOUBLE_EQ(first[0], first[1]);
-  const auto limited = longitudinal.get_wheel_speed(1.0);
+  const auto limited = longitudinal.get_wheel_speed();
   EXPECT_NEAR(limited[0] * kRadius, 0.26, 1e-12);
+  EXPECT_DOUBLE_EQ(limited[0], limited[1]);
   longitudinal.stop();
-  EXPECT_DOUBLE_EQ(longitudinal.get_wheel_speed(0.02)[0], 0.0);
+  EXPECT_DOUBLE_EQ(longitudinal.get_wheel_speed()[0], 0.0);
 }
 
 TEST(WheelControl, LeftAndRightPathsProduceOppositeDifferentialSpeeds)

@@ -40,7 +40,7 @@
 #include "craft_control/lateral_controller.hpp"
 #include "craft_control/longitudinal_controller.hpp"
 
-constexpr double kDt = 0.02;  // control period [s]
+constexpr double kDt = 0.02;  // control period [s], TODO: check computing time and OpenCR serial latency
 constexpr std::size_t kGripperMotorChannel = craft_control::kArmIkJoints;
 
 class OpencrSerial
@@ -121,6 +121,7 @@ public:
   ControlMaster()
   : Node("control_master")
   {
+    // Load parameters: arm, gripper, lm guide
     const auto arm_min_angle = load_array_param<craft_control::kArmIkJoints>("arm_min_angle");
     const auto arm_max_angle = load_array_param<craft_control::kArmIkJoints>("arm_max_angle");
     const auto arm_ik_joint_names = declare_parameter<std::vector<std::string>>(
@@ -140,7 +141,7 @@ public:
     const double grasp_current_debounce = declare_parameter("grasp_current_debounce", 0.0);
     gripper_mapping_confirmed_ = declare_parameter("gripper_mapping_confirmed", false);
 
-    // Validate the dynamic vector length before copying into the fixed-size array.
+    // Validate parameters: arm, gripper, lm guide
     if (arm_ik_joint_names.size() != craft_control::kArmIkJoints)
     {
       throw std::runtime_error("arm_ik_joint_names needs 5 entries");
@@ -173,33 +174,37 @@ public:
       RCLCPP_WARN(get_logger(), "gripper current-based grasp detection is disabled until thresholds are calibrated");
     }
 
+    // Load parameters: wheel, clock
     wheel_radius_ = load_positive_param("wheel_radius");
     const auto wheel_separation = load_positive_param("wheel_separation");
     const auto max_v = load_positive_param("max_v");
-    const auto max_acc_v = load_positive_param("max_acc_v");
     max_wheel_ = load_positive_param("max_wheel");
     const auto lookahead_distance = load_positive_param("lookahead_distance");
     const auto wheel_goal_tolerance = load_positive_param("wheel_goal_tolerance");
-    longitudinal_.set_params(wheel_radius_, max_v, max_acc_v);
-    if (!lateral_.set_params(
-      wheel_radius_, wheel_separation, lookahead_distance, wheel_goal_tolerance))
-    {
-      throw std::runtime_error("invalid lateral controller parameters");
-    }
     clock_slot_count_ = declare_parameter<int>("clock_slot_count");
     const auto clock_slot_angle = load_positive_param("clock_slot_angle");
     const auto clock_zero_angle = declare_parameter<double>("clock_zero_angle");
     const auto clock_direction = declare_parameter<double>("clock_direction");
     const auto clock_angle_tolerance = load_positive_param("clock_angle_tolerance");
+
+    // Validate parameters: wheel, clock
+    longitudinal_.set_params(wheel_radius_, max_v);
+    if (!lateral_.set_params(
+      wheel_radius_, wheel_separation, lookahead_distance, wheel_goal_tolerance))
+    {
+      throw std::runtime_error("invalid lateral controller parameters");
+    }
     if (!clock_controller_.configure(
       clock_slot_count_, clock_slot_angle, clock_zero_angle, clock_direction, clock_angle_tolerance))
     {
       throw std::runtime_error("invalid clock geometry or angle tolerance in config/control.yaml");
     }
 
+    // OpenCR serial ports
     arm_serial_ = std::make_unique<OpencrSerial>(declare_parameter<std::string>("arm_port"));
     clock_wheel_serial_ = std::make_unique<OpencrSerial>(declare_parameter<std::string>("clock_wheel_port"));
 
+    // ROS2 publishers and subscribers
     arm_state_pub_ = create_publisher<std_msgs::msg::Int32>("/arm_state", 10);
     gripper_grasped_pub_ = create_publisher<std_msgs::msg::Bool>("/gripper_grasped", 10);
     wheel_state_pub_ = create_publisher<std_msgs::msg::Int32>("/wheel_state", 10);
@@ -236,6 +241,8 @@ public:
           RCLCPP_WARN(get_logger(), "gripper controller is not configured");
         }
       });
+
+    // Control loop timer
     timer_ = create_wall_timer(std::chrono::duration<double>(kDt), [this]() {control_loop();});
   }
 
@@ -264,9 +271,12 @@ private:
   bool read_arm_feedback()
   {
     const auto lines = arm_serial_->read_lines();
+
     for (auto it = lines.rbegin(); it != lines.rend(); ++it) { // reverse order: newest first
       const auto & line = *it;
       std::vector<double> v;
+
+      // Validate the line: must be CSV, correct number of values, all finite
       if (!parse_csv(line, v) || v.size() != 2 + craft_control::kArmMotors) // 2: arm_state + gripper_current_a
       {
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "bad arm OpenCR line: %s", line.c_str());
@@ -279,6 +289,8 @@ private:
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "non-finite arm OpenCR feedback: %s", line.c_str());
         continue;
       }
+
+      // Parse the line: arm_state, slide, shoulder, elbow, wrist_pitch, tool_roll, gripper, [gripper_current_a]
       arm_state_ = static_cast<int>(v[0]);
       arm_joints_[0] = v[1];  // slide
       arm_joints_[1] = v[2];  // shoulder
@@ -297,6 +309,7 @@ private:
   bool read_clock_wheel_feedback()
   {
     const auto lines = clock_wheel_serial_->read_lines();
+
     for (auto it = lines.rbegin(); it != lines.rend(); ++it) { // reverse order: newest first
       const auto & line = *it;
       std::vector<double> v;
@@ -327,6 +340,7 @@ private:
 
   void update_arm_target(const sensor_msgs::msg::JointState & msg)
   {
+    // Validate the mapping and incoming joint target.
     if (!arm_ik_mapping_confirmed_) {
       return;
     }
@@ -334,27 +348,39 @@ private:
       RCLCPP_WARN(get_logger(), "ignoring invalid arm IK JointState");
       return;
     }
-    if (!arm_controller_.set_target_arm_pose(msg.name, msg.position)) {
+    if (!arm_controller_.is_valid_target(msg.name, msg.position)) {
+      arm_controller_.clear_target();
       RCLCPP_WARN(get_logger(), "ignoring arm IK solution: joint mapping or LM calibration is incomplete");
+      return;
     }
+
+    // Store the validated target; motor conversion and transmission happen in control_loop().
+    craft_control::ArmIkJointValues target;
+    std::copy(msg.position.begin(), msg.position.end(), target.begin());
+    arm_controller_.set_target_arm_pose(target);
   }
 
   void update_wheel_target(const std_msgs::msg::Float64 & msg)
   {
+    // Validate the incoming wheel target velocity.
     if (!std::isfinite(msg.data)) {
       RCLCPP_WARN(get_logger(), "ignoring non-finite wheel target velocity");
       return;
     }
+
+    // Store the validated target; wheel-speed conversion happens in control_loop().
     wheel_target_v_ = msg.data;
   }
 
   void update_clock_target(const std_msgs::msg::Int32 & msg)
   {
+    // Validate the incoming clock target slot.
     if (msg.data < 1 || msg.data > clock_slot_count_) {
       RCLCPP_WARN(get_logger(), "ignoring clock target: slot must be 1..%d", clock_slot_count_);
       return;
     }
-    // Wait for a fresh position before choosing the nearest equivalent motor angle.
+
+    // Store the validated target; angle conversion happens after fresh feedback in control_loop().
     pending_clock_slot_ = msg.data;
     clock_target_sent_ = false;
     std_msgs::msg::Bool reached;
@@ -406,7 +432,9 @@ private:
       } else {
         longitudinal_.stop();  // no valid path/odom, or already at the path goal
       }
-      const auto v = longitudinal_.get_wheel_speed(dt);
+      // Host converts planning targets and applies safety limits only. OpenCR firmware configures
+      // DYNAMIXEL Profile Acceleration and owns velocity PID/feedforward and motor-level tracking.
+      const auto v = longitudinal_.get_wheel_speed();
       const double linear_speed = wheel_radius_ * (v[0] + v[1]) / 2.0;
       const auto w = lateral_.get_wheel_speed(linear_speed);
       const double wl = v[0] + w[0];  // [rad/s]
