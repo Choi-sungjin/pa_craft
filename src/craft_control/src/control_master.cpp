@@ -4,6 +4,8 @@
 //      target_arm_joints: JointState from URDF IK, positions [rad] or [m]
 // pub: /arm_state, /wheel_state, /clock_state (Int32: 0 idle, 1 using, 2 fault, every tick)
 //      /clock_slot (Int32: 1..12, 0 between slots), /clock_target_reached (Bool)
+//      /arm_target_reached, /lm_target_reached, /gripper_target_reached, /wheel_target_reached (Bool)
+//      reached topics publish false immediately when a new target is stored
 // param: config/control.yaml (OpenCR ports, arm motor limits)
 // serial (ASCII CSV, '\n' terminated, OpenCR must stream rx on its own):
 //   arm OpenCR   tx: slide,shoulder,elbow,wrist_pitch,tool_roll,gripper
@@ -145,33 +147,34 @@ public:
     const double grasp_current_threshold_a = declare_parameter("grasp_current_threshold_a", 0.0);
     const double grasp_current_debounce = declare_parameter("grasp_current_debounce", 0.0);
     gripper_mapping_confirmed_ = declare_parameter("gripper_mapping_confirmed", false);
+    const double arm_angle_tolerance = load_positive_param("arm_angle_tolerance");
+    const double lm_angle_tolerance = load_positive_param("lm_angle_tolerance");
+    const double gripper_angle_tolerance = load_positive_param("gripper_angle_tolerance");
 
     // Validate parameters: arm, gripper, lm guide
     if (arm_ik_joint_names.size() != craft_control::kArmIkJoints)
     {
       throw std::runtime_error("arm_ik_joint_names needs 4 rotational joint entries");
     }
-    if (!arm_controller_.set_angle_limits(arm_min_angle, arm_max_angle)) {
-      throw std::runtime_error("invalid arm angle limits in config/control.yaml");
-    }
-
     craft_control::ArmIkJointNames ik_joint_name_array;
     std::copy(arm_ik_joint_names.begin(), arm_ik_joint_names.end(), ik_joint_name_array.begin());
-    if (!arm_controller_.set_actuator_mapping(
-      ik_joint_name_array, arm_joint_directions, arm_joint_offsets))
+    if (!arm_controller_.configure(
+      arm_min_angle, arm_max_angle, ik_joint_name_array, arm_joint_directions, arm_joint_offsets,
+      arm_angle_tolerance))
     {
-      throw std::runtime_error("invalid arm IK joint or motor mapping in config/control.yaml");
+      throw std::runtime_error("invalid arm limits or IK joint/motor mapping in config/control.yaml");
     }
     if (std::find(arm_ik_joint_names.begin(), arm_ik_joint_names.end(), lm_linear_joint_name_) !=
       arm_ik_joint_names.end() || !lm_controller_.configure(
         lm_linear_joint_name_, lm_min_angle, lm_max_angle, lm_motor_direction, lm_motor_offset,
-        lm_pulley_radius, lm_gear_ratio))
+        lm_pulley_radius, lm_gear_ratio, lm_angle_tolerance))
     {
       throw std::runtime_error("invalid LM limits, mapping or calibration in config/control.yaml");
     }
     if (!gripper_controller_.configure(
       gripper_min_angle, gripper_max_angle,
-      gripper_open_angle, gripper_close_angle, grasp_current_threshold_a, grasp_current_debounce))
+      gripper_open_angle, gripper_close_angle, grasp_current_threshold_a, grasp_current_debounce,
+      gripper_angle_tolerance))
     {
       throw std::runtime_error("invalid gripper angle limits or open/close targets");
     }
@@ -202,12 +205,8 @@ public:
     const auto clock_angle_tolerance = load_positive_param("clock_angle_tolerance");
 
     // Validate parameters: wheel, clock
-    longitudinal_.set_params(wheel_radius_, max_v);
-    if (!lateral_.set_params(
-      wheel_radius_, wheel_separation, lookahead_distance, wheel_goal_tolerance))
-    {
-      throw std::runtime_error("invalid lateral controller parameters");
-    }
+    longitudinal_.configure(wheel_radius_, max_v);
+    lateral_.configure(wheel_radius_, wheel_separation, lookahead_distance, wheel_goal_tolerance);
     if (!clock_controller_.configure(
       clock_slot_count_, clock_slot_angle, clock_zero_angle, clock_direction, clock_angle_tolerance))
     {
@@ -225,36 +224,28 @@ public:
     clock_state_pub_ = create_publisher<std_msgs::msg::Int32>("/clock_state", 10);
     clock_slot_pub_ = create_publisher<std_msgs::msg::Int32>("/clock_slot", 10);
     clock_target_reached_pub_ = create_publisher<std_msgs::msg::Bool>("/clock_target_reached", 10);
+    arm_target_reached_pub_ = create_publisher<std_msgs::msg::Bool>("/arm_target_reached", 10);
+    lm_target_reached_pub_ = create_publisher<std_msgs::msg::Bool>("/lm_target_reached", 10);
+    gripper_target_reached_pub_ = create_publisher<std_msgs::msg::Bool>("/gripper_target_reached", 10);
+    wheel_target_reached_pub_ = create_publisher<std_msgs::msg::Bool>("/wheel_target_reached", 10);
     target_path_sub_ = create_subscription<nav_msgs::msg::Path>(
-      "/planning/target_path", 10, [this](const nav_msgs::msg::Path & msg) {
-        if (!lateral_.set_path(msg) && !msg.poses.empty()) {
-          RCLCPP_WARN(get_logger(), "ignoring invalid wheel path: check coordinates and frame_id");
-        }
-      });
+      "/planning/target_path", 10,
+      [this](const nav_msgs::msg::Path & msg) {pending_path_ = msg;});
     odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
-      "/planning/odom", 10, [this](const nav_msgs::msg::Odometry & msg) {
-        if (!lateral_.set_odom(msg)) {
-          RCLCPP_WARN(get_logger(), "ignoring invalid wheel odometry");
-        }
-      });
+      "/planning/odom", 10,
+      [this](const nav_msgs::msg::Odometry & msg) {pending_odom_ = msg;});
     wheel_target_sub_ = create_subscription<std_msgs::msg::Float64>(
       "/planning/target_v", 10,
       [this](const std_msgs::msg::Float64 & msg) {pending_wheel_target_velocity_ = msg.data;});
     clock_target_sub_ = create_subscription<std_msgs::msg::Int32>(
       "/planning/target_clock_slot", 10,
-      [this](const std_msgs::msg::Int32 & msg) {update_clock_target(msg);});
+      [this](const std_msgs::msg::Int32 & msg) {pending_clock_slot_ = msg.data;});
     arm_target_sub_ = create_subscription<sensor_msgs::msg::JointState>(
       "/planning/target_arm_joints", 10,
       [this](const sensor_msgs::msg::JointState & msg) {pending_manipulator_target_ = msg;});
     gripper_target_sub_ = create_subscription<std_msgs::msg::Bool>(
-      "/planning/gripper_command", 10, [this](const std_msgs::msg::Bool & msg) {
-        if (!gripper_mapping_confirmed_) {
-          return;
-        }
-        if (!gripper_controller_.set_target(msg.data)) {
-          RCLCPP_WARN(get_logger(), "gripper controller is not configured");
-        }
-      });
+      "/planning/gripper_command", 10,
+      [this](const std_msgs::msg::Bool & msg) {pending_gripper_target_ = msg.data;});
 
     // Control loop timer
     timer_ = create_wall_timer(std::chrono::duration<double>(kDt), [this]() {control_loop();});
@@ -271,6 +262,13 @@ private:
     std::array<double, N> result;
     std::copy(values.begin(), values.end(), result.begin());
     return result;
+  }
+
+  static void publish_bool(const rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr & pub, bool value)
+  {
+    std_msgs::msg::Bool msg;
+    msg.data = value;
+    pub->publish(msg);
   }
 
   double load_positive_param(const std::string & name)
@@ -356,80 +354,162 @@ private:
     return false;
   }
 
-  bool validate_arm_target_pose(const sensor_msgs::msg::JointState & msg)
+  bool validate_arm_target(const sensor_msgs::msg::JointState & msg)
   {
     // Validate the mapping and incoming joint target.
     if (!arm_ik_mapping_confirmed_) {
       return false;
     }
-    if (msg.name.empty() || msg.name.size() != msg.position.size()) {
-      RCLCPP_WARN(get_logger(), "ignoring invalid arm IK JointState");
-      return false;
-    }
     if (!arm_controller_.is_valid_target(msg.name, msg.position)) {
-      RCLCPP_WARN(get_logger(), "ignoring invalid rotational arm joint target or incomplete mapping");
+      RCLCPP_WARN(get_logger(), "invalid rotational arm joint target: holding position");
       return false;
     }
     return true;
   }
 
-  void set_arm_target_pose(const sensor_msgs::msg::JointState & msg)
+  void set_arm_target(const sensor_msgs::msg::JointState & msg)
   {
     // Store the validated target; motor conversion and transmission happen in control_loop().
     craft_control::ArmIkJointValues target;
     std::copy(msg.position.begin(), msg.position.end(), target.begin());
-    arm_controller_.set_target_arm_pose(target);
+    arm_controller_.set_target(target);
+    publish_bool(arm_target_reached_pub_, false);
   }
 
-  bool validate_lm_target_pose(const std::string & joint_name, double position)
+  void clear_arm_target()
+  {
+    // Invalid target: stop at the current position until planning sends a new target.
+    arm_controller_.clear_target();
+    publish_bool(arm_target_reached_pub_, false);
+  }
+
+  bool validate_lm_target(const std::string & joint_name, double position)
   {
     // Validate only the LM target; its calibration does not gate the rotational arm.
     if (!lm_mapping_confirmed_) {
       return false;
     }
     if (!lm_controller_.is_valid_target(joint_name, position)) {
-      RCLCPP_WARN(get_logger(), "ignoring invalid LM target or incomplete LM calibration");
+      RCLCPP_WARN(get_logger(), "invalid LM target or incomplete LM calibration: holding position");
       return false;
     }
     return true;
   }
 
-  void set_lm_target_pose(double position)
+  void set_lm_target(double position)
   {
     // Store the validated linear target; motor-angle conversion happens in control_loop().
-    lm_controller_.set_target_position(position);
+    lm_controller_.set_target(position);
+    publish_bool(lm_target_reached_pub_, false);
   }
 
-  bool validate_wheel_target_velocity(double velocity)
+  void clear_lm_target()
   {
-    // Validate the incoming wheel target velocity.
-    if (!std::isfinite(velocity)) {
-      RCLCPP_WARN(get_logger(), "ignoring non-finite wheel target velocity");
+    // Invalid target: stop at the current position until planning sends a new target.
+    lm_controller_.clear_target();
+    publish_bool(lm_target_reached_pub_, false);
+  }
+
+  bool validate_gripper_target()
+  {
+    // Open/close is always well-formed; configure() succeeded in the constructor.
+    return gripper_mapping_confirmed_;
+  }
+
+  void set_gripper_target(bool close)
+  {
+    // Store the validated target; angle selection and clamping happen in control_loop().
+    gripper_controller_.set_target(close);
+    publish_bool(gripper_target_reached_pub_, false);
+  }
+
+  bool validate_wheel_target(double velocity)
+  {
+    if (!longitudinal_.is_valid_target(velocity)) {
+      RCLCPP_WARN(get_logger(), "non-finite wheel target velocity: stopping");
       return false;
     }
     return true;
   }
 
-  void set_wheel_target_velocity(double velocity)
+  void set_wheel_target(double velocity)
   {
     // Store the validated target; wheel-speed conversion happens in control_loop().
     wheel_target_v_ = velocity;
   }
 
-  void update_clock_target(const std_msgs::msg::Int32 & msg)
+  void clear_wheel_target()
   {
-    // Validate the incoming clock target slot.
-    if (msg.data < 1 || msg.data > clock_slot_count_) {
-      RCLCPP_WARN(get_logger(), "ignoring clock target: slot must be 1..%d", clock_slot_count_);
-      return;
-    }
+    // Invalid target: stop until planning sends a new velocity.
+    wheel_target_v_ = 0.0;
+  }
 
-    // Store the validated target; angle conversion happens after fresh feedback in control_loop().
-    pending_clock_slot_ = msg.data;
+  bool validate_path_target(const nav_msgs::msg::Path & path)
+  {
+    // An empty path is planning's "no route" result: stop without a warning.
+    if (path.poses.empty()) {
+      return false;
+    }
+    if (!lateral_.is_valid_target(path)) {
+      RCLCPP_WARN(get_logger(), "invalid wheel path (coordinates or frame_id): stopping");
+      return false;
+    }
+    return true;
+  }
+
+  void set_path_target(const nav_msgs::msg::Path & path)
+  {
+    // Store the validated path. Planning republishes the same path every tick; only a changed
+    // path resets arrival.
+    lateral_.set_target(path);
+    if (path.poses != last_path_poses_) {
+      last_path_poses_ = path.poses;
+      publish_bool(wheel_target_reached_pub_, false);
+    }
+  }
+
+  void clear_path_target()
+  {
+    // Invalid or empty path: stop until planning sends a new path.
+    lateral_.clear_target();
+    if (!last_path_poses_.empty()) {
+      last_path_poses_.clear();
+      publish_bool(wheel_target_reached_pub_, false);
+    }
+  }
+
+  bool validate_odom(const nav_msgs::msg::Odometry & odom)
+  {
+    if (!lateral_.is_valid_odom(odom)) {
+      RCLCPP_WARN(get_logger(), "invalid wheel odometry: stopping");
+      return false;
+    }
+    return true;
+  }
+
+  bool validate_clock_target(int slot)
+  {
+    if (!clock_controller_.is_valid_target(slot)) {
+      RCLCPP_WARN(get_logger(), "invalid clock target: slot must be 1..%d; holding position", clock_slot_count_);
+      return false;
+    }
+    return true;
+  }
+
+  void set_clock_target(int slot)
+  {
+    // Store the validated slot; the shortest turn is chosen from fresh feedback.
+    clock_controller_.set_target(slot, clock_angle_);
     clock_target_sent_ = false;
-    std_msgs::msg::Bool reached;
-    reached.data = false;
-    clock_target_reached_pub_->publish(reached);
+    publish_bool(clock_target_reached_pub_, false);
+  }
+
+  void clear_clock_target()
+  {
+    // Invalid target: stop at the current position until planning sends a new slot.
+    clock_controller_.clear_target();
+    clock_target_sent_ = false;
+    publish_bool(clock_target_reached_pub_, false);
   }
 
   void control_loop()
@@ -453,38 +533,76 @@ private:
         arm_target.position.assign(msg.position.begin() + 1, msg.position.end());
 
         // Validate arm target pose, then store it.
-        if (validate_arm_target_pose(arm_target)) {
-          set_arm_target_pose(arm_target);
+        if (validate_arm_target(arm_target)) {
+          set_arm_target(arm_target);
         } else if (arm_ik_mapping_confirmed_) {
-          arm_controller_.clear_target();
+          clear_arm_target();
         }
 
         // Validate LM target pose, then store it independently.
-        if (validate_lm_target_pose(msg.name[0], msg.position[0])) {
-          set_lm_target_pose(msg.position[0]);
+        if (validate_lm_target(msg.name[0], msg.position[0])) {
+          set_lm_target(msg.position[0]);
         } else if (lm_mapping_confirmed_) {
-          lm_controller_.clear_target();
+          clear_lm_target();
         }
       } else {
-        RCLCPP_WARN(get_logger(), "ignoring invalid manipulator JointState: expected LM then four arm joints");
+        RCLCPP_WARN(get_logger(), "invalid manipulator JointState (expected LM then four arm joints): holding position");
+        if (arm_ik_mapping_confirmed_) {
+          clear_arm_target();
+        }
+        if (lm_mapping_confirmed_) {
+          clear_lm_target();
+        }
       }
       pending_manipulator_target_.reset();
     }
 
-    // Validate wheel target velocity, then store it. Invalid input retains the previous target.
+    // Validate gripper target, then store it. An unconfirmed mapping ignores gripper commands.
+    if (pending_gripper_target_) {
+      if (validate_gripper_target()) {
+        set_gripper_target(*pending_gripper_target_);
+      }
+      pending_gripper_target_.reset();
+    }
+
+    // Validate wheel target velocity, then store it. Invalid input stops the wheels.
     if (pending_wheel_target_velocity_) {
-      if (validate_wheel_target_velocity(*pending_wheel_target_velocity_)) {
-        set_wheel_target_velocity(*pending_wheel_target_velocity_);
+      if (validate_wheel_target(*pending_wheel_target_velocity_)) {
+        set_wheel_target(*pending_wheel_target_velocity_);
+      } else {
+        clear_wheel_target();
       }
       pending_wheel_target_velocity_.reset();
     }
 
+    // Validate path and odometry, then store them. Invalid input stops path tracking.
+    if (pending_path_) {
+      if (validate_path_target(*pending_path_)) {
+        set_path_target(*pending_path_);
+      } else {
+        clear_path_target();
+      }
+      pending_path_.reset();
+    }
+    if (pending_odom_) {
+      if (validate_odom(*pending_odom_)) {
+        lateral_.set_odom(*pending_odom_);
+      } else {
+        lateral_.clear_odom();
+      }
+      pending_odom_.reset();
+    }
+
     const bool arm_feedback_updated = read_arm_feedback();
     const bool clock_wheel_feedback_updated = read_clock_wheel_feedback();
+    // Validate clock slot, then store it once fresh feedback fixes the shortest turn.
     if (clock_wheel_feedback_updated && pending_clock_slot_) {
-      if (clock_controller_.set_target_slot(*pending_clock_slot_, clock_angle_)) {
-        pending_clock_slot_.reset();
+      if (validate_clock_target(*pending_clock_slot_)) {
+        set_clock_target(*pending_clock_slot_);
+      } else {
+        clear_clock_target();
       }
+      pending_clock_slot_.reset();
     }
     if (have_arm_feedback_) {
       if (arm_feedback_updated) {
@@ -494,37 +612,42 @@ private:
         gripper_grasped_pub_->publish(grasped_msg);
       }
 
-      const auto arm_motor_commands = arm_controller_.compute_arm_command(arm_joints_);
-      const double lm_motor_command = lm_controller_.compute_lm_command(lm_angle_);
-      const double gripper_motor_command = gripper_controller_.compute_gripper_command(gripper_angle_);
+      const auto arm_motor_commands = arm_controller_.compute_command(arm_joints_);
+      const double lm_motor_command = lm_controller_.compute_command(lm_angle_);
+      const double gripper_motor_command = gripper_controller_.compute_command(gripper_angle_);
       // Shared OpenCR transport only: independent controllers, fixed hardware channel order.
       if (!arm_serial_->write_values({
           lm_motor_command, arm_motor_commands[0], arm_motor_commands[1],
           arm_motor_commands[2], arm_motor_commands[3], gripper_motor_command}))
       {
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "arm OpenCR write failed");
+      } else if (arm_feedback_updated) {
+        // Fresh feedback against the targets just sent; planning sequences the axes.
+        publish_bool(arm_target_reached_pub_, arm_controller_.is_target_reached(arm_joints_));
+        publish_bool(lm_target_reached_pub_, lm_controller_.is_target_reached(lm_angle_));
+        publish_bool(gripper_target_reached_pub_, gripper_controller_.is_target_reached(gripper_angle_));
       }
       std_msgs::msg::Int32 msg;
-      msg.data = arm_controller_.get_arm_status(arm_state_);
+      msg.data = arm_state_;
       arm_state_pub_->publish(msg);
     }
 
     if (have_clock_wheel_feedback_) {
       if (lateral_.can_track(wheel_target_v_)) {
-        longitudinal_.set_target_v(wheel_target_v_);
+        longitudinal_.set_target(wheel_target_v_);
       } else {
-        longitudinal_.stop();  // no valid path/odom, or already at the path goal
+        longitudinal_.clear_target();  // no valid path/odom, or already at the path goal
       }
       // Host converts planning targets and applies safety limits only. OpenCR firmware configures
       // DYNAMIXEL Profile Acceleration and owns velocity PID/feedforward and motor-level tracking.
-      const auto v = longitudinal_.get_wheel_speed();
+      const auto v = longitudinal_.compute_command();
       const double linear_speed = wheel_radius_ * (v[0] + v[1]) / 2.0;
-      const auto w = lateral_.get_wheel_speed(linear_speed);
+      const auto w = lateral_.compute_command(linear_speed);
       const double wl = v[0] + w[0];  // [rad/s]
       const double wr = v[1] + w[1];
       // over wheel limit: scale both by the same ratio to keep curvature
       const double k = std::max({1.0, std::abs(wl) / max_wheel_, std::abs(wr) / max_wheel_});
-      const double clock_motor_command = clock_controller_.compute_clock_command(clock_angle_);
+      const double clock_motor_command = clock_controller_.compute_command(clock_angle_);
       const bool command_sent = clock_wheel_serial_->write_values({wl / k, wr / k, clock_motor_command});
       if (!command_sent) {
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "clock+wheel OpenCR write failed");
@@ -532,11 +655,12 @@ private:
       if (command_sent && !pending_clock_slot_) {
         clock_target_sent_ = true;
       }
+      publish_bool(wheel_target_reached_pub_, lateral_.is_target_reached());
       std_msgs::msg::Int32 wheel_state_msg;
       wheel_state_msg.data = wheel_state_;
       wheel_state_pub_->publish(wheel_state_msg);
       std_msgs::msg::Int32 clock_state_msg;
-      clock_state_msg.data = clock_controller_.get_clock_status(clock_state_);
+      clock_state_msg.data = clock_state_;
       clock_state_pub_->publish(clock_state_msg);
       if (clock_wheel_feedback_updated) {
         std_msgs::msg::Int32 slot_msg;
@@ -544,7 +668,7 @@ private:
         clock_slot_pub_->publish(slot_msg);
         std_msgs::msg::Bool reached_msg;
         reached_msg.data = clock_target_sent_ && !pending_clock_slot_ && command_sent &&
-          clock_controller_.is_target_reached(clock_angle_, clock_state_);
+          clock_state_ == 0 && clock_controller_.is_target_reached(clock_angle_);
         clock_target_reached_pub_->publish(reached_msg);
       }
     }
@@ -555,8 +679,12 @@ private:
   double max_wheel_ = 0.0;
   double wheel_radius_ = 0.0;
   double wheel_target_v_ = 0.0;
+  std::vector<geometry_msgs::msg::PoseStamped> last_path_poses_;
   std::optional<sensor_msgs::msg::JointState> pending_manipulator_target_;
   std::optional<double> pending_wheel_target_velocity_;
+  std::optional<bool> pending_gripper_target_;
+  std::optional<nav_msgs::msg::Path> pending_path_;
+  std::optional<nav_msgs::msg::Odometry> pending_odom_;
   std::optional<rclcpp::Time> last_t_;
   craft_control::ArmController arm_controller_;
   craft_control::LmController lm_controller_;
@@ -591,6 +719,10 @@ private:
   rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr clock_state_pub_;
   rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr clock_slot_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr clock_target_reached_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr arm_target_reached_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr lm_target_reached_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr gripper_target_reached_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr wheel_target_reached_pub_;
   rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr target_path_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr arm_target_sub_;

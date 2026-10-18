@@ -32,7 +32,7 @@ install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(test_control_controllers test/test_control_controllers.cpp
-    src/arm_controller.cpp src/lm_controller.cpp src/clock_controller.cpp src/lateral_controller.cpp
+    src/arm_controller.cpp src/lm_controller.cpp src/gripper_controller.cpp src/clock_controller.cpp src/lateral_controller.cpp
     src/longitudinal_controller.cpp)
   target_include_directories(test_control_controllers PRIVATE include)
   target_compile_features(test_control_controllers PRIVATE cxx_std_17)

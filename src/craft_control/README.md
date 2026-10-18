@@ -34,20 +34,47 @@ hardware calibration. `GripperController` remains independent.
 
 The existing planning topic `/planning/target_arm_joints` still carries the full
 five-joint IK result: slide [m], shoulder, elbow, wrist_pitch, tool_roll [rad].
-The subscription callback keeps the newest message pending. `control_loop()`
-splits it into LM and four rotational positions and applies these stages:
+Every planning input follows the same flow. The subscription callback only keeps
+the newest message pending; `control_loop()` validates it, then stores it with a
+setter that does no validation, or clears the target when validation fails:
 
 ```text
-validate_arm_target_pose -> set_arm_target_pose
-validate_lm_target_pose -> set_lm_target_pose
-validate_wheel_target_velocity -> set_wheel_target_velocity
+validate_arm_target      -> set_arm_target      | clear_arm_target
+validate_lm_target       -> set_lm_target       | clear_lm_target
+validate_gripper_target  -> set_gripper_target  | (ignored)
+validate_wheel_target    -> set_wheel_target    | clear_wheel_target
+validate_path_target     -> set_path_target     | clear_path_target
+validate_odom            -> lateral_.set_odom   | lateral_.clear_odom
+validate_clock_target    -> set_clock_target    | clear_clock_target
 ```
 
-Each setter runs only if its validation succeeds. Arm and LM use independent
-confirmation flags; invalid targets clear only their own controller target.
-An invalid wheel velocity leaves the previous velocity unchanged. Pending
+The manipulator JointState is split into LM and four rotational positions first.
+An invalid target means the previous target is no longer trustworthy, so the
+axis **stops** (holds its current position, or zero wheel speed) until planning
+sends a new valid target. An empty path is planning's "no route" result and also
+stops tracking. Arm, LM and gripper use independent confirmation flags; while a
+mapping is unconfirmed its targets are ignored. The clock slot is applied after
+fresh feedback, because the shortest turn depends on the current angle. Pending
 messages are consumed once, rather than reapplying targets on every timer tick.
 Planning remains responsible for coordinating these independently controlled axes.
+
+Every controller uses the same method names:
+
+| Role | Method |
+| --- | --- |
+| Configuration | `configure(...)` (validated once; failure stops the node) |
+| Target validation | `is_valid_target(...)` (gripper open/close needs none) |
+| Store / release target | `set_target(...)` / `clear_target()` |
+| Motor command | `compute_command(feedback)` |
+| Arrival | `is_target_reached(feedback)` |
+| Derived state | `get_*()` (e.g. `ClockController::get_current_slot`) |
+
+Odometry is feedback, not a target: `LateralController::is_valid_odom`,
+`set_odom` and `clear_odom`.
+
+Configuration (limits, mappings, tolerances) is validated once in the
+ControlMaster constructor; an invalid value stops the node. Controllers therefore
+keep no "configured" flags and do not re-check configuration at run time.
 
 Only the transport is shared. Feedback positions are stored separately as
 `lm_angle_`, four `arm_joints_`, and `gripper_angle_`; commands are assembled in
@@ -131,9 +158,9 @@ The control node reports on each new valid serial sample:
 | `/clock_target_reached` | `std_msgs/Bool` | A target exists, its command was sent, motor is idle, and angle is within tolerance |
 | `/clock_state` | `std_msgs/Int32` | OpenCR state: 0 idle, 1 using, 2 fault |
 
-`clock_angle_tolerance` defaults to 1 degree. A valid new target immediately
-publishes `false` on `/clock_target_reached`, and waits for fresh feedback before
-choosing its angle. Before any target, completion is false even if aligned.
+`clock_angle_tolerance` defaults to 2 degrees. A clock target waits for fresh
+feedback, is validated and stored there, and immediately publishes `false` on
+`/clock_target_reached`. An invalid slot clears the target and holds position. Before any target, completion is false even if aligned.
 
 Planning owns sequencing and puck inventory. It should record the pending target
 slot, wait for `/clock_target_reached=true` **and** `/clock_slot` matching that
@@ -141,6 +168,27 @@ target, and then issue the next clock command or arm loading/retrieval target.
 These reports are live feedback, not latched inventory records. No arm interlock
 is imposed by control. The current planning skeleton does not yet implement this
 mission sequence or produce a target speed.
+
+## Target reached topics
+
+Each axis reports arrival as `std_msgs/Bool`, published on fresh feedback after a
+successful OpenCR write. A newly stored target immediately publishes `false`, so a
+previous `true` is never mistaken for completion of the new target.
+
+| Topic | True when |
+| --- | --- |
+| `/arm_target_reached` | All four rotational motor angles within `arm_angle_tolerance` of the target motor angles |
+| `/lm_target_reached` | LM motor angle within `lm_angle_tolerance` of the target motor angle |
+| `/gripper_target_reached` | Open: within `gripper_angle_tolerance` of the open angle. Close: within tolerance of the close angle, or grasped |
+| `/wheel_target_reached` | Path endpoint within `wheel_goal_tolerance` of odometry (same frame) |
+| `/clock_target_reached` | See Clock storage |
+
+Planning republishes the same path each tick, so only a changed path resets
+`/wheel_target_reached`. All tolerances come from `config/control.yaml`, are
+validated as positive by ControlMaster, and are stored in each controller at
+configuration, so every controller exposes `is_target_reached(feedback)`.
+Clock completion additionally requires `clock_state` idle, checked by ControlMaster.
+Targets outside motor limits are not expected: planning accounts for them in IK.
 
 ## Verification
 
