@@ -2,7 +2,7 @@
 <package format="3">
   <name>craft_control</name>
   <version>0.0.0</version>
-  <description>Control: control_master + longitudinal/lateral controllers + arm/clock planners</description>
+  <description>Control: control_master + longitudinal/lateral controllers + arm/clock controllers</description>
   <maintainer email="sssgggjjj4895@gmail.com">pa29</maintainer>
   <license>TODO</license>
 
@@ -13,6 +13,7 @@
   <depend>geometry_msgs</depend>
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
+  <test_depend>ament_cmake_gtest</test_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

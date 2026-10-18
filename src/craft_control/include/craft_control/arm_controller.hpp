@@ -15,7 +15,7 @@ using ArmIkJointNames = std::array<std::string, kArmIkJoints>;
 using ArmIkJointValues = std::array<double, kArmIkJoints>;
 static_assert(kArmMotors == kArmIkJoints + 1, "OpenCR frame is five IK joints followed by gripper");
 
-class ArmPlanner
+class ArmController
 {
 public:
   // from config/control.yaml

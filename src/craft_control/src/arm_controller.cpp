@@ -1,11 +1,11 @@
-#include "craft_control/arm_planner.hpp"
+#include "craft_control/arm_controller.hpp"
 
 #include <algorithm>
 #include <cmath>
 
 namespace craft_control
 {
-bool ArmPlanner::set_angle_limits(
+bool ArmController::set_angle_limits(
   const ArmIkJointValues & min_angle, const ArmIkJointValues & max_angle)
 {
   for (std::size_t joint = 0; joint < kArmIkJoints; ++joint) {
@@ -20,7 +20,7 @@ bool ArmPlanner::set_angle_limits(
   return true;
 }
 
-bool ArmPlanner::set_actuator_mapping(
+bool ArmController::set_actuator_mapping(
   const ArmIkJointNames & ik_joint_names,
   const ArmIkJointValues & motor_directions, const ArmIkJointValues & motor_offsets,
   const std::string & lm_linear_joint_name, double lm_pulley_radius, double lm_gear_ratio)
@@ -61,7 +61,7 @@ bool ArmPlanner::set_actuator_mapping(
   return true;
 }
 
-bool ArmPlanner::set_target_arm_pose(
+bool ArmController::set_target_arm_pose(
   const std::vector<std::string> & joint_names, const std::vector<double> & joint_positions)
 {
   has_target_ = false;
@@ -74,7 +74,7 @@ bool ArmPlanner::set_target_arm_pose(
   return true;
 }
 
-bool ArmPlanner::is_valid_target(
+bool ArmController::is_valid_target(
   const std::vector<std::string> & joint_names,
   const std::vector<double> & joint_positions) const
 {
@@ -92,7 +92,7 @@ bool ArmPlanner::is_valid_target(
   return true;
 }
 
-ArmIkJointValues ArmPlanner::compute_arm_command(const ArmJoints & current_pose) const
+ArmIkJointValues ArmController::compute_arm_command(const ArmJoints & current_pose) const
 {
   ArmIkJointValues out{};
   for (std::size_t joint = 0; joint < kArmIkJoints; ++joint) {
@@ -113,7 +113,7 @@ ArmIkJointValues ArmPlanner::compute_arm_command(const ArmJoints & current_pose)
   return out;
 }
 
-int ArmPlanner::get_arm_status(int arm_state) const
+int ArmController::get_arm_status(int arm_state) const
 {
   return arm_state;
 }

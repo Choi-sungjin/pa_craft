@@ -3,7 +3,7 @@
 namespace craft_control
 {
 
-class GripperPlanner
+class GripperController
 {
 public:
   bool configure(

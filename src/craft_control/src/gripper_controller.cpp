@@ -1,4 +1,4 @@
-#include "craft_control/gripper_planner.hpp"
+#include "craft_control/gripper_controller.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -6,7 +6,7 @@
 namespace craft_control
 {
 
-bool GripperPlanner::configure(
+bool GripperController::configure(
   double min_angle, double max_angle, double open_angle, double close_angle,
   double grasp_current_threshold_a, double grasp_current_debounce)
 {
@@ -38,7 +38,7 @@ bool GripperPlanner::configure(
   return true;
 }
 
-bool GripperPlanner::set_target(bool close)
+bool GripperController::set_target(bool close)
 {
   if (!configured_) {
     return false;
@@ -53,7 +53,7 @@ bool GripperPlanner::set_target(bool close)
   return true;
 }
 
-double GripperPlanner::compute_gripper_command(double current_angle) const
+double GripperController::compute_gripper_command(double current_angle) const
 {
   if (!configured_) {
     return current_angle;
@@ -62,14 +62,14 @@ double GripperPlanner::compute_gripper_command(double current_angle) const
   return std::clamp(requested, min_angle_, max_angle_);
 }
 
-bool GripperPlanner::is_target_reached(double current_angle, double tolerance) const
+bool GripperController::is_target_reached(double current_angle, double tolerance) const
 {
   return configured_ && has_target_ && std::isfinite(current_angle) &&
          std::isfinite(tolerance) && tolerance >= 0.0 &&
          std::abs(current_angle - target_angle_) <= tolerance;
 }
 
-void GripperPlanner::update_current_feedback(double motor_current_a, double dt)
+void GripperController::update_current_feedback(double motor_current_a, double dt)
 {
   if (!configured_ || !has_target_ || !closing_ || !grasp_detection_configured_ ||
     !std::isfinite(motor_current_a) || !std::isfinite(dt) || dt <= 0.0)
@@ -87,12 +87,12 @@ void GripperPlanner::update_current_feedback(double motor_current_a, double dt)
   }
 }
 
-bool GripperPlanner::is_grasped() const
+bool GripperController::is_grasped() const
 {
   return grasp_detection_configured_ && grasped_;
 }
 
-bool GripperPlanner::grasp_detection_configured() const
+bool GripperController::grasp_detection_configured() const
 {
   return grasp_detection_configured_;
 }

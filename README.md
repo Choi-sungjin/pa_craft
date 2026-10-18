@@ -25,13 +25,13 @@ pa_craft/
     │   │   └── control.yaml
     │   ├── include/
     │   │   └── craft_control/
-    │   │       ├── arm_planner.hpp
-    │   │       ├── clock_planner.hpp
+    │   │       ├── arm_controller.hpp
+    │   │       ├── clock_controller.hpp
     │   │       ├── lateral_controller.hpp
     │   │       └── longitudinal_controller.hpp
     │   └── src/
-    │       ├── arm_planner.cpp
-    │       ├── clock_planner.cpp
+    │       ├── arm_controller.cpp
+    │       ├── clock_controller.cpp
     │       ├── control_master.cpp
     │       ├── lateral_controller.cpp
     │       └── longitudinal_controller.cpp

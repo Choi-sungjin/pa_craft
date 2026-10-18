@@ -1,7 +1,9 @@
 // control_master: planning targets -> 2x OpenCR (serial)
 // sub: /planning/target_path, /planning/odom, /planning/target_arm_joints
+//      /planning/target_v (Float64, m/s), /planning/target_clock_slot (Int32, 1..12)
 //      target_arm_joints: JointState from URDF IK, positions [rad] or [m]
 // pub: /arm_state, /wheel_state, /clock_state (Int32: 0 idle, 1 using, 2 fault, every tick)
+//      /clock_slot (Int32: 1..12, 0 between slots), /clock_target_reached (Bool)
 // param: config/control.yaml (OpenCR ports, arm motor limits)
 // serial (ASCII CSV, '\n' terminated, OpenCR must stream rx on its own):
 //   arm OpenCR   tx: slide,shoulder,elbow,wrist_pitch,tool_roll,gripper
@@ -29,11 +31,12 @@
 #include "nav_msgs/msg/path.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
 #include "std_msgs/msg/bool.hpp"
+#include "std_msgs/msg/float64.hpp"
 #include "std_msgs/msg/int32.hpp"
 
-#include "craft_control/arm_planner.hpp"
-#include "craft_control/clock_planner.hpp"
-#include "craft_control/gripper_planner.hpp"
+#include "craft_control/arm_controller.hpp"
+#include "craft_control/clock_controller.hpp"
+#include "craft_control/gripper_controller.hpp"
 #include "craft_control/lateral_controller.hpp"
 #include "craft_control/longitudinal_controller.hpp"
 
@@ -142,19 +145,19 @@ public:
     {
       throw std::runtime_error("arm_ik_joint_names needs 5 entries");
     }
-    if (!arm_planner_.set_angle_limits(arm_min_angle, arm_max_angle)) {
+    if (!arm_controller_.set_angle_limits(arm_min_angle, arm_max_angle)) {
       throw std::runtime_error("invalid arm angle limits in config/control.yaml");
     }
 
     craft_control::ArmIkJointNames ik_joint_name_array;
     std::copy(arm_ik_joint_names.begin(), arm_ik_joint_names.end(), ik_joint_name_array.begin());
-    if (!arm_planner_.set_actuator_mapping(
+    if (!arm_controller_.set_actuator_mapping(
       ik_joint_name_array, arm_joint_directions, arm_joint_offsets,
       lm_linear_joint_name, lm_pulley_radius, lm_gear_ratio))
     {
       throw std::runtime_error("invalid arm IK joint or motor mapping in config/control.yaml");
     }
-    if (!gripper_planner_.configure(
+    if (!gripper_controller_.configure(
       gripper_min_angle, gripper_max_angle,
       gripper_open_angle, gripper_close_angle, grasp_current_threshold_a, grasp_current_debounce))
     {
@@ -166,15 +169,33 @@ public:
     if (!gripper_mapping_confirmed_) {
       RCLCPP_WARN(get_logger(), "gripper mapping is unconfirmed; gripper commands will be ignored");
     }
-    if (!gripper_planner_.grasp_detection_configured()) {
+    if (!gripper_controller_.grasp_detection_configured()) {
       RCLCPP_WARN(get_logger(), "gripper current-based grasp detection is disabled until thresholds are calibrated");
     }
 
-    const auto wheel_radius = load_positive_param("wheel_radius");
+    wheel_radius_ = load_positive_param("wheel_radius");
+    const auto wheel_separation = load_positive_param("wheel_separation");
     const auto max_v = load_positive_param("max_v");
     const auto max_acc_v = load_positive_param("max_acc_v");
     max_wheel_ = load_positive_param("max_wheel");
-    longitudinal_.set_params(wheel_radius, max_v, max_acc_v);
+    const auto lookahead_distance = load_positive_param("lookahead_distance");
+    const auto wheel_goal_tolerance = load_positive_param("wheel_goal_tolerance");
+    longitudinal_.set_params(wheel_radius_, max_v, max_acc_v);
+    if (!lateral_.set_params(
+      wheel_radius_, wheel_separation, lookahead_distance, wheel_goal_tolerance))
+    {
+      throw std::runtime_error("invalid lateral controller parameters");
+    }
+    clock_slot_count_ = declare_parameter<int>("clock_slot_count");
+    const auto clock_slot_angle = load_positive_param("clock_slot_angle");
+    const auto clock_zero_angle = declare_parameter<double>("clock_zero_angle");
+    const auto clock_direction = declare_parameter<double>("clock_direction");
+    const auto clock_angle_tolerance = load_positive_param("clock_angle_tolerance");
+    if (!clock_controller_.configure(
+      clock_slot_count_, clock_slot_angle, clock_zero_angle, clock_direction, clock_angle_tolerance))
+    {
+      throw std::runtime_error("invalid clock geometry or angle tolerance in config/control.yaml");
+    }
 
     arm_serial_ = std::make_unique<OpencrSerial>(declare_parameter<std::string>("arm_port"));
     clock_wheel_serial_ = std::make_unique<OpencrSerial>(declare_parameter<std::string>("clock_wheel_port"));
@@ -183,10 +204,26 @@ public:
     gripper_grasped_pub_ = create_publisher<std_msgs::msg::Bool>("/gripper_grasped", 10);
     wheel_state_pub_ = create_publisher<std_msgs::msg::Int32>("/wheel_state", 10);
     clock_state_pub_ = create_publisher<std_msgs::msg::Int32>("/clock_state", 10);
+    clock_slot_pub_ = create_publisher<std_msgs::msg::Int32>("/clock_slot", 10);
+    clock_target_reached_pub_ = create_publisher<std_msgs::msg::Bool>("/clock_target_reached", 10);
     target_path_sub_ = create_subscription<nav_msgs::msg::Path>(
-      "/planning/target_path", 10, [this](const nav_msgs::msg::Path & msg) {lateral_.set_path(msg);});
+      "/planning/target_path", 10, [this](const nav_msgs::msg::Path & msg) {
+        if (!lateral_.set_path(msg) && !msg.poses.empty()) {
+          RCLCPP_WARN(get_logger(), "ignoring invalid wheel path: check coordinates and frame_id");
+        }
+      });
     odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
-      "/planning/odom", 10, [this](const nav_msgs::msg::Odometry & msg) {lateral_.set_odom(msg);});
+      "/planning/odom", 10, [this](const nav_msgs::msg::Odometry & msg) {
+        if (!lateral_.set_odom(msg)) {
+          RCLCPP_WARN(get_logger(), "ignoring invalid wheel odometry");
+        }
+      });
+    wheel_target_sub_ = create_subscription<std_msgs::msg::Float64>(
+      "/planning/target_v", 10,
+      [this](const std_msgs::msg::Float64 & msg) {update_wheel_target(msg);});
+    clock_target_sub_ = create_subscription<std_msgs::msg::Int32>(
+      "/planning/target_clock_slot", 10,
+      [this](const std_msgs::msg::Int32 & msg) {update_clock_target(msg);});
     arm_target_sub_ = create_subscription<sensor_msgs::msg::JointState>(
       "/planning/target_arm_joints", 10,
       [this](const sensor_msgs::msg::JointState & msg) {update_arm_target(msg);});
@@ -195,8 +232,8 @@ public:
         if (!gripper_mapping_confirmed_) {
           return;
         }
-        if (!gripper_planner_.set_target(msg.data)) {
-          RCLCPP_WARN(get_logger(), "gripper planner is not configured");
+        if (!gripper_controller_.set_target(msg.data)) {
+          RCLCPP_WARN(get_logger(), "gripper controller is not configured");
         }
       });
     timer_ = create_wall_timer(std::chrono::duration<double>(kDt), [this]() {control_loop();});
@@ -297,9 +334,32 @@ private:
       RCLCPP_WARN(get_logger(), "ignoring invalid arm IK JointState");
       return;
     }
-    if (!arm_planner_.set_target_arm_pose(msg.name, msg.position)) {
+    if (!arm_controller_.set_target_arm_pose(msg.name, msg.position)) {
       RCLCPP_WARN(get_logger(), "ignoring arm IK solution: joint mapping or LM calibration is incomplete");
     }
+  }
+
+  void update_wheel_target(const std_msgs::msg::Float64 & msg)
+  {
+    if (!std::isfinite(msg.data)) {
+      RCLCPP_WARN(get_logger(), "ignoring non-finite wheel target velocity");
+      return;
+    }
+    wheel_target_v_ = msg.data;
+  }
+
+  void update_clock_target(const std_msgs::msg::Int32 & msg)
+  {
+    if (msg.data < 1 || msg.data > clock_slot_count_) {
+      RCLCPP_WARN(get_logger(), "ignoring clock target: slot must be 1..%d", clock_slot_count_);
+      return;
+    }
+    // Wait for a fresh position before choosing the nearest equivalent motor angle.
+    pending_clock_slot_ = msg.data;
+    clock_target_sent_ = false;
+    std_msgs::msg::Bool reached;
+    reached.data = false;
+    clock_target_reached_pub_->publish(reached);
   }
 
   void control_loop()
@@ -312,17 +372,22 @@ private:
     }
 
     const bool arm_feedback_updated = read_arm_feedback();
-    read_clock_wheel_feedback();
+    const bool clock_wheel_feedback_updated = read_clock_wheel_feedback();
+    if (clock_wheel_feedback_updated && pending_clock_slot_) {
+      if (clock_controller_.set_target_slot(*pending_clock_slot_, clock_angle_)) {
+        pending_clock_slot_.reset();
+      }
+    }
     if (have_arm_feedback_) {
       if (arm_feedback_updated) {
-        gripper_planner_.update_current_feedback(gripper_current_a_, dt);
+        gripper_controller_.update_current_feedback(gripper_current_a_, dt);
         std_msgs::msg::Bool grasped_msg;
-        grasped_msg.data = gripper_planner_.is_grasped();
+        grasped_msg.data = gripper_controller_.is_grasped();
         gripper_grasped_pub_->publish(grasped_msg);
       }
 
-      const auto arm_motor_commands = arm_planner_.compute_arm_command(arm_joints_);
-      const double gripper_motor_command = gripper_planner_.compute_gripper_command(
+      const auto arm_motor_commands = arm_controller_.compute_arm_command(arm_joints_);
+      const double gripper_motor_command = gripper_controller_.compute_gripper_command(
         arm_joints_[kGripperMotorChannel]);
       craft_control::ArmJoints opencr_commands{};
       std::copy(arm_motor_commands.begin(), arm_motor_commands.end(), opencr_commands.begin());
@@ -331,38 +396,58 @@ private:
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "arm OpenCR write failed");
       }
       std_msgs::msg::Int32 msg;
-      msg.data = arm_planner_.get_arm_status(arm_state_);
+      msg.data = arm_controller_.get_arm_status(arm_state_);
       arm_state_pub_->publish(msg);
     }
 
     if (have_clock_wheel_feedback_) {
-      longitudinal_.set_target_v(0.0);  // TODO: target v from path
-      auto v = longitudinal_.get_wheel_speed(dt);
-      auto w = lateral_.get_wheel_speed();
+      if (lateral_.can_track(wheel_target_v_)) {
+        longitudinal_.set_target_v(wheel_target_v_);
+      } else {
+        longitudinal_.stop();  // no valid path/odom, or already at the path goal
+      }
+      const auto v = longitudinal_.get_wheel_speed(dt);
+      const double linear_speed = wheel_radius_ * (v[0] + v[1]) / 2.0;
+      const auto w = lateral_.get_wheel_speed(linear_speed);
       const double wl = v[0] + w[0];  // [rad/s]
       const double wr = v[1] + w[1];
       // over wheel limit: scale both by the same ratio to keep curvature
       const double k = std::max({1.0, std::abs(wl) / max_wheel_, std::abs(wr) / max_wheel_});
-      const double clock_pose = clock_planner_.get_clock_pose(clock_angle_);
-      if (!clock_wheel_serial_->write_values({wl / k, wr / k, clock_pose})) {
+      const double clock_pose = clock_controller_.get_clock_pose(clock_angle_);
+      const bool command_sent = clock_wheel_serial_->write_values({wl / k, wr / k, clock_pose});
+      if (!command_sent) {
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "clock+wheel OpenCR write failed");
+      }
+      if (command_sent && !pending_clock_slot_) {
+        clock_target_sent_ = true;
       }
       std_msgs::msg::Int32 wheel_state_msg;
       wheel_state_msg.data = wheel_state_;
       wheel_state_pub_->publish(wheel_state_msg);
       std_msgs::msg::Int32 clock_state_msg;
-      clock_state_msg.data = clock_planner_.get_clock_status(clock_state_);
+      clock_state_msg.data = clock_controller_.get_clock_status(clock_state_);
       clock_state_pub_->publish(clock_state_msg);
+      if (clock_wheel_feedback_updated) {
+        std_msgs::msg::Int32 slot_msg;
+        slot_msg.data = clock_state_ == 0 ? clock_controller_.get_current_slot(clock_angle_) : 0;
+        clock_slot_pub_->publish(slot_msg);
+        std_msgs::msg::Bool reached_msg;
+        reached_msg.data = clock_target_sent_ && !pending_clock_slot_ && command_sent &&
+          clock_controller_.is_complete(clock_angle_, clock_state_);
+        clock_target_reached_pub_->publish(reached_msg);
+      }
     }
   }
 
   craft_control::LongitudinalController longitudinal_;
   craft_control::LateralController lateral_;
   double max_wheel_ = 0.0;
+  double wheel_radius_ = 0.0;
+  double wheel_target_v_ = 0.0;
   std::optional<rclcpp::Time> last_t_;
-  craft_control::ArmPlanner arm_planner_;
-  craft_control::GripperPlanner gripper_planner_;
-  craft_control::ClockPlanner clock_planner_;
+  craft_control::ArmController arm_controller_;
+  craft_control::GripperController gripper_controller_;
+  craft_control::ClockController clock_controller_;
 
   std::unique_ptr<OpencrSerial> arm_serial_;
   std::unique_ptr<OpencrSerial> clock_wheel_serial_;
@@ -378,14 +463,21 @@ private:
   int wheel_state_ = 0;
   int clock_state_ = 0;
   bool have_clock_wheel_feedback_ = false;
+  std::optional<int> pending_clock_slot_;
+  int clock_slot_count_ = 0;
+  bool clock_target_sent_ = false;
 
   rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr arm_state_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr gripper_grasped_pub_;
   rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr wheel_state_pub_;
   rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr clock_state_pub_;
+  rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr clock_slot_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr clock_target_reached_pub_;
   rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr target_path_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr arm_target_sub_;
+  rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr wheel_target_sub_;
+  rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr clock_target_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr gripper_target_sub_;
   rclcpp::TimerBase::SharedPtr timer_;
 };

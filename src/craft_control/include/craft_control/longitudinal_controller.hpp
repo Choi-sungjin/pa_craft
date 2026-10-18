@@ -13,13 +13,15 @@ public:
   // wheel_radius [m], max_v [m/s], max_acc_v [m/s^2]
   void set_params(double wheel_radius, double max_v, double max_acc_v);
   void set_target_v(double v);  // [m/s]
+  void stop();  // cancel target and reset the velocity ramp when no valid path is available
   // dt: real elapsed time [s]
   std::array<double, 2> get_wheel_speed(double dt);  // {left, right} [rad/s]
 
 private:
-  double wheel_radius_ = 0.033;  // TurtleBot3 Waffle Pi
-  double max_v_ = 0.26;
-  double max_acc_v_ = 0.5;
+  // Set by ControlMaster from control.yaml, before computing wheel commands.
+  double wheel_radius_ = 0.0;
+  double max_v_ = 0.0;
+  double max_acc_v_ = 0.0;
   double target_v_ = 0.0;
   double v_ref_ = 0.0;  // accel-limited target
 };

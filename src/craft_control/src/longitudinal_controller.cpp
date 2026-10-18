@@ -17,8 +17,17 @@ void LongitudinalController::set_target_v(double v)
   target_v_ = v;
 }
 
+void LongitudinalController::stop()
+{
+  target_v_ = 0.0;
+  v_ref_ = 0.0;
+}
+
 std::array<double, 2> LongitudinalController::get_wheel_speed(double dt)
 {
+  if (wheel_radius_ <= 0.0) {
+    return {0.0, 0.0};
+  }
   const double v_goal = std::clamp(target_v_, -max_v_, max_v_);
   v_ref_ += std::clamp(v_goal - v_ref_, -max_acc_v_ * dt, max_acc_v_ * dt);
   const double w = v_ref_ / wheel_radius_;
