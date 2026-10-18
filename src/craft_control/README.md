@@ -155,16 +155,16 @@ The control node reports on each new valid serial sample:
 
 | Topic | Message | Meaning |
 | --- | --- | --- |
-| `/clock_slot` | `std_msgs/Int32` | Aligned slot 1..12 when idle; 0 while moving, between slots, or faulted |
-| `/clock_target_reached` | `std_msgs/Bool` | A target exists, its command was sent, motor is idle, and angle is within tolerance |
-| `/clock_state` | `std_msgs/Int32` | OpenCR state: 0 idle, 1 using, 2 fault |
+| `/control/clock_slot` | `std_msgs/Int32` | Aligned slot 1..12 when idle; 0 while moving, between slots, or faulted |
+| `/control/clock_target_reached` | `std_msgs/Bool` | A target exists, its command was sent, motor is idle, and angle is within tolerance |
+| `/control/clock_state` | `std_msgs/Int32` | OpenCR state: 0 idle, 1 using, 2 fault |
 
 `clock_angle_tolerance` defaults to 2 degrees. A clock target waits for fresh
 feedback, is validated and stored there, and immediately publishes `false` on
-`/clock_target_reached`. An invalid slot clears the target and holds position. Before any target, completion is false even if aligned.
+`/control/clock_target_reached`. An invalid slot clears the target and holds position. Before any target, completion is false even if aligned.
 
 Planning owns sequencing and puck inventory. It should record the pending target
-slot, wait for `/clock_target_reached=true` **and** `/clock_slot` matching that
+slot, wait for `/control/clock_target_reached=true` **and** `/control/clock_slot` matching that
 target, and then issue the next clock command or arm loading/retrieval target.
 These reports are live feedback, not latched inventory records. No arm interlock
 is imposed by control. The current planning skeleton does not yet implement this
@@ -178,14 +178,14 @@ previous `true` is never mistaken for completion of the new target.
 
 | Topic | True when |
 | --- | --- |
-| `/arm_target_reached` | All four rotational motor angles within `arm_angle_tolerance` of the target motor angles |
-| `/lm_target_reached` | LM motor angle within `lm_angle_tolerance` of the target motor angle |
-| `/gripper_target_reached` | Open: within `gripper_angle_tolerance` of the open angle. Close: within tolerance of the close angle, or grasped |
-| `/wheel_target_reached` | Path endpoint within `wheel_goal_tolerance` of odometry (same frame) |
-| `/clock_target_reached` | See Clock storage |
+| `/control/arm_target_reached` | All four rotational motor angles within `arm_angle_tolerance` of the target motor angles |
+| `/control/lm_target_reached` | LM motor angle within `lm_angle_tolerance` of the target motor angle |
+| `/control/gripper_target_reached` | Open: within `gripper_angle_tolerance` of the open angle. Close: within tolerance of the close angle, or grasped |
+| `/control/wheel_target_reached` | Path endpoint within `wheel_goal_tolerance` of odometry (same frame) |
+| `/control/clock_target_reached` | See Clock storage |
 
 Planning republishes the same path each tick, so only a changed path resets
-`/wheel_target_reached`. Every motor tolerance is 2 degrees. All tolerances come from `config/control.yaml`, are
+`/control/wheel_target_reached`. Every motor tolerance is 2 degrees. All tolerances come from `config/control.yaml`, are
 validated as positive by ControlMaster, and are stored in each controller at
 configuration, so every controller exposes `is_target_reached(feedback)`.
 Clock completion additionally requires `clock_state` idle, checked by ControlMaster.

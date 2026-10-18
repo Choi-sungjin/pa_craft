@@ -2,9 +2,9 @@
 // sub: /planning/target_path, /planning/odom, /planning/target_arm_joints
 //      /planning/target_v (Float64, m/s), /planning/target_clock_slot (Int32, 1..12)
 //      target_arm_joints: JointState from URDF IK, positions [rad] or [m]
-// pub: /arm_lm_state, /wheel_state, /clock_state (Int32: 0 idle, 1 using, 2 fault, every tick)
-//      /clock_slot (Int32: 1..12, 0 between slots), /clock_target_reached (Bool)
-//      /arm_target_reached, /lm_target_reached, /gripper_target_reached, /wheel_target_reached (Bool)
+// pub: /control/arm_lm_state, /control/wheel_state, /control/clock_state (Int32: 0 idle, 1 using, 2 fault, every tick)
+//      /control/clock_slot (Int32: 1..12, 0 between slots), /control/clock_target_reached (Bool)
+//      /control/arm_target_reached, /control/lm_target_reached, /control/gripper_target_reached, /control/wheel_target_reached (Bool)
 //      reached topics publish false immediately when a new target is stored
 // param: config/control.yaml (OpenCR ports, arm motor limits)
 // serial (ASCII CSV, '\n' terminated, OpenCR must stream rx on its own):
@@ -219,16 +219,16 @@ public:
     clock_wheel_serial_ = std::make_unique<OpencrSerial>(declare_parameter<std::string>("clock_wheel_port"));
 
     // ROS2 publishers and subscribers
-    arm_lm_state_pub_ = create_publisher<std_msgs::msg::Int32>("/arm_lm_state", 10);
-    gripper_grasped_pub_ = create_publisher<std_msgs::msg::Bool>("/gripper_grasped", 10);
-    wheel_state_pub_ = create_publisher<std_msgs::msg::Int32>("/wheel_state", 10);
-    clock_state_pub_ = create_publisher<std_msgs::msg::Int32>("/clock_state", 10);
-    clock_slot_pub_ = create_publisher<std_msgs::msg::Int32>("/clock_slot", 10);
-    clock_target_reached_pub_ = create_publisher<std_msgs::msg::Bool>("/clock_target_reached", 10);
-    arm_target_reached_pub_ = create_publisher<std_msgs::msg::Bool>("/arm_target_reached", 10);
-    lm_target_reached_pub_ = create_publisher<std_msgs::msg::Bool>("/lm_target_reached", 10);
-    gripper_target_reached_pub_ = create_publisher<std_msgs::msg::Bool>("/gripper_target_reached", 10);
-    wheel_target_reached_pub_ = create_publisher<std_msgs::msg::Bool>("/wheel_target_reached", 10);
+    arm_lm_state_pub_ = create_publisher<std_msgs::msg::Int32>("/control/arm_lm_state", 10);
+    gripper_grasped_pub_ = create_publisher<std_msgs::msg::Bool>("/control/gripper_grasped", 10);
+    wheel_state_pub_ = create_publisher<std_msgs::msg::Int32>("/control/wheel_state", 10);
+    clock_state_pub_ = create_publisher<std_msgs::msg::Int32>("/control/clock_state", 10);
+    clock_slot_pub_ = create_publisher<std_msgs::msg::Int32>("/control/clock_slot", 10);
+    clock_target_reached_pub_ = create_publisher<std_msgs::msg::Bool>("/control/clock_target_reached", 10);
+    arm_target_reached_pub_ = create_publisher<std_msgs::msg::Bool>("/control/arm_target_reached", 10);
+    lm_target_reached_pub_ = create_publisher<std_msgs::msg::Bool>("/control/lm_target_reached", 10);
+    gripper_target_reached_pub_ = create_publisher<std_msgs::msg::Bool>("/control/gripper_target_reached", 10);
+    wheel_target_reached_pub_ = create_publisher<std_msgs::msg::Bool>("/control/wheel_target_reached", 10);
     target_path_sub_ = create_subscription<nav_msgs::msg::Path>(
       "/planning/target_path", 10,
       [this](const nav_msgs::msg::Path & msg) {pending_path_ = msg;});
