@@ -199,6 +199,7 @@ public:
     max_wheel_ = load_positive_param("max_wheel");
     const auto lookahead_distance = load_positive_param("lookahead_distance");
     const auto wheel_goal_tolerance = load_positive_param("wheel_goal_tolerance");
+    const auto path_spacing = load_positive_param("path_spacing");
     clock_slot_count_ = declare_parameter<int>("clock_slot_count");
     const auto clock_slot_angle = load_positive_param("clock_slot_angle");
     const auto clock_zero_angle = declare_parameter<double>("clock_zero_angle");
@@ -207,7 +208,8 @@ public:
 
     // Validate parameters: wheel, clock
     longitudinal_.configure(wheel_radius_, max_v);
-    lateral_.configure(wheel_radius_, wheel_separation, lookahead_distance, wheel_goal_tolerance);
+    lateral_.configure(
+      wheel_radius_, wheel_separation, lookahead_distance, wheel_goal_tolerance, path_spacing);
     if (!clock_controller_.configure(
       clock_slot_count_, clock_slot_angle, clock_zero_angle, clock_direction, clock_angle_tolerance))
     {
@@ -229,6 +231,7 @@ public:
     lm_target_reached_pub_ = create_publisher<std_msgs::msg::Bool>("/control/lm_target_reached", 10);
     gripper_target_reached_pub_ = create_publisher<std_msgs::msg::Bool>("/control/gripper_target_reached", 10);
     wheel_target_reached_pub_ = create_publisher<std_msgs::msg::Bool>("/control/wheel_target_reached", 10);
+    tracking_path_pub_ = create_publisher<nav_msgs::msg::Path>("/control/tracking_path", 10);
     target_path_sub_ = create_subscription<nav_msgs::msg::Path>(
       "/planning/target_path", 10,
       [this](const nav_msgs::msg::Path & msg) {pending_path_ = msg;});
@@ -463,6 +466,7 @@ private:
     // Store the validated path. Planning republishes the same path every tick; only a changed
     // path resets arrival.
     lateral_.set_target(path);
+    tracking_path_pub_->publish(lateral_.target_path());
     if (path.poses != last_path_poses_) {
       last_path_poses_ = path.poses;
       publish_bool(wheel_target_reached_pub_, false);
@@ -473,6 +477,7 @@ private:
   {
     // Invalid or empty path: stop until planning sends a new path.
     lateral_.clear_target();
+    tracking_path_pub_->publish(lateral_.target_path());
     if (!last_path_poses_.empty()) {
       last_path_poses_.clear();
       publish_bool(wheel_target_reached_pub_, false);
@@ -724,6 +729,7 @@ private:
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr lm_target_reached_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr gripper_target_reached_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr wheel_target_reached_pub_;
+  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr tracking_path_pub_;
   rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr target_path_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr arm_target_sub_;

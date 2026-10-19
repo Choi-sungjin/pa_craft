@@ -21,6 +21,9 @@ control_master:
     # Pure Pursuit tuning: path and odometry must use the same frame, at the axle center.
     lookahead_distance: 0.3  # [m] starting value; tune on the robot
     wheel_goal_tolerance: 0.03  # [m] stop when the path endpoint is within this distance
+    # Incoming paths are resampled every path_spacing along a natural cubic spline through
+    # their points and republished on /control/tracking_path. Keep it well below lookahead.
+    path_spacing: 0.02  # [m]
 
     # 12-slot puck storage: 0 motor rad = slot 12; positive CCW increases slot numbers.
     # Adjacent slots are 30 motor degrees (pi/6 rad); shortest rotation is chosen.

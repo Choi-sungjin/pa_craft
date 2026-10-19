@@ -87,6 +87,12 @@ planning before publishing if necessary. Pose coordinates follow ROS convention:
 forward +x, left +y, counterclockwise positive yaw. Pose orientations in the path
 are not used; this controller tracks positions, without a final heading maneuver.
 
+Incoming path points are joined by a natural cubic spline parameterized by
+cumulative chord length and resampled every `path_spacing` (the first and last
+points are kept exactly). The resampled path is tracked and republished on
+`/control/tracking_path` for visualization; an empty path is published when the
+target is cleared. Sharp corners may overshoot slightly between points.
+
 The longitudinal controller limits `target_v`. Pure Pursuit
 selects a path point at least `lookahead_distance` away, starting at the nearest
 path point; it uses the last available point if the remaining path is shorter.
