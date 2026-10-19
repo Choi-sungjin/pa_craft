@@ -8,7 +8,7 @@ namespace craft_control
 
 bool LmController::configure(
   const std::string & joint_name, double min_angle, double max_angle,
-  double direction, double offset, double pulley_radius, double gear_ratio)
+  double direction, double offset, double pulley_radius, double gear_ratio, double tolerance)
 {
   if (joint_name.empty() || !std::isfinite(min_angle) || !std::isfinite(max_angle) ||
     min_angle >= max_angle || !std::isfinite(direction) || std::abs(direction) != 1.0 ||
@@ -30,20 +30,19 @@ bool LmController::configure(
   offset_ = offset;
   pulley_radius_ = pulley_radius;
   gear_ratio_ = gear_ratio;
+  tolerance_ = tolerance;
   conversion_ready_ = calibrated;
-  configured_ = true;
-  has_target_ = false;
   return true;
 }
 
 bool LmController::is_valid_target(const std::string & joint_name, double position) const
 {
-  return configured_ && conversion_ready_ && joint_name == joint_name_ &&
+  return conversion_ready_ && joint_name == joint_name_ &&
          std::isfinite(position) &&
          std::isfinite(offset_ + direction_ * gear_ratio_ * position / pulley_radius_);
 }
 
-void LmController::set_target_position(double position)
+void LmController::set_target(double position)
 {
   target_position_ = position;
   has_target_ = true;
@@ -54,14 +53,17 @@ void LmController::clear_target()
   has_target_ = false;
 }
 
-double LmController::compute_lm_command(double current_angle) const
+double LmController::compute_command(double current_angle) const
 {
-  if (!configured_) {
-    return current_angle;
-  }
-  const double requested = has_target_ && conversion_ready_ ?
+  const double requested = has_target_ ?
     offset_ + direction_ * gear_ratio_ * target_position_ / pulley_radius_ : current_angle;
   return std::clamp(requested, min_angle_, max_angle_);
+}
+
+// 목표가 있고, LM 모터 피드백이 목표 모터각에서 허용 오차 이내면 완료.
+bool LmController::is_target_reached(double current_angle) const
+{
+  return has_target_ && std::abs(current_angle - compute_command(current_angle)) <= tolerance_;
 }
 
 }  // namespace craft_control

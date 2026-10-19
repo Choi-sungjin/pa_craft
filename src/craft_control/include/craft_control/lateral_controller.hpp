@@ -12,12 +12,22 @@ namespace craft_control
 class LateralController
 {
 public:
-  bool set_params(double wheel_radius, double wheel_separation, double lookahead, double goal_tolerance);
-  bool set_odom(const nav_msgs::msg::Odometry & odom);
-  bool set_path(const nav_msgs::msg::Path & path);
+  // All four values are validated positive by ControlMaster.
+  void configure(double wheel_radius, double wheel_separation, double lookahead, double goal_tolerance);
+  // Nonempty frame_id, finite position, nonzero quaternion.
+  bool is_valid_odom(const nav_msgs::msg::Odometry & odom) const;
+  // Nonempty path in one nonempty frame with finite positions.
+  bool is_valid_target(const nav_msgs::msg::Path & path) const;
+  // Store odometry/path after validation succeeds; no validation here.
+  void set_odom(const nav_msgs::msg::Odometry & odom);
+  void clear_odom();
+  void set_target(const nav_msgs::msg::Path & path);
+  void clear_target();
   bool can_track(double target_v) const;
+  // Path endpoint within goal_tolerance of the current odometry (same frame required).
+  bool is_target_reached() const;
   // Pure Pursuit: omega = v * curvature. Only the rotational wheel-speed contribution.
-  std::array<double, 2> get_wheel_speed(double linear_speed) const;  // {left, right} [rad/s]
+  std::array<double, 2> compute_command(double linear_speed) const;  // {left, right} [rad/s]
 
 private:
   nav_msgs::msg::Odometry odom_;
@@ -27,7 +37,6 @@ private:
   double wheel_separation_ = 0.0;
   double lookahead_ = 0.0;
   double goal_tolerance_ = 0.0;
-  bool configured_ = false;
   bool have_odom_ = false;
 };
 

@@ -8,10 +8,8 @@ namespace craft_control
 
 bool GripperController::configure(
   double min_angle, double max_angle, double open_angle, double close_angle,
-  double grasp_current_threshold_a, double grasp_current_debounce)
+  double grasp_current_threshold_a, double grasp_current_debounce, double tolerance)
 {
-  configured_ = false;
-  has_target_ = false;
   if (!std::isfinite(min_angle) || !std::isfinite(max_angle) ||
     !std::isfinite(open_angle) || !std::isfinite(close_angle) ||
     min_angle >= max_angle || open_angle < min_angle || open_angle > max_angle ||
@@ -34,15 +32,13 @@ bool GripperController::configure(
   grasp_current_threshold_a_ = grasp_current_threshold_a;
   grasp_current_debounce_ = grasp_current_debounce;
   grasp_detection_configured_ = detection_enabled;
-  configured_ = true;
+  tolerance_ = tolerance;
   return true;
 }
 
-bool GripperController::set_target(bool close)
+// set gripper open/close target; reset grasp detection when the direction changes
+void GripperController::set_target(bool close)
 {
-  if (!configured_) {
-    return false;
-  }
   if (!has_target_ || closing_ != close) {
     overcurrent_time_ = 0.0;
     grasped_ = false;
@@ -50,28 +46,26 @@ bool GripperController::set_target(bool close)
   target_angle_ = close ? close_angle_ : open_angle_;
   closing_ = close;
   has_target_ = true;
-  return true;
 }
 
-double GripperController::compute_gripper_command(double current_angle) const
+double GripperController::compute_command(double current_angle) const
 {
-  if (!configured_) {
-    return current_angle;
-  }
   const double requested = has_target_ ? target_angle_ : current_angle;
   return std::clamp(requested, min_angle_, max_angle_);
 }
 
-bool GripperController::is_target_reached(double current_angle, double tolerance) const
+// 열기는 열림 각도 도달, 닫기는 닫힘 각도 도달 또는 물체 파지(전류 기반)로 완료.
+// 물체를 잡으면 닫힘 각도까지 가지 못하므로 파지도 완료로 본다.
+bool GripperController::is_target_reached(double current_angle) const
 {
-  return configured_ && has_target_ && std::isfinite(current_angle) &&
-         std::isfinite(tolerance) && tolerance >= 0.0 &&
-         std::abs(current_angle - target_angle_) <= tolerance;
+  return has_target_ &&
+         (std::abs(current_angle - compute_command(current_angle)) <= tolerance_ ||
+         (closing_ && is_grasped()));
 }
 
 void GripperController::update_current_feedback(double motor_current_a, double dt)
 {
-  if (!configured_ || !has_target_ || !closing_ || !grasp_detection_configured_ ||
+  if (!has_target_ || !closing_ || !grasp_detection_configured_ ||
     !std::isfinite(motor_current_a) || !std::isfinite(dt) || dt <= 0.0)
   {
     return;
