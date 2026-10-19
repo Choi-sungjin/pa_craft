@@ -35,7 +35,7 @@ control_master:
     clock_angle_tolerance: 0.03490658503988659  # [rad] 2 degrees; tune alignment tolerance
 
     # Rotational arm motors only: shoulder, elbow, wrist_pitch, tool_roll [motor rad].
-    # TODO: update the firmware receiver and replace these placeholder limits with measured limits.
+    # TODO: replace these placeholder limits with measured limits in both host and firmware config.
     arm_min_angle: [-3.14, -1.57, -1.57, -1.57]
     arm_max_angle: [3.14, 1.57, 1.57, 1.57]
 
@@ -68,7 +68,7 @@ control_master:
     gripper_close_angle: 0.0
     gripper_mapping_confirmed: false
     gripper_angle_tolerance: 0.03490658503988659  # [motor rad] 2 degrees, same as every motor
-    # TODO: append gripper_current_a [A] to arm+LM OpenCR feedback and calibrate these thresholds.
+    # Firmware appends gripper_current_a [A]; calibrate its model-specific scale and these thresholds.
     # All-zero values disable current-based grasp estimation.
     grasp_current_threshold_a: 0.0
     grasp_current_debounce: 0.0

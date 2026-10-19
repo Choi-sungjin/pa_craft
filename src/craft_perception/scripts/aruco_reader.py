@@ -75,7 +75,7 @@ def shm_frames(node, rclpy):
         if not latest:
             cv2.waitKey(1)  # keep window responsive while waiting
             continue
-        off, w, h = (int(v) for v in latest[-1])
+        off, w, h = (int(v) for v in latest[-1][:3])
         latest.clear()
         if mm is None:
             fd = os.open('/dev/shm/craft_vision', os.O_RDONLY)

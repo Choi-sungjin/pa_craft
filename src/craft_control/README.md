@@ -149,7 +149,8 @@ does not recalculate or change the latched target angle during motion.
 
 OpenCR must accept and report **unwrapped motor angles in radians**, including
 negative angles and angles above 2*pi, and track the commanded absolute angle.
-Firmware is outside this change. Feedback lists the channels shared with the
+The implementation is in `firmware/wheel_clock`; see `firmware/README.md` for
+hardware configuration and builds. Feedback lists the channels shared with the
 command first, in the same order, then the board-specific state:
 
 ```text

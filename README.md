@@ -10,8 +10,9 @@ pa_craft/
 ├── README.md
 ├── requirements.txt
 ├── firmware/
-│   └── motor_controller/
-│       └── motor_controller.ino
+│   ├── wheel_clock/            # wheel x2 + clock OpenCR
+│   ├── lm_arm/                 # LM + arm x4 + gripper OpenCR
+│   └── libraries/CraftMotorFirmware/  # 공통 통신·모터 제어
 └── src/
     ├── craft_bringup/
     │   ├── CMakeLists.txt
@@ -46,13 +47,18 @@ pa_craft/
     │   ├── config/
     │   │   └── slam.yaml
     │   ├── scripts/
-    │   │   ├── aruco_reader.py
-    │   │   ├── depth_heatmap.py
-    │   │   ├── knob_depth.py
-    │   │   └── knob_lever.py
+    │   │   └── *.py              # 기존 비교·개발 도구 (런타임 미사용)
+    │   ├── include/craft_perception/ # 일반 C++ 모듈 인터페이스
+    │   ├── msg/                  # 검출·손잡이 관측 메시지
+    │   ├── models/knob_sign/      # v3.pt에서 변환한 ncnn 모델
     │   └── src/
-    │       ├── object_detector.cpp
-    │       ├── object_pose_estimator.cpp
+    │       ├── perception_master.cpp # 모듈별 타이머·실행 그룹·ROS 입출력
+    │       ├── aruco_reader.cpp
+    │       ├── object_detector.cpp # ncnn YOLO
+    │       ├── knob_depth.cpp
+    │       ├── knob_lever.cpp
+    │       ├── depth_heatmap.cpp
+    │       ├── shared_frame.cpp
     │       ├── obstacle_detector.cpp
     │       └── state_estimator.cpp
     ├── craft_planning/
@@ -88,10 +94,10 @@ pa_craft/
 | --- | --- |
 | `src/craft_bringup` | ROS 2 노드를 함께 실행하는 launch 파일 |
 | `src/craft_sensors` | LiDAR, 카메라, IMU, 엔코더 입력 처리 |
-| `src/craft_perception` | 객체·장애물 인지와 로봇 상태 추정 |
+| `src/craft_perception` | C++ PerceptionMaster·ncnn·ArUco·깊이·레버 인지 ([실행·주기 설정](src/craft_perception/README.md)) |
 | `src/craft_mission` | 미션 상태와 진행 순서 관리 |
 | `src/craft_planning` | 주행 경로 계획 |
 | `src/craft_control` | 로봇 팔·시계 조작 계획, 주행 및 조작 목표를 제어 입력으로 연결 |
-| `firmware/motor_controller` | 모터 컨트롤러 펌웨어 |
+| `firmware/wheel_clock`, `firmware/lm_arm` | OpenCR 두 대의 모터 펌웨어 ([설정·빌드 안내](firmware/README.md)) |
 
 `requirements.txt`는 Python 의존성 목록입니다. `build/`, `install/`, `log/`, `venv-craft/` 같은 로컬 생성물은 `.gitignore`로 제외합니다.

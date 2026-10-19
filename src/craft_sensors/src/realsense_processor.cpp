@@ -1,15 +1,17 @@
 // realsense_processor: D435 color + depth (librealsense2) -> depth aligned to color -> shared memory
-// pub: /vision/image_offset (std_msgs/UInt64MultiArray [offset, width, height])
-//      slot at that offset in /dev/shm/craft_vision: BGR8 (w*h*3) then aligned depth Z16 (w*h*2, 1 unit = 1 mm)
+// pub: /vision/image_offset (UInt64MultiArray [offset,w,h,sequence,stamp_ns,depth_unit_nm])
+//      /dev/shm/craft_vision slot: BGR8, aligned depth Z16, uint64 sequence trailer
 //      (no image copy over DDS; readers that only need color read the first w*h*3 bytes)
 // pub: /vision/camera_info (color intrinsics, valid for the aligned depth too)
 // pub: /vision/image, /lidar/merged (TODO)
 
 #include <fcntl.h>
 #include <sys/mman.h>
+#include <sys/file.h>
 #include <unistd.h>
 
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <memory>
 #include <stdexcept>
@@ -26,8 +28,7 @@
 using namespace std::chrono_literals;
 
 constexpr char kShmName[] = "/craft_vision";
-// ponytail: ring of 4 slots, no lock. Reader must finish within 3 frames (~100ms @30fps),
-// add a seq/lock per slot if a slow reader shows torn frames.
+// Protocol v2: each slot ends with a uint64 sequence; flock protects snapshots.
 constexpr size_t kSlots = 4;
 
 struct Unmap
@@ -61,17 +62,19 @@ public:
       depth_sensor.set_option(RS2_OPTION_DEPTH_UNITS, 0.001f);  // Z16 = mm
     }
 
+    depth_unit_nm_ = static_cast<uint64_t>(std::llround(depth_sensor.get_depth_scale() * 1e9));
     color_bytes_ = static_cast<size_t>(w_) * h_ * 3;
-    slot_size_ = color_bytes_ + static_cast<size_t>(w_) * h_ * 2;
+    slot_size_ = color_bytes_ + static_cast<size_t>(w_) * h_ * 2 + sizeof(uint64_t);
     const int fd = shm_open(kShmName, O_CREAT | O_RDWR, 0666);
-    if (fd < 0 || ftruncate(fd, slot_size_ * kSlots) < 0) {
-      throw std::runtime_error("shm_open/ftruncate failed");
+    if (fd < 0) throw std::runtime_error("shm_open failed");
+    if (flock(fd, LOCK_EX) != 0) { close(fd); throw std::runtime_error("shm flock failed"); }
+    if (ftruncate(fd, slot_size_ * kSlots) < 0) {
+      flock(fd, LOCK_UN); close(fd); throw std::runtime_error("shm ftruncate failed");
     }
-    void * p = mmap(nullptr, slot_size_ * kSlots, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    close(fd);
-    if (p == MAP_FAILED) {
-      throw std::runtime_error("mmap failed");
-    }
+    void *p = mmap(nullptr, slot_size_ * kSlots, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    flock(fd, LOCK_UN);
+    if (p == MAP_FAILED) { close(fd); throw std::runtime_error("mmap failed"); }
+    shm_fd_ = fd;
     shm_ = std::unique_ptr<uint8_t, Unmap>(static_cast<uint8_t *>(p), Unmap{slot_size_ * kSlots});
 
     const auto in = profile.get_stream(RS2_STREAM_COLOR).as<rs2::video_stream_profile>().get_intrinsics();
@@ -96,6 +99,7 @@ public:
   ~RealsenseProcessor() override
   {
     pipe_.stop();
+    if (shm_fd_ >= 0) close(shm_fd_);
     shm_unlink(kShmName);
   }
 
@@ -115,15 +119,21 @@ private:
     }
 
     const size_t offset = slot_ * slot_size_;
+    if (flock(shm_fd_, LOCK_EX | LOCK_NB) != 0) return;
     uint8_t * dst = shm_.get() + offset;
     std::memcpy(dst, color.get_data(), color_bytes_);
-    std::memcpy(dst + color_bytes_, depth.get_data(), slot_size_ - color_bytes_);
+    std::memcpy(dst + color_bytes_, depth.get_data(), slot_size_ - color_bytes_ - sizeof(uint64_t));
+    ++sequence_;
+    std::memcpy(dst + slot_size_ - sizeof(uint64_t), &sequence_, sizeof(sequence_));
+    flock(shm_fd_, LOCK_UN);
     slot_ = (slot_ + 1) % kSlots;
 
     auto msg = std::make_unique<std_msgs::msg::UInt64MultiArray>();
-    msg->data = {offset, static_cast<uint64_t>(w_), static_cast<uint64_t>(h_)};
+    const auto stamp = now();
+    msg->data = {offset, static_cast<uint64_t>(w_), static_cast<uint64_t>(h_),
+      sequence_, static_cast<uint64_t>(stamp.nanoseconds()), depth_unit_nm_};
     vision_image_offset_pub_->publish(std::move(msg));
-    camera_info_.header.stamp = now();
+    camera_info_.header.stamp = stamp;
     camera_info_pub_->publish(camera_info_);
     // TODO: depth frame -> /lidar/merged
   }
@@ -132,6 +142,8 @@ private:
   rs2::align align_;
   int w_{0}, h_{0};
   size_t color_bytes_{0}, slot_size_{0}, slot_{0};
+  int shm_fd_{-1};
+  uint64_t sequence_{0}, depth_unit_nm_{1000000};
   std::unique_ptr<uint8_t, Unmap> shm_;
   sensor_msgs::msg::CameraInfo camera_info_;
 

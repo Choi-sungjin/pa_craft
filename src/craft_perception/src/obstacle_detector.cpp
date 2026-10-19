@@ -1,37 +1,34 @@
-// obstacle_detector: merged scan -> obstacles
-// sub: /lidar/merged
-// pub: /lidar/obstacle
+#include "craft_perception/obstacle_detector.hpp"
+#include <cmath>
+#include <stdexcept>
 
-#include "rclcpp/rclcpp.hpp"
-#include "geometry_msgs/msg/pose_array.hpp"
-#include "sensor_msgs/msg/laser_scan.hpp"
+namespace craft_perception {
+bool ObstacleDetector::configure(double maximum_range, int stride) {
+  if (!std::isfinite(maximum_range) || maximum_range <= 0 || stride < 1) return false;
+  maximum_range_ = maximum_range; stride_ = stride;
+  return true;
+}
 
-class ObstacleDetector : public rclcpp::Node
-{
-public:
-  ObstacleDetector()
-  : Node("obstacle_detector")
-  {
-    lidar_obstacle_pub_ = create_publisher<geometry_msgs::msg::PoseArray>("/lidar/obstacle", 10);
-    lidar_merged_sub_ = create_subscription<sensor_msgs::msg::LaserScan>(
-      "/lidar/merged", 10, [this](const sensor_msgs::msg::LaserScan & msg) {on_lidar_merged(msg);});
+bool ObstacleDetector::is_valid_input(const sensor_msgs::msg::LaserScan &scan) const {
+  return !scan.header.frame_id.empty() && std::isfinite(scan.angle_min) &&
+    std::isfinite(scan.angle_increment) && std::isfinite(scan.range_min) &&
+    std::isfinite(scan.range_max) && scan.range_min >= 0 && scan.range_max >= scan.range_min;
+}
+
+geometry_msgs::msg::PoseArray ObstacleDetector::compute_result(const sensor_msgs::msg::LaserScan &scan) const {
+  geometry_msgs::msg::PoseArray output;
+  output.header = scan.header;
+  for (size_t i = 0; i < scan.ranges.size(); i += stride_) {
+    const double range = scan.ranges[i];
+    if (!std::isfinite(range) || range < scan.range_min || range > scan.range_max ||
+        range > maximum_range_) continue;
+    const double angle = scan.angle_min + i * scan.angle_increment;
+    geometry_msgs::msg::Pose point;
+    point.position.x = range * std::cos(angle);
+    point.position.y = range * std::sin(angle);
+    point.orientation.w = 1;
+    output.poses.push_back(point);
   }
-
-private:
-  void on_lidar_merged(const sensor_msgs::msg::LaserScan & msg)
-  {
-    (void)msg;
-    // TODO
-  }
-
-  rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr lidar_obstacle_pub_;
-  rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr lidar_merged_sub_;
-};
-
-int main(int argc, char ** argv)
-{
-  rclcpp::init(argc, argv);
-  rclcpp::spin(std::make_shared<ObstacleDetector>());
-  rclcpp::shutdown();
-  return 0;
+  return output;
+}
 }

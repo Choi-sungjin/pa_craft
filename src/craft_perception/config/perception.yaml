@@ -1,0 +1,39 @@
+perception_master:
+  ros__parameters:
+    executor_threads: 6
+    ncnn_threads_per_detector: 1
+    max_input_age_s: 0.5
+    model_dir: models/knob_sign  # relative to installed craft_perception share
+    input_blob: in0
+    output_blob: out0
+    input_size: 640
+    # Must match exported metadata.yaml exactly. Current custom_yolo26 v3 model.
+    class_names: [knob, sign_red, sign_yellow, sign_green, sign_off]
+    knob_class_id: 0
+    confidence: 0.5
+    nms_iou: 0.45
+    max_detections: 100
+    realsense_frame: camera_color_optical_frame
+    c310_frame: c310_optical_frame
+    realsense_shm: /craft_vision
+    c310_shm: /craft_c310
+    aruco_dictionary: 0  # DICT_4X4_50
+    panel_grow: 2.0
+    panel_tolerance_m: 0.03
+    panel_min_points: 50
+    heatmap_near_m: 0.2
+    heatmap_far_m: 0.3
+    # Explicit passthrough until actual state fusion is implemented.
+    odometry_source_topic: /wheel/odom
+    obstacle_max_range_m: 3.0
+    obstacle_stride: 1
+    # Every module's Hz is required here. Master validates and creates timers;
+    # modules do not declare ROS parameters or run their own loops.
+    object_detector: {enabled: true, hz: 10.0}
+    c310_detector: {enabled: true, hz: 10.0}
+    aruco: {enabled: true, hz: 15.0}
+    knob_depth: {enabled: true, hz: 10.0}
+    knob_lever: {enabled: true, hz: 15.0}
+    depth_heatmap: {enabled: true, hz: 5.0}
+    state_estimator: {enabled: true, hz: 100.0}
+    obstacle_detector: {enabled: true, hz: 20.0}

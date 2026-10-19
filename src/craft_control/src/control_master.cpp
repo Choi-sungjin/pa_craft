@@ -611,7 +611,7 @@ private:
       pending_clock_slot_.reset();
     }
     if (have_arm_lm_feedback_) {
-      if (arm_lm_feedback_updated) {
+      if (arm_lm_feedback_updated && arm_lm_state_ != 2) {
         gripper_controller_.update_current_feedback(gripper_current_a_, dt);
         std_msgs::msg::Bool grasped_msg;
         grasped_msg.data = gripper_controller_.is_grasped();
@@ -629,13 +629,22 @@ private:
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "arm+LM OpenCR write failed");
       } else if (arm_lm_feedback_updated) {
         // Fresh feedback against the targets just sent; planning sequences the axes.
-        publish_bool(arm_target_reached_pub_, arm_controller_.is_target_reached(arm_joints_));
-        publish_bool(lm_target_reached_pub_, lm_controller_.is_target_reached(lm_angle_));
-        publish_bool(gripper_target_reached_pub_, gripper_controller_.is_target_reached(gripper_angle_));
+        publish_bool(arm_target_reached_pub_,
+          arm_lm_state_ != 2 && arm_controller_.is_target_reached(arm_joints_));
+        publish_bool(lm_target_reached_pub_,
+          arm_lm_state_ != 2 && lm_controller_.is_target_reached(lm_angle_));
+        publish_bool(gripper_target_reached_pub_,
+          arm_lm_state_ != 2 && gripper_controller_.is_target_reached(gripper_angle_));
       }
       std_msgs::msg::Int32 msg;
       msg.data = arm_lm_state_;
       arm_lm_state_pub_->publish(msg);
+      if (arm_lm_state_ == 2) {
+        publish_bool(arm_target_reached_pub_, false);
+        publish_bool(lm_target_reached_pub_, false);
+        publish_bool(gripper_target_reached_pub_, false);
+        publish_bool(gripper_grasped_pub_, false);
+      }
     }
 
     if (have_clock_wheel_feedback_) {
@@ -661,7 +670,11 @@ private:
       if (command_sent && !pending_clock_slot_) {
         clock_target_sent_ = true;
       }
-      publish_bool(wheel_target_reached_pub_, lateral_.is_target_reached());
+      const bool board_faulted = wheel_state_ == 2 || clock_state_ == 2;
+      if (board_faulted) {
+        clock_target_sent_ = false;
+      }
+      publish_bool(wheel_target_reached_pub_, !board_faulted && lateral_.is_target_reached());
       std_msgs::msg::Int32 wheel_state_msg;
       wheel_state_msg.data = wheel_state_;
       wheel_state_pub_->publish(wheel_state_msg);
@@ -670,7 +683,8 @@ private:
       clock_state_pub_->publish(clock_state_msg);
       if (clock_wheel_feedback_updated) {
         std_msgs::msg::Int32 slot_msg;
-        slot_msg.data = clock_state_ == 0 ? clock_controller_.get_current_slot(clock_angle_) : 0;
+        slot_msg.data = !board_faulted && clock_state_ == 0 ?
+          clock_controller_.get_current_slot(clock_angle_) : 0;
         clock_slot_pub_->publish(slot_msg);
         std_msgs::msg::Bool reached_msg;
         reached_msg.data = clock_target_sent_ && !pending_clock_slot_ && command_sent &&

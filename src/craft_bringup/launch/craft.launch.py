@@ -9,8 +9,7 @@ from launch_ros.actions import Node
 NODES = {
     'craft_sensors': ['lidar_processor', 'realsense_processor', 'c310_processor', 'imu_processor',
                       'wheel_encoder_processor', 'arm_encoder_processor'],
-    'craft_perception': ['state_estimator', 'obstacle_detector', 'object_pose_estimator',
-                         'object_detector', 'aruco_reader'],
+    'craft_perception': ['perception_master'],
     'craft_mission': ['mission_fsm'],
     'craft_control': ['control_master'],
 }
@@ -21,7 +20,9 @@ def generate_launch_description():
     camera_yaml = os.path.join(get_package_share_directory('craft_sensors'), 'config', 'camera.yaml')
     control_yaml = os.path.join(get_package_share_directory('craft_control'), 'config', 'control.yaml')
     planning_yaml = os.path.join(get_package_share_directory('craft_planning'), 'config', 'planning.yaml')
-    params = {'craft_sensors': [camera_yaml], 'craft_control': [control_yaml]}
+    perception_yaml = os.path.join(get_package_share_directory('craft_perception'), 'config', 'perception.yaml')
+    params = {'craft_sensors': [camera_yaml], 'craft_control': [control_yaml],
+              'craft_perception': [perception_yaml, {'model_dir': LaunchConfiguration('perception_model_dir')}]}
 
     nodes = [Node(package=pkg, executable=exe, output='screen',
                   parameters=params.get(pkg, []))
@@ -35,5 +36,7 @@ def generate_launch_description():
         DeclareLaunchArgument('map_file', default_value='maps/maze.stl',
                               description='Gazebo binary STL, ROS map YAML or block text '
                                           '(relative to craft_planning share)'),
+        DeclareLaunchArgument('perception_model_dir', default_value='models/knob_sign',
+                              description='NCNN model directory; relative to craft_perception share'),
         *nodes,
     ])
