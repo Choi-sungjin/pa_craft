@@ -30,6 +30,7 @@ struct Frame {
   sensor_msgs::msg::CameraInfo::ConstSharedPtr info;
   uint64_t id;
 };
+using FramePtr = std::shared_ptr<const Frame>;
 struct DetectedFrame {
   std::shared_ptr<const Frame> frame;
   std::vector<Detection> boxes;
@@ -76,7 +77,10 @@ private:
   bool consume(const std::shared_ptr<const Frame> &frame, Task &task);
   std::shared_ptr<const DetectedFrame> new_detection(Task &task);
   static std::optional<Intrinsics> intrinsics(const Frame &frame);
-  static msg::Detection message(const Detection &box, const std::vector<std::string> &labels);
+  template <typename Compute, typename Publish>
+  bool on_frame(Camera camera, Task &task, Compute compute, Publish publish);
+  template <typename Compute, typename Publish>
+  bool on_detection(Task &task, Compute compute, Publish publish);
   bool d435_yolo(Task &task);
   bool d435_aruco(Task &task);
   bool d435_knob_depth(Task &task);

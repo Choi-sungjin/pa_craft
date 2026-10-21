@@ -35,6 +35,78 @@ std::unique_ptr<geometry_msgs::msg::PoseArray> poses(
   }
   return output;
 }
+
+msg::Detection message(const Detection &box, const std::vector<std::string> &labels) {
+  msg::Detection output;
+  output.class_id = box.class_id;
+  output.label = labels.at(box.class_id);
+  output.confidence = box.score;
+  output.bbox = {box.box.x, box.box.y, box.box.width, box.box.height};
+  return output;
+}
+
+std::unique_ptr<msg::DetectionArray> detections(const std_msgs::msg::Header &header,
+  const std::vector<Detection> &boxes, const std::vector<std::string> &labels) {
+  auto output = std::make_unique<msg::DetectionArray>();
+  output->header = header;
+  for (const auto &box : boxes) output->detections.push_back(message(box, labels));
+  return output;
+}
+
+std::unique_ptr<msg::KnobObservationArray> knob_depth_message(const std_msgs::msg::Header &header,
+  const std::vector<KnobDepthObservation> &knobs, const std::vector<std::string> &labels) {
+  auto output = std::make_unique<msg::KnobObservationArray>();
+  output->header = header;
+  for (const auto &knob : knobs) {
+    msg::KnobObservation observation;
+    observation.detection = message(knob.detection, labels);
+    if (knob.depth) {
+      observation.depth_valid = true;
+      observation.position = point(knob.depth->position);
+      observation.normal_valid = knob.depth->normal_valid;
+      observation.panel_normal = vector(knob.depth->normal);
+      observation.plane_rms_m = knob.depth->plane_rms_m;
+    }
+    output->observations.push_back(observation);
+  }
+  return output;
+}
+
+std::unique_ptr<msg::KnobObservationArray> knob_lever_message(const std_msgs::msg::Header &header,
+  const std::vector<LeverObservation> &levers, const std::vector<std::string> &labels) {
+  auto output = std::make_unique<msg::KnobObservationArray>();
+  output->header = header;
+  for (const auto &lever : levers) {
+    msg::KnobObservation observation;
+    observation.detection = message(lever.detection, labels);
+    observation.lever_valid = lever.angle.has_value();
+    observation.lever_angle = lever.angle.value_or(0);
+    output->observations.push_back(observation);
+  }
+  return output;
+}
+
+std::unique_ptr<msg::PuckObservationArray> puck_message(const std_msgs::msg::Header &header,
+  const std::vector<PuckObservation> &pucks, const std::vector<std::string> &labels) {
+  auto output = std::make_unique<msg::PuckObservationArray>();
+  output->header = header;
+  for (const auto &puck : pucks) {
+    msg::PuckObservation observation;
+    observation.detection = message(puck.detection, labels);
+    if (puck.axis) {
+      observation.axis_valid = true;
+      observation.center = point(puck.axis->center);
+      observation.axis = vector(puck.axis->axis);
+      observation.shelf_normal = vector(puck.axis->normal);
+      observation.standing = puck.axis->standing;
+      observation.height_m = puck.axis->height_m;
+      observation.plane_rms_m = puck.axis->plane_rms_m;
+      observation.points = puck.axis->points;
+    }
+    output->observations.push_back(observation);
+  }
+  return output;
+}
 }  // namespace
 
 PerceptionMaster::PerceptionMaster() : Node("perception_master") {
@@ -180,7 +252,7 @@ void PerceptionMaster::connect() {
     rclcpp::SubscriptionOptions options;
     options.callback_group = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
     image_subs_[camera] = create_subscription<std_msgs::msg::UInt64MultiArray>(
-      camera == kD435 ? "/vision/d435/image_offset" : "/vision/c310/image_offset", rclcpp::QoS(1),
+      camera == kD435 ? "/vision/d435/frame_meta" : "/vision/c310/frame_meta", rclcpp::QoS(1),
       [this, camera](std_msgs::msg::UInt64MultiArray::ConstSharedPtr input) { receive_frame(camera, input->data); },
       options);
   }
@@ -218,11 +290,14 @@ bool PerceptionMaster::is_fresh_input(const builtin_interfaces::msg::Time &stamp
 void PerceptionMaster::add_task(const std::string &name, std::function<bool(Task &)> compute) {
   const auto schedule = schedules_.at(name);
   if (!schedule.enabled) return;
-  auto task = std::make_shared<Task>(); task->name = name; task->hz = schedule.hz;
+  auto task = std::make_shared<Task>(); 
+  task->name = name; 
+  task->hz = schedule.hz;
   task->group = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
   std::weak_ptr<Task> weak = task;
   task->timer = create_wall_timer(std::chrono::duration<double>(1 / schedule.hz), [this, weak, compute] {
-    auto current = weak.lock(); if (!current) return;
+    auto current = weak.lock(); 
+    if (!current) return;
     const auto start = Steady::now();
     bool processed = false, error = false;
     try { processed = compute(*current); }
@@ -264,8 +339,10 @@ std::shared_ptr<const Frame> PerceptionMaster::latest_frame(Camera camera) {
       "frame snapshot skipped (busy writer, overwritten slot or producer unavailable)");
     return {};
   }
-  auto frame = std::make_shared<Frame>(); frame->data = std::move(data);
-  frame->header.frame_id = input.frame_id; frame->header.stamp = stamp;
+  auto frame = std::make_shared<Frame>(); 
+  frame->data = std::move(data);
+  frame->header.frame_id = input.frame_id; 
+  frame->header.stamp = stamp;
   frame->id = input.generation;
   if (camera == kD435) {
     std::lock_guard<std::mutex> info_lock(info_mutex_);
@@ -295,122 +372,105 @@ std::optional<Intrinsics> PerceptionMaster::intrinsics(const Frame &frame) {
   return Intrinsics{k[0], k[4], k[2], k[5]};
 }
 
-msg::Detection PerceptionMaster::message(const Detection &box, const std::vector<std::string> &labels) {
-  msg::Detection output; output.class_id = box.class_id;
-  output.label = labels.at(box.class_id); output.confidence = box.score;
-  output.bbox = {box.box.x, box.box.y, box.box.width, box.box.height}; return output;
+// Every camera task: newest unseen input -> compute -> drop if it went stale meanwhile -> publish.
+// compute returns nullopt for invalid input (nothing is published).
+template <typename Compute, typename Publish>
+bool PerceptionMaster::on_frame(Camera camera, Task &task, Compute compute, Publish publish) {
+  const auto frame = latest_frame(camera);
+  if (!consume(frame, task)) return false;
+  auto result = compute(frame);
+  if (!result || !is_fresh_input(frame->header.stamp)) return false;
+  publish(frame, *result);
+  return true;
+}
+
+// Consumers of d435_yolo: the boxes and the frame they were detected on, plus intrinsics.
+template <typename Compute, typename Publish>
+bool PerceptionMaster::on_detection(Task &task, Compute compute, Publish publish) {
+  const auto detected = new_detection(task);
+  if (!detected) return false;
+  const auto in = intrinsics(*detected->frame);
+  if (!in) return false;
+  auto result = compute(*detected->frame->data, detected->boxes, *in);
+  if (!result || !is_fresh_input(detected->frame->header.stamp)) return false;
+  publish(detected->frame, *result);
+  return true;
 }
 
 // D435: one YOLO inference per frame; the boxes stay attached to the frame they came from.
 bool PerceptionMaster::d435_yolo(Task &task) {
-  auto frame = latest_frame(kD435);
-  if (!consume(frame, task)) return false;
-  auto boxes = d435_.detect(*frame->data);
-  if (!boxes || !is_fresh_input(frame->header.stamp)) return false;
-  auto output = std::make_unique<msg::DetectionArray>(); output->header = frame->header;
-  for (const auto &box : *boxes) output->detections.push_back(message(box, d435_labels_));
-  detection_pubs_[kD435]->publish(std::move(output));
-  auto result = std::make_shared<DetectedFrame>(); result->frame = frame; result->boxes = std::move(*boxes);
-  { std::lock_guard<std::mutex> lock(detected_mutex_); d435_detected_ = std::move(result); }
-  return true;
+  return on_frame(kD435, task,
+    [this](const FramePtr &frame) { return d435_.detect(*frame->data); },
+    [this](const FramePtr &frame, std::vector<Detection> &boxes) {
+      detection_pubs_[kD435]->publish(detections(frame->header, boxes, d435_labels_));
+      auto result = std::make_shared<DetectedFrame>();
+      result->frame = frame;
+      result->boxes = std::move(boxes);
+      std::lock_guard<std::mutex> lock(detected_mutex_);
+      d435_detected_ = std::move(result);
+    });
 }
 
 bool PerceptionMaster::d435_aruco(Task &task) {
-  auto frame = latest_frame(kD435);
-  if (!consume(frame, task)) return false;
-  const auto ids = d435_.read_aruco(*frame->data);
-  if (!ids || !is_fresh_input(frame->header.stamp)) return false;
-  auto output = std::make_unique<std_msgs::msg::Int32MultiArray>();
-  output->data.assign(ids->begin(), ids->end()); aruco_pub_->publish(std::move(output)); return true;
+  return on_frame(kD435, task,
+    [this](const FramePtr &frame) { return d435_.read_aruco(*frame->data); },
+    [this](const FramePtr &, std::vector<int> &ids) {
+      auto output = std::make_unique<std_msgs::msg::Int32MultiArray>();
+      output->data.assign(ids.begin(), ids.end());
+      aruco_pub_->publish(std::move(output));
+    });
 }
 
 bool PerceptionMaster::d435_knob_depth(Task &task) {
-  const auto detected = new_detection(task);
-  if (!detected) return false;
-  const auto &frame = *detected->frame;
-  const auto in = intrinsics(frame);
-  if (!in) return false;
-  const auto result = d435_.knob_depth(*frame.data, detected->boxes, *in);
-  if (!result || !is_fresh_input(frame.header.stamp)) return false;
-  auto output = std::make_unique<msg::KnobObservationArray>(); output->header = frame.header;
-  for (const auto &knob : *result) {
-    msg::KnobObservation observation; observation.detection = message(knob.detection, d435_labels_);
-    if (knob.depth) {
-      observation.depth_valid = true; observation.position = point(knob.depth->position);
-      observation.normal_valid = knob.depth->normal_valid;
-      observation.panel_normal = vector(knob.depth->normal);
-      observation.plane_rms_m = knob.depth->plane_rms_m;
-    }
-    output->observations.push_back(observation);
-  }
-  knob_pubs_[kD435]->publish(std::move(output));
-  return true;
+  return on_detection(task,
+    [this](const SharedFrame &data, const std::vector<Detection> &boxes, const Intrinsics &in) {
+      return d435_.knob_depth(data, boxes, in);
+    },
+    [this](const FramePtr &frame, std::vector<KnobDepthObservation> &knobs) {
+      knob_pubs_[kD435]->publish(knob_depth_message(frame->header, knobs, d435_labels_));
+    });
 }
 
 bool PerceptionMaster::d435_object_detector(Task &task) {
-  const auto detected = new_detection(task);
-  if (!detected) return false;
-  const auto &frame = *detected->frame;
-  const auto in = intrinsics(frame);
-  if (!in) return false;
-  const auto result = d435_.detect_objects(*frame.data, detected->boxes, *in);
-  if (!result || !is_fresh_input(frame.header.stamp)) return false;
-  object_pub_->publish(poses(frame.header, *result));
-  return true;
+  return on_detection(task,
+    [this](const SharedFrame &data, const std::vector<Detection> &boxes, const Intrinsics &in) {
+      return d435_.detect_objects(data, boxes, in);
+    },
+    [this](const FramePtr &frame, std::vector<ObjectPoint> &objects) {
+      object_pub_->publish(poses(frame->header, objects));
+    });
 }
 
 bool PerceptionMaster::d435_obstacle_detector(Task &task) {
-  const auto detected = new_detection(task);
-  if (!detected) return false;
-  const auto &frame = *detected->frame;
-  const auto in = intrinsics(frame);
-  if (!in) return false;
-  const auto result = d435_.detect_obstacles(*frame.data, detected->boxes, *in);
-  if (!result || !is_fresh_input(frame.header.stamp)) return false;
-  obstacle_pub_->publish(poses(frame.header, *result));
-  return true;
+  return on_detection(task,
+    [this](const SharedFrame &data, const std::vector<Detection> &boxes, const Intrinsics &in) {
+      return d435_.detect_obstacles(data, boxes, in);
+    },
+    [this](const FramePtr &frame, std::vector<ObjectPoint> &obstacles) {
+      obstacle_pub_->publish(poses(frame->header, obstacles));
+    });
 }
 
 // Puck runs its own model on the D435 frame, independent of d435_yolo.
 bool PerceptionMaster::d435_puck_axis(Task &task) {
-  auto frame = latest_frame(kD435);
-  if (!consume(frame, task)) return false;
-  const auto in = intrinsics(*frame);
-  if (!in) return false;
-  const auto result = d435_.puck_axis(*frame->data, *in);
-  if (!result || !is_fresh_input(frame->header.stamp)) return false;
-  auto output = std::make_unique<msg::PuckObservationArray>(); output->header = frame->header;
-  for (const auto &puck : *result) {
-    msg::PuckObservation observation; observation.detection = message(puck.detection, puck_labels_);
-    if (puck.axis) {
-      observation.axis_valid = true; observation.center = point(puck.axis->center);
-      observation.axis = vector(puck.axis->axis); observation.shelf_normal = vector(puck.axis->normal);
-      observation.standing = puck.axis->standing; observation.height_m = puck.axis->height_m;
-      observation.plane_rms_m = puck.axis->plane_rms_m; observation.points = puck.axis->points;
-    }
-    output->observations.push_back(observation);
-  }
-  puck_pub_->publish(std::move(output));
-  return true;
+  return on_frame(kD435, task,
+    [this](const FramePtr &frame) {
+      const auto in = intrinsics(*frame);
+      return in ? d435_.puck_axis(*frame->data, *in) : std::nullopt;
+    },
+    [this](const FramePtr &frame, std::vector<PuckObservation> &pucks) {
+      puck_pub_->publish(puck_message(frame->header, pucks, puck_labels_));
+    });
 }
 
 // C310: its own YOLO + lever per frame.
 bool PerceptionMaster::c310_knob_lever(Task &task) {
-  auto frame = latest_frame(kC310);
-  if (!consume(frame, task)) return false;
-  const auto result = c310_.knob_lever(*frame->data);
-  if (!result || !is_fresh_input(frame->header.stamp)) return false;
-  auto detections = std::make_unique<msg::DetectionArray>(); detections->header = frame->header;
-  for (const auto &box : result->detections) detections->detections.push_back(message(box, c310_labels_));
-  auto knobs = std::make_unique<msg::KnobObservationArray>(); knobs->header = frame->header;
-  for (const auto &lever : result->levers) {
-    msg::KnobObservation observation; observation.detection = message(lever.detection, c310_labels_);
-    observation.lever_valid = lever.angle.has_value(); observation.lever_angle = lever.angle.value_or(0);
-    knobs->observations.push_back(observation);
-  }
-  detection_pubs_[kC310]->publish(std::move(detections));
-  knob_pubs_[kC310]->publish(std::move(knobs));
-  return true;
+  return on_frame(kC310, task,
+    [this](const FramePtr &frame) { return c310_.knob_lever(*frame->data); },
+    [this](const FramePtr &frame, KnobLeverResult &result) {
+      detection_pubs_[kC310]->publish(detections(frame->header, result.detections, c310_labels_));
+      knob_pubs_[kC310]->publish(knob_lever_message(frame->header, result.levers, c310_labels_));
+    });
 }
 
 bool PerceptionMaster::lidar_obstacle(Task &task) {
