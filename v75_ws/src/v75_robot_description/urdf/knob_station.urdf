@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 노브 받침대 (경기장 물체). 좌표는 로봇 시작 위치의 base_link 기준 = world.
+     원래 v75 CAD의 base_link 메시 앞쪽 부분과 selector_link 를 떼어 만듦 -->
+<robot name="knob_station">
+  <material name="stand_slate">
+    <color rgba="0.55 0.63 0.78 1" />
+  </material>
+  <material name="knob_red">
+    <color rgba="0.95 0.15 0.20 1" />
+  </material>
+  <link name="station_base">
+    <visual name="station_stand">
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://v75_robot_description/meshes/knob_station_black.stl" scale="1 1 1" />
+      </geometry>
+      <material name="stand_slate" />
+    </visual>
+  </link>
+  <link name="knob_link">
+    <visual name="knob">
+      <!-- 메시의 축 구멍이 관절 원점에 오도록 이동 + 막대가 x축 방향이 되도록 45° 회전 -->
+      <origin xyz="-0.0636396 0.0636396 0" rpy="0 0 0.785398" />
+      <geometry>
+        <mesh filename="package://v75_robot_description/meshes/knob_link_red.stl" scale="1 1 1" />
+      </geometry>
+      <material name="knob_red" />
+    </visual>
+  </link>
+  <!-- 노브 회전축: 축 구멍 중심 (80, -140, 93.8) mm, 0~90 deg -->
+  <joint name="knob_joint" type="revolute">
+    <parent link="station_base" />
+    <child link="knob_link" />
+    <origin xyz="0.08 -0.14 0.0938" rpy="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="1" velocity="1" lower="0" upper="1.5707963" />
+  </joint>
+</robot>

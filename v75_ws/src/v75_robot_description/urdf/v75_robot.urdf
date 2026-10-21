@@ -1,0 +1,421 @@
+<?xml version='1.0' encoding='utf-8'?>
+<robot name="v75_robot">
+  <!-- 노브(selector)와 앞쪽 받침대는 로봇이 아니라 경기장 물체라서 urdf/knob_station.urdf 로 분리함 -->
+  <material name="body_slate">
+    <color rgba="0.55 0.63 0.78 1" />
+  </material>
+  <material name="orange">
+    <color rgba="1.0 0.55 0.12 1" />
+  </material>
+  <material name="mint">
+    <color rgba="0.20 0.85 0.62 1" />
+  </material>
+  <material name="yellow">
+    <color rgba="1.0 0.84 0.10 1" />
+  </material>
+  <material name="light_gray">
+    <color rgba="0.82 0.84 0.88 1" />
+  </material>
+  <material name="gripper_violet">
+    <color rgba="0.62 0.45 1.0 1" />
+  </material>
+  <material name="jaw_pink">
+    <color rgba="1.0 0.30 0.55 1" />
+  </material>
+  <material name="jaw_sky">
+    <color rgba="0.20 0.62 1.0 1" />
+  </material>
+  <material name="knob_red">
+    <color rgba="0.95 0.15 0.20 1" />
+  </material>
+  <material name="pad_white">
+    <color rgba="0.97 0.97 0.97 1" />
+  </material>
+  <!--Visual / kinematic export. q=0 is the saved V75 CAD pose. Not a hardware controller or dynamics model.-->
+  <link name="base_link">
+    <visual name="base_link_black">
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://v75_robot_description/meshes/base_link_black.stl" scale="1 1 1" />
+      </geometry>
+      <material name="body_slate" />
+    </visual>
+  </link>
+  <link name="slide_link">
+    <visual name="slide_link_green">
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://v75_robot_description/meshes/slide_link_green.stl" scale="1 1 1" />
+      </geometry>
+      <material name="mint" />
+    </visual>
+    <!-- added: slide_link_gray.stl was in meshes/ but not referenced -->
+  </link>
+  <link name="shoulder_link">
+    <visual name="shoulder_link_orange">
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://v75_robot_description/meshes/shoulder_link_orange.stl" scale="1 1 1" />
+      </geometry>
+      <material name="orange" />
+    </visual>
+  </link>
+  <link name="elbow_link">
+    <visual name="elbow_link_black">
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://v75_robot_description/meshes/elbow_link_black.stl" scale="1 1 1" />
+      </geometry>
+      <material name="body_slate" />
+    </visual>
+  </link>
+  <link name="wrist_pitch_link">
+    <visual name="wrist_pitch_link_orange">
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://v75_robot_description/meshes/wrist_pitch_link_orange.stl" scale="1 1 1" />
+      </geometry>
+      <material name="orange" />
+    </visual>
+  </link>
+  <link name="tool_roll_link">
+    <visual name="tool_roll_link_black">
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://v75_robot_description/meshes/tool_roll_link_black.stl" scale="1 1 1" />
+      </geometry>
+      <material name="gripper_violet" />
+    </visual>
+  </link>
+  <link name="jaw_upper_link">
+    <visual name="jaw_upper_link_black">
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://v75_robot_description/meshes/jaw_upper_link_black.stl" scale="1 1 1" />
+      </geometry>
+      <material name="jaw_pink" />
+    </visual>
+  </link>
+  <link name="carousel_link">
+    <visual name="carousel_link_black">
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://v75_robot_description/meshes/carousel_link_black.stl" scale="1 1 1" />
+      </geometry>
+      <material name="body_slate" />
+    </visual>
+  </link>
+  <link name="jaw_lower_link">
+    <visual name="jaw_lower_link_black">
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://v75_robot_description/meshes/jaw_lower_link_black.stl" scale="1 1 1" />
+      </geometry>
+      <material name="jaw_sky" />
+    </visual>
+  </link>
+  <link name="idler_link" />
+  <!-- added: grasp center between the two jaw pads (measured from jaw meshes at q=0).
+       그리퍼 메시를 15° 보정한 뒤 잡는 점이 비틀기 축 위에 옴 -->
+  <link name="tool_tcp" />
+  <joint name="slide_joint" type="prismatic">
+    <parent link="base_link" />
+    <child link="slide_link" />
+    <origin xyz="0.02 0 0" rpy="0 0 0" />
+    <axis xyz="1 0 0" />
+    <limit effort="0" velocity="0" lower="-0.072" upper="0.032" />
+  </joint>
+  <joint name="shoulder_joint" type="revolute">
+    <parent link="slide_link" />
+    <child link="shoulder_link" />
+    <origin xyz="0.129 0.051 0.12225" rpy="0 0 0" />
+    <axis xyz="1 -4.17700833006e-17 -1.45864345059e-18" />
+    <limit effort="0" velocity="0" lower="-1.15191730632" upper="1.98967534727" />
+  </joint>
+  <joint name="elbow_joint" type="revolute">
+    <parent link="shoulder_link" />
+    <child link="elbow_link" />
+    <origin xyz="1.11022302463e-16 0.0764664888983 0.171746546037" rpy="0 0 0" />
+    <axis xyz="1 -6.34787704949e-17 -3.21286950234e-19" />
+    <limit effort="0" velocity="0" lower="-1.52541776624" upper="2.83790536374" />
+  </joint>
+  <joint name="wrist_pitch_joint" type="revolute">
+    <parent link="elbow_link" />
+    <child link="wrist_pitch_link" />
+    <origin xyz="2.77555756156e-16 0.0835666144223 0.0451842998617" rpy="0 0 0" />
+    <axis xyz="1 -6.34787704949e-17 -3.21286950234e-19" />
+    <limit effort="0" velocity="0" lower="-1.67900674042" upper="1.98618468877" />
+  </joint>
+  <joint name="tool_roll_joint" type="revolute">
+    <parent link="wrist_pitch_link" />
+    <child link="tool_roll_link" />
+    <origin xyz="2.77555756156e-17 0.056 1.11022302463e-16" rpy="0 0 0" />
+    <axis xyz="-2.58569494309e-15 1 7.70863789488e-17" />
+    <limit effort="0" velocity="0" lower="-1.74532925199" upper="1.74532925199" />
+  </joint>
+  <joint name="jaw_upper_joint" type="prismatic">
+    <parent link="tool_roll_link" />
+    <child link="jaw_upper_link" />
+    <origin xyz="0 -1.66533453694e-16 -0.01" rpy="0 0 0" />
+    <axis xyz="-2.77555756156e-13 5.55111512312e-14 -1" />
+    <limit effort="0" velocity="0" lower="-0.021" upper="0.01" />
+  </joint>
+  <joint name="carousel_joint" type="continuous">
+    <parent link="base_link" />
+    <child link="carousel_link" />
+    <origin xyz="0.129 0.23 0.1" rpy="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="0" velocity="0" />
+  </joint>
+  <joint name="jaw_lower_joint" type="prismatic">
+    <parent link="tool_roll_link" />
+    <child link="jaw_lower_link" />
+    <origin xyz="0 -1.11022302463e-16 0.01" rpy="0 0 0" />
+    <axis xyz="-3.57353036051e-13 5.55111512313e-14 1" />
+    <limit effort="0" velocity="0" lower="-0.021" upper="0.01" />
+  </joint>
+  <joint name="idler_joint" type="continuous">
+    <parent link="base_link" />
+    <child link="idler_link" />
+    <origin xyz="0.234 0.0563662 0.0955" rpy="0 0 0" />
+    <axis xyz="0 0 1" />
+    <limit effort="0" velocity="0" />
+  </joint>
+  <joint name="tool_tcp_joint" type="fixed">
+    <parent link="tool_roll_link" />
+    <child link="tool_tcp" />
+    <origin xyz="0 0.1024 0" rpy="0 0 0" />
+  </joint>
+  <link name="base_link_vis_green">
+    <visual name="base_link_green">
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://v75_robot_description/meshes/base_link_green.stl" scale="1 1 1" />
+      </geometry>
+      <material name="mint" />
+    </visual>
+  </link>
+  <link name="base_link_vis_orange">
+    <visual name="base_link_orange">
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://v75_robot_description/meshes/base_link_orange.stl" scale="1 1 1" />
+      </geometry>
+      <material name="orange" />
+    </visual>
+  </link>
+  <link name="base_link_vis_yellow">
+    <visual name="base_link_yellow">
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://v75_robot_description/meshes/base_link_yellow.stl" scale="1 1 1" />
+      </geometry>
+      <material name="yellow" />
+    </visual>
+  </link>
+  <link name="slide_link_vis_black">
+    <visual name="slide_link_black">
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://v75_robot_description/meshes/slide_link_black.stl" scale="1 1 1" />
+      </geometry>
+      <material name="body_slate" />
+    </visual>
+  </link>
+  <link name="slide_link_vis_orange">
+    <visual name="slide_link_orange">
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://v75_robot_description/meshes/slide_link_orange.stl" scale="1 1 1" />
+      </geometry>
+      <material name="orange" />
+    </visual>
+  </link>
+  <link name="slide_link_vis_gray">
+    <visual name="slide_link_gray">
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://v75_robot_description/meshes/slide_link_gray.stl" scale="1 1 1" />
+      </geometry>
+      <material name="light_gray" />
+    </visual>
+  </link>
+  <link name="shoulder_link_vis_black">
+    <visual name="shoulder_link_black">
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://v75_robot_description/meshes/shoulder_link_black.stl" scale="1 1 1" />
+      </geometry>
+      <material name="body_slate" />
+    </visual>
+  </link>
+  <link name="shoulder_link_vis_green">
+    <visual name="shoulder_link_green">
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://v75_robot_description/meshes/shoulder_link_green.stl" scale="1 1 1" />
+      </geometry>
+      <material name="mint" />
+    </visual>
+  </link>
+  <link name="wrist_pitch_link_vis_black">
+    <visual name="wrist_pitch_link_black">
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://v75_robot_description/meshes/wrist_pitch_link_black.stl" scale="1 1 1" />
+      </geometry>
+      <material name="body_slate" />
+    </visual>
+  </link>
+  <link name="tool_roll_link_vis_yellow">
+    <visual name="tool_roll_link_yellow">
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://v75_robot_description/meshes/tool_roll_link_yellow.stl" scale="1 1 1" />
+      </geometry>
+      <material name="yellow" />
+    </visual>
+  </link>
+  <link name="tool_roll_link_vis_orange">
+    <visual name="tool_roll_link_orange">
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://v75_robot_description/meshes/tool_roll_link_orange.stl" scale="1 1 1" />
+      </geometry>
+      <material name="orange" />
+    </visual>
+  </link>
+  <link name="tool_roll_link_vis_green">
+    <visual name="tool_roll_link_green">
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://v75_robot_description/meshes/tool_roll_link_green.stl" scale="1 1 1" />
+      </geometry>
+      <material name="mint" />
+    </visual>
+  </link>
+  <link name="jaw_upper_link_vis_orange">
+    <visual name="jaw_upper_link_orange">
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://v75_robot_description/meshes/jaw_upper_link_orange.stl" scale="1 1 1" />
+      </geometry>
+      <material name="pad_white" />
+    </visual>
+  </link>
+  <link name="carousel_link_vis_orange">
+    <visual name="carousel_link_orange">
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://v75_robot_description/meshes/carousel_link_orange.stl" scale="1 1 1" />
+      </geometry>
+      <material name="orange" />
+    </visual>
+  </link>
+  <link name="carousel_link_vis_green">
+    <visual name="carousel_link_green">
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://v75_robot_description/meshes/carousel_link_green.stl" scale="1 1 1" />
+      </geometry>
+      <material name="mint" />
+    </visual>
+  </link>
+  <link name="jaw_lower_link_vis_orange">
+    <visual name="jaw_lower_link_orange">
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://v75_robot_description/meshes/jaw_lower_link_orange.stl" scale="1 1 1" />
+      </geometry>
+      <material name="pad_white" />
+    </visual>
+  </link>
+  <joint name="base_link_vis_green_joint" type="fixed">
+    <parent link="base_link" />
+    <child link="base_link_vis_green" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+  </joint>
+  <joint name="base_link_vis_orange_joint" type="fixed">
+    <parent link="base_link" />
+    <child link="base_link_vis_orange" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+  </joint>
+  <joint name="base_link_vis_yellow_joint" type="fixed">
+    <parent link="base_link" />
+    <child link="base_link_vis_yellow" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+  </joint>
+  <joint name="slide_link_vis_black_joint" type="fixed">
+    <parent link="slide_link" />
+    <child link="slide_link_vis_black" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+  </joint>
+  <joint name="slide_link_vis_orange_joint" type="fixed">
+    <parent link="slide_link" />
+    <child link="slide_link_vis_orange" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+  </joint>
+  <joint name="slide_link_vis_gray_joint" type="fixed">
+    <parent link="slide_link" />
+    <child link="slide_link_vis_gray" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+  </joint>
+  <joint name="shoulder_link_vis_black_joint" type="fixed">
+    <parent link="shoulder_link" />
+    <child link="shoulder_link_vis_black" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+  </joint>
+  <joint name="shoulder_link_vis_green_joint" type="fixed">
+    <parent link="shoulder_link" />
+    <child link="shoulder_link_vis_green" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+  </joint>
+  <joint name="wrist_pitch_link_vis_black_joint" type="fixed">
+    <parent link="wrist_pitch_link" />
+    <child link="wrist_pitch_link_vis_black" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+  </joint>
+  <joint name="tool_roll_link_vis_yellow_joint" type="fixed">
+    <parent link="tool_roll_link" />
+    <child link="tool_roll_link_vis_yellow" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+  </joint>
+  <joint name="tool_roll_link_vis_orange_joint" type="fixed">
+    <parent link="tool_roll_link" />
+    <child link="tool_roll_link_vis_orange" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+  </joint>
+  <joint name="tool_roll_link_vis_green_joint" type="fixed">
+    <parent link="tool_roll_link" />
+    <child link="tool_roll_link_vis_green" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+  </joint>
+  <joint name="jaw_upper_link_vis_orange_joint" type="fixed">
+    <parent link="jaw_upper_link" />
+    <child link="jaw_upper_link_vis_orange" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+  </joint>
+  <joint name="carousel_link_vis_orange_joint" type="fixed">
+    <parent link="carousel_link" />
+    <child link="carousel_link_vis_orange" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+  </joint>
+  <joint name="carousel_link_vis_green_joint" type="fixed">
+    <parent link="carousel_link" />
+    <child link="carousel_link_vis_green" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+  </joint>
+  <joint name="jaw_lower_link_vis_orange_joint" type="fixed">
+    <parent link="jaw_lower_link" />
+    <child link="jaw_lower_link_vis_orange" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+  </joint>
+  <!-- 카메라 (그리퍼 옆 노란 상자). 렌즈 중심 = tool_roll_link 기준 (-65, 55.8, 0) mm, 그리퍼와 같은 방향(아래)을 봄.
+       광학 프레임 관례: z = 보는 방향(tool +y), x = tool +x -->
+  <link name="camera_optical_frame" />
+  <joint name="camera_optical_joint" type="fixed">
+    <parent link="tool_roll_link" />
+    <child link="camera_optical_frame" />
+    <origin xyz="-0.065 0.0558 0" rpy="-1.5707963 0 0" />
+  </joint>
+</robot>
