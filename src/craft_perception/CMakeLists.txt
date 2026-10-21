@@ -25,7 +25,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 rosidl_get_typesupport_target(perception_typesupport ${PROJECT_NAME} rosidl_typesupport_cpp)
 
 add_library(perception_modules
-  src/yolo_detector.cpp src/aruco_reader.cpp src/knob_depth.cpp src/knob_lever.cpp
+  src/yolo_detector.cpp src/apriltag_reader.cpp src/knob_depth.cpp src/knob_lever.cpp
   src/object_detector.cpp src/obstacle_detector.cpp src/puck_axis.cpp
   src/d435_perception.cpp src/c310_perception.cpp src/shared_frame.cpp
   src/state_estimator.cpp src/lidar_obstacle_detector.cpp)

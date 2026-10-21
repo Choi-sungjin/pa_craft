@@ -5,7 +5,7 @@
 
 namespace craft_perception {
 namespace {
-const char *const kTasks[] = {"d435_yolo", "aruco", "knob_depth", "object_detector",
+const char *const kTasks[] = {"d435_yolo", "apriltag", "knob_depth", "object_detector",
   "obstacle_detector", "puck_axis", "knob_lever", "lidar_obstacle", "state_estimator"};
 
 geometry_msgs::msg::Point point(const cv::Vec3d &v) {
@@ -186,11 +186,11 @@ void PerceptionMaster::configure() {
 
   D435Config d435;
   d435.use_yolo = enabled("d435_yolo");
-  d435.use_aruco = enabled("aruco");
+  d435.use_apriltag = enabled("apriltag");
   d435.use_puck = enabled("puck_axis");
   d435.yolo = yolo_param("d435.yolo", d435_labels_);
   d435.knob_class_id = param<int64_t>("d435.yolo.knob_class_id");
-  d435.aruco_dictionary = param<int64_t>("d435.aruco_dictionary");
+  d435.apriltag_family = param<std::string>("d435.apriltag_family");
   d435.knob_grow = param<double>("d435.knob_depth.grow");
   d435.knob_tolerance_m = param<double>("d435.knob_depth.tolerance_m");
   d435.knob_min_points = param<int64_t>("d435.knob_depth.min_points");
@@ -236,7 +236,7 @@ void PerceptionMaster::connect() {
   for (int camera = 0; camera < 2; ++camera) {
     cameras_[camera].reader = std::make_unique<SharedFrameReader>(cameras_[camera].shm, camera == kD435);
   }
-  aruco_pub_ = create_publisher<std_msgs::msg::Int32MultiArray>("/perception/vision/d435/aruco", 10);
+  apriltag_pub_ = create_publisher<std_msgs::msg::Int32MultiArray>("/perception/vision/d435/apriltag", 10);
   detection_pubs_[kD435] = create_publisher<msg::DetectionArray>("/perception/vision/d435/detections", 10);
   detection_pubs_[kC310] = create_publisher<msg::DetectionArray>("/perception/vision/c310/detections", 10);
   knob_pubs_[kD435] = create_publisher<msg::KnobObservationArray>("/perception/vision/d435/knob_observations", 10);
@@ -270,7 +270,7 @@ void PerceptionMaster::connect() {
     });
 
   add_task("d435_yolo", [this](Task &task) { return d435_yolo(task); });
-  add_task("aruco", [this](Task &task) { return d435_aruco(task); });
+  add_task("apriltag", [this](Task &task) { return d435_apriltag(task); });
   add_task("knob_depth", [this](Task &task) { return d435_knob_depth(task); });
   add_task("object_detector", [this](Task &task) { return d435_object_detector(task); });
   add_task("obstacle_detector", [this](Task &task) { return d435_obstacle_detector(task); });
@@ -411,13 +411,13 @@ bool PerceptionMaster::d435_yolo(Task &task) {
     });
 }
 
-bool PerceptionMaster::d435_aruco(Task &task) {
+bool PerceptionMaster::d435_apriltag(Task &task) {
   return on_frame(kD435, task,
-    [this](const FramePtr &frame) { return d435_.read_aruco(*frame->data); },
+    [this](const FramePtr &frame) { return d435_.read_apriltag(*frame->data); },
     [this](const FramePtr &, std::vector<int> &ids) {
       auto output = std::make_unique<std_msgs::msg::Int32MultiArray>();
       output->data.assign(ids.begin(), ids.end());
-      aruco_pub_->publish(std::move(output));
+      apriltag_pub_->publish(std::move(output));
     });
 }
 

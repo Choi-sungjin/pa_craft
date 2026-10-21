@@ -3,7 +3,7 @@
 #include "craft_perception/puck_axis.hpp"
 #include "craft_perception/d435_perception.hpp"
 #include "craft_perception/c310_perception.hpp"
-#include "craft_perception/aruco_reader.hpp"
+#include "craft_perception/apriltag_reader.hpp"
 #include "craft_perception/knob_depth.hpp"
 #include "craft_perception/knob_lever.hpp"
 #include "craft_perception/shared_frame.hpp"
@@ -22,8 +22,8 @@
 using namespace craft_perception;
 
 TEST(ModuleContract, RejectsInvalidConfigurationWithoutThrowing) {
-  ArucoReader aruco;
-  EXPECT_FALSE(aruco.configure(-1));
+  AprilTagReader apriltag;
+  EXPECT_FALSE(apriltag.configure("DICT_4X4_50"));
   KnobDepth depth;
   EXPECT_FALSE(depth.configure(1.0, 0.03, 50));
   EXPECT_FALSE(depth.configure(2.0, std::numeric_limits<double>::quiet_NaN(), 50));
@@ -42,7 +42,7 @@ TEST(ModuleContract, RejectsInvalidConfigurationWithoutThrowing) {
   puck.min_height_m = puck.max_height_m;
   EXPECT_FALSE(PuckAxis().configure(puck));
   D435Config d435;  // knob id outside the class list, nothing to load
-  d435.use_yolo = d435.use_aruco = d435.use_puck = false;
+  d435.use_yolo = d435.use_apriltag = d435.use_puck = false;
   d435.obstacle_class_ids = {1};
   d435.knob_class_id = 5;
   EXPECT_FALSE(D435Perception().configure(d435));
@@ -57,12 +57,12 @@ TEST(ModuleContract, RejectsInvalidConfigurationWithoutThrowing) {
 TEST(ModuleContract, SeparatesInvalidInputsFromValidEmptyObservations) {
   cv::Mat gray(10, 10, CV_8UC1), bgr(10, 10, CV_8UC3, cv::Scalar(0, 0, 0));
   YoloDetector detector;
-  ArucoReader aruco;
+  AprilTagReader apriltag;
   EXPECT_FALSE(detector.is_valid_input(gray));
-  EXPECT_FALSE(aruco.is_valid_input(gray));
+  EXPECT_FALSE(apriltag.is_valid_input(gray));
   EXPECT_FALSE(KnobLever().is_valid_input(bgr, {20, 20, 5, 5}));
   EXPECT_TRUE(detector.is_valid_input(bgr));
-  EXPECT_TRUE(aruco.is_valid_input(bgr));
+  EXPECT_TRUE(apriltag.is_valid_input(bgr));
   KnobDepth depth;
   EXPECT_FALSE(depth.is_valid_input({gray, 1.0, {}}, {0, 0, 5, 5}, {100, 100, 5, 5}));
   sensor_msgs::msg::LaserScan scan;
@@ -104,16 +104,16 @@ TEST(Yolo, RejectsWrongLayoutAndNonFiniteBoxes) {
   EXPECT_TRUE(decode_yolo(output, transform, 5, 0.5, 0.45, 100).empty());
 }
 
-TEST(Aruco, SortsIdsByImagePosition) {
+TEST(AprilTag, SortsIdsByImagePosition) {
   cv::Mat image(220, 420, CV_8UC1, cv::Scalar(255)), left, right, bgr;
-  auto dictionary = cv::aruco::getPredefinedDictionary(cv::aruco::DICT_4X4_50);
+  auto dictionary = cv::aruco::getPredefinedDictionary(cv::aruco::DICT_APRILTAG_36h11);
   cv::aruco::drawMarker(dictionary, 17, 120, left);
   cv::aruco::drawMarker(dictionary, 3, 120, right);
   left.copyTo(image(cv::Rect(30, 50, 120, 120)));
   right.copyTo(image(cv::Rect(260, 50, 120, 120)));
   cv::cvtColor(image, bgr, cv::COLOR_GRAY2BGR);
-  ArucoReader module;
-  ASSERT_TRUE(module.configure(cv::aruco::DICT_4X4_50));
+  AprilTagReader module;
+  ASSERT_TRUE(module.configure("tag36h11"));
   ASSERT_TRUE(module.is_valid_input(bgr));
   EXPECT_EQ(module.compute_result(bgr), (std::vector<int>{17, 3}));
 }

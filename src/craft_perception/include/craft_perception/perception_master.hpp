@@ -82,7 +82,7 @@ private:
   template <typename Compute, typename Publish>
   bool on_detection(Task &task, Compute compute, Publish publish);
   bool d435_yolo(Task &task);
-  bool d435_aruco(Task &task);
+  bool d435_apriltag(Task &task);
   bool d435_knob_depth(Task &task);
   bool d435_object_detector(Task &task);
   bool d435_obstacle_detector(Task &task);
@@ -124,7 +124,7 @@ private:
   rclcpp::Publisher<msg::DetectionArray>::SharedPtr detection_pubs_[2];
   rclcpp::Publisher<msg::KnobObservationArray>::SharedPtr knob_pubs_[2];
   rclcpp::Publisher<msg::PuckObservationArray>::SharedPtr puck_pub_;
-  rclcpp::Publisher<std_msgs::msg::Int32MultiArray>::SharedPtr aruco_pub_;
+  rclcpp::Publisher<std_msgs::msg::Int32MultiArray>::SharedPtr apriltag_pub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr object_pub_, obstacle_pub_, lidar_obstacle_pub_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
   rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr diagnostics_pub_;

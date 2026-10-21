@@ -52,10 +52,10 @@ pa_craft/
     │   ├── models/               # knob_sign(v3.pt), puck_blue(target_blue_v3) ncnn 모델
     │   └── src/
     │       ├── perception_master.cpp # 연결·configure·타이머 (control_master 형식)
-    │       ├── d435_perception.cpp   # D435 클래스: yolo → knob_depth/object/obstacle, aruco, puck_axis
+    │       ├── d435_perception.cpp   # D435 클래스: yolo → knob_depth/object/obstacle, apriltag, puck_axis
     │       ├── c310_perception.cpp   # C310 클래스: knob_lever (자체 YOLO)
     │       ├── yolo_detector.cpp     # ncnn YOLO
-    │       ├── aruco_reader.cpp
+    │       ├── apriltag_reader.cpp
     │       ├── knob_depth.cpp
     │       ├── knob_lever.cpp
     │       ├── object_detector.cpp   # YOLO 박스 + depth → 3D 위치
@@ -97,7 +97,7 @@ pa_craft/
 | --- | --- |
 | `src/craft_bringup` | ROS 2 노드를 함께 실행하는 launch 파일 |
 | `src/craft_sensors` | LiDAR, 카메라, IMU, 엔코더 입력 처리 |
-| `src/craft_perception` | C++ PerceptionMaster + D435/C310 클래스 (ncnn·ArUco·깊이·레버·puck 인지) ([실행·주기 설정](src/craft_perception/README.md)) |
+| `src/craft_perception` | C++ PerceptionMaster + D435/C310 클래스 (ncnn·AprilTag·깊이·레버·puck 인지) ([실행·주기 설정](src/craft_perception/README.md)) |
 | `src/craft_mission` | 미션 상태와 진행 순서 관리 |
 | `src/craft_planning` | 주행 경로 계획 |
 | `src/craft_control` | 로봇 팔·시계 조작 계획, 주행 및 조작 목표를 제어 입력으로 연결 |

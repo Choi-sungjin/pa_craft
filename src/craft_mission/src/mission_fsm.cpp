@@ -1,5 +1,5 @@
 // mission_fsm: mission state machine (page 2 of craft_data_flowchart.drawio)
-// sub: /perception/vision/d435/aruco, /control/arm_lm_state
+// sub: /perception/vision/d435/apriltag, /control/arm_lm_state
 // pub: /planning/mission
 
 #include <chrono>
@@ -19,8 +19,8 @@ public:
   : Node("mission_fsm")
   {
     mission_pub_ = create_publisher<std_msgs::msg::String>("/planning/mission", 10);
-    aruco_sub_ = create_subscription<std_msgs::msg::Int32MultiArray>(
-      "/perception/vision/d435/aruco", 10, [this](const std_msgs::msg::Int32MultiArray & msg) {on_aruco(msg);});
+    apriltag_sub_ = create_subscription<std_msgs::msg::Int32MultiArray>(
+      "/perception/vision/d435/apriltag", 10, [this](const std_msgs::msg::Int32MultiArray & msg) {on_apriltag(msg);});
     arm_lm_state_sub_ = create_subscription<std_msgs::msg::Int32>(
       "/control/arm_lm_state", 10, [this](const std_msgs::msg::Int32 & msg) {on_arm_lm_state(msg);});
     timer_ = create_wall_timer(100ms, [this]() {mission_loop();});
@@ -29,7 +29,7 @@ public:
 private:
   enum class State { INIT, QR_RECOGNITION, MAIN_MISSION, SUB_MISSION, DONE };
 
-  void on_aruco(const std_msgs::msg::Int32MultiArray & msg)
+  void on_apriltag(const std_msgs::msg::Int32MultiArray & msg)
   {
     (void)msg;
     // TODO: decide mission order (Main -> Sub / Sub -> Main)
@@ -62,7 +62,7 @@ private:
 
   State state_ = State::INIT;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr mission_pub_;
-  rclcpp::Subscription<std_msgs::msg::Int32MultiArray>::SharedPtr aruco_sub_;
+  rclcpp::Subscription<std_msgs::msg::Int32MultiArray>::SharedPtr apriltag_sub_;
   rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr arm_lm_state_sub_;
   rclcpp::TimerBase::SharedPtr timer_;
 };

@@ -23,7 +23,7 @@ craft_perception/
 │   ├── d435_perception.hpp         # D435Config, D435Perception
 │   ├── c310_perception.hpp         # C310Config, C310Perception
 │   ├── yolo_detector.hpp           # ncnn YOLO (구 ObjectDetector)
-│   ├── aruco_reader.hpp
+│   ├── apriltag_reader.hpp
 │   ├── knob_depth.hpp
 │   ├── knob_lever.hpp
 │   ├── object_detector.hpp         # YOLO 박스 + depth → 3D 위치
@@ -43,7 +43,7 @@ craft_perception/
 | D435 | `knob_depth` | 10 | YOLO knob 박스 + aligned depth → 위치·패널 법선 |
 | D435 | `object_detector` | 10 | YOLO 전체 박스 + depth → 박스 중앙부 중앙값 깊이의 3D 위치 |
 | D435 | `obstacle_detector` | 10 | YOLO 장애물 클래스 박스 + depth → 박스 내 가까운 면(하위 분위수), 거리 제한 |
-| D435 | `aruco` | 15 | BGR → 왼쪽부터 정렬한 ArUco ID (YOLO와 별개) |
+| D435 | `apriltag` | 15 | BGR → 왼쪽부터 정렬한 AprilTag ID (YOLO와 별개, 기본 tag36h11) |
 | D435 | `puck_axis` | 10 | 자체 puck YOLO(`puck_blue`) + depth → 선반 평면 RANSAC, standing/lying, 축 |
 | C310 | `knob_lever` | 10 | 자체 knob_sign YOLO + 영상 평면 레버 방향 |
 | - | `lidar_obstacle` | 20 | LaserScan 유효 점 투영 (기존 그대로) |
@@ -145,7 +145,7 @@ YOLO_CONFIG_DIR=/tmp/craft-yolo-config custom_yolo26/.venv/bin/python \
 
 | 토픽 | 메시지 | 내용 |
 | --- | --- | --- |
-| `/perception/vision/d435/aruco` | `std_msgs/Int32MultiArray` | 기존 호환: ID를 영상 왼쪽부터 정렬 |
+| `/perception/vision/d435/apriltag` | `std_msgs/Int32MultiArray` | AprilTag ID를 영상 왼쪽부터 정렬 (mission_fsm 구독) |
 | `/perception/vision/d435/detections` | `craft_perception/DetectionArray` | D435 `d435_yolo`의 클래스·확률·픽셀 bbox |
 | `/perception/vision/c310/detections` | 같은 메시지 | C310 `knob_lever`의 YOLO 검출 |
 | `/perception/vision/d435/knob_observations` | `craft_perception/KnobObservationArray` | D435 손잡이 위치·법선 및 유효성; lever_valid=false |
@@ -204,7 +204,7 @@ slot: BGR8 + (D435 only Z16 depth) + uint64 sequence trailer
 
 ## 빌드와 검증
 
-ROS 2, OpenCV 개발 패키지(aruco 포함), ncnn C++ 설치가 필요합니다.
+ROS 2, OpenCV 개발 패키지(aruco 모듈 포함, AprilTag 사전이 여기 있음), ncnn C++ 설치가 필요합니다.
 센서까지 빌드하려면 기존처럼 librealsense2 SDK가 필요합니다.
 
 ```bash
@@ -217,7 +217,7 @@ ros2 run craft_perception perception_master --ros-args --params-file \
 
 기존 `craft.launch.py`도 master를 실행하며 `perception_model_dir:=/absolute/model_dir`로
 D435·C310의 knob_sign 모델 경로를 바꿀 수 있습니다. 모델이 없거나 로드가 실패하면 시작 시 오류로 종료합니다.
-모델 없이 ArUco만 점검하려면 `schedule.d435_yolo`, `schedule.puck_axis`, `schedule.knob_lever`의
+모델 없이 AprilTag만 점검하려면 `schedule.d435_yolo`, `schedule.puck_axis`, `schedule.knob_lever`의
 `enabled`를 false로 설정하세요(꺼진 작업의 모델은 로드하지 않습니다).
 
 ```bash
@@ -235,5 +235,5 @@ python3 src/craft_perception/test/test_master_integration.py \
 ```
 
 통합 테스트는 독립 ROS domain과 고유 shm 이름으로 합성 D435/C310 입력을 보내며
-실제 ncnn 추론 중 ArUco 처리와 입력 단절 시 발행 중단을 검사합니다. 실제 장치의
+실제 ncnn 추론 중 AprilTag 처리와 입력 단절 시 발행 중단을 검사합니다. 실제 장치의
 성능·캘리브레이션·검출 정확도 검증을 대신하지 않습니다.

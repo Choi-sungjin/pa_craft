@@ -4,7 +4,7 @@ namespace craft_perception {
 bool D435Perception::configure(const D435Config &c) {
   if (c.knob_class_id < 0 || c.knob_class_id >= c.yolo.classes) return false;
   if (c.use_yolo && !yolo_.configure(c.yolo)) return false;
-  if (c.use_aruco && !aruco_.configure(c.aruco_dictionary)) return false;
+  if (c.use_apriltag && !apriltag_.configure(c.apriltag_family)) return false;
   if (c.use_puck && (!puck_yolo_.configure(c.puck_yolo) || !puck_axis_.configure(c.puck))) return false;
   if (!knob_depth_.configure(c.knob_grow, c.knob_tolerance_m, c.knob_min_points) ||
       !object_detector_.configure(c.object_inner_fraction) ||
@@ -20,9 +20,9 @@ std::optional<std::vector<Detection>> D435Perception::detect(const SharedFrame &
   return yolo_.compute_result(frame.bgr);
 }
 
-std::optional<std::vector<int>> D435Perception::read_aruco(const SharedFrame &frame) const {
-  if (!aruco_.is_valid_input(frame.bgr)) return {};
-  return aruco_.compute_result(frame.bgr);
+std::optional<std::vector<int>> D435Perception::read_apriltag(const SharedFrame &frame) const {
+  if (!apriltag_.is_valid_input(frame.bgr)) return {};
+  return apriltag_.compute_result(frame.bgr);
 }
 
 std::optional<std::vector<KnobDepthObservation>> D435Perception::knob_depth(const SharedFrame &frame,

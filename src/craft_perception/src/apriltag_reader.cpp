@@ -1,23 +1,26 @@
-#include "craft_perception/aruco_reader.hpp"
+#include "craft_perception/apriltag_reader.hpp"
 #include <opencv2/imgproc.hpp>
 #include <algorithm>
-#include <stdexcept>
+#include <map>
 
 namespace craft_perception {
-bool ArucoReader::configure(int dictionary) {
-  if (dictionary < 0 || dictionary > cv::aruco::DICT_APRILTAG_36h11) {
-    return false;
-  }
-  dictionary_ = cv::aruco::getPredefinedDictionary(dictionary);
+bool AprilTagReader::configure(const std::string &family) {
+  static const std::map<std::string, int> families = {
+    {"tag16h5", cv::aruco::DICT_APRILTAG_16h5}, {"tag25h9", cv::aruco::DICT_APRILTAG_25h9},
+    {"tag36h10", cv::aruco::DICT_APRILTAG_36h10}, {"tag36h11", cv::aruco::DICT_APRILTAG_36h11}};
+  const auto found = families.find(family);
+  if (found == families.end()) return false;
+  dictionary_ = cv::aruco::getPredefinedDictionary(found->second);
   parameters_ = cv::aruco::DetectorParameters::create();
+  parameters_->cornerRefinementMethod = cv::aruco::CORNER_REFINE_APRILTAG;
   return true;
 }
 
-bool ArucoReader::is_valid_input(const cv::Mat &bgr) const {
+bool AprilTagReader::is_valid_input(const cv::Mat &bgr) const {
   return !bgr.empty() && bgr.dims == 2 && bgr.type() == CV_8UC3;
 }
 
-std::vector<int> ArucoReader::compute_result(const cv::Mat &bgr) const {
+std::vector<int> AprilTagReader::compute_result(const cv::Mat &bgr) const {
   cv::Mat gray;
   cv::cvtColor(bgr, gray, cv::COLOR_BGR2GRAY);
   std::vector<int> ids;

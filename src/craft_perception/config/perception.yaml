@@ -23,7 +23,7 @@ perception_master:
         nms_iou: 0.45
         max_detections: 100
         ncnn_threads: 1
-      aruco_dictionary: 0  # DICT_4X4_50; independent of YOLO
+      apriltag_family: tag36h11  # tag16h5 | tag25h9 | tag36h10 | tag36h11; independent of YOLO
       knob_depth: {grow: 2.0, tolerance_m: 0.03, min_points: 50}
       object_detector: {inner_fraction: 0.5}  # median depth of the box center part
       obstacle_detector:
@@ -76,7 +76,7 @@ perception_master:
     # a task only runs on new input (consumers of d435_yolo are capped at its rate).
     schedule:
       d435_yolo: {enabled: true, hz: 10.0}
-      aruco: {enabled: true, hz: 15.0}
+      apriltag: {enabled: true, hz: 15.0}
       knob_depth: {enabled: true, hz: 10.0}
       object_detector: {enabled: true, hz: 10.0}
       obstacle_detector: {enabled: true, hz: 10.0}
