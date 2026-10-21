@@ -266,7 +266,7 @@ TEST(Objects, BoxCenterMedianAndNearestObstacleSurface) {
   depth(cv::Rect(40, 40, 20, 20)).setTo(1.0);  // object face
   depth(cv::Rect(30, 30, 4, 4)).setTo(0.5);    // near edge inside the box
   const Intrinsics in{100, 100, 50, 50};
-  const std::vector<Detection> boxes{{{30, 30, 40, 40}, 2, 0.9f}, {{0, 0, 10, 10}, 0, 0.8f}};
+  const std::vector<Detection> boxes{{{30, 30, 40, 40}, 2, 0.9f, {}}, {{0, 0, 10, 10}, 0, 0.8f, {}}};
   ObjectDetector objects;
   ASSERT_TRUE(objects.configure(0.5));
   ASSERT_TRUE(objects.is_valid_input({depth, 1.0, {}}, in));
@@ -321,4 +321,45 @@ TEST(Puck, StandingPuckUsesShelfNormalAndEmptyRingFails) {
   EXPECT_NEAR(result->axis[2], -1, 1e-6);
   cv::Mat empty(120, 160, CV_32FC1, cv::Scalar(0));
   EXPECT_FALSE(module.compute_result({empty, 1.0, {}}, {68, 48, 24, 24}, in));
+}
+
+TEST(Seg, MaskFollowsPrototypesThroughLetterbox) {
+  // 640x360 image letterboxed into 640 (top pad 140); one prototype plane: +1 left, -1 right.
+  const auto transform = letterbox(cv::Mat(360, 640, CV_8UC3, cv::Scalar(0, 0, 0)), 640);
+  cv::Mat protos(160, 160, CV_32F, cv::Scalar(-1));
+  protos(cv::Rect(0, 0, 80, 160)).setTo(1);
+  const float coefficient = 2;
+  const auto mask = decode_mask(&coefficient, 1, protos.ptr<float>(), 160 * 160, 1, 160, 160,
+                                transform, 640, {300, 100, 40, 20});
+  ASSERT_EQ(mask.size(), cv::Size(40, 20));
+  EXPECT_EQ(mask.at<uint8_t>(10, 5), 255);   // x=305 < 320 -> positive plane
+  EXPECT_EQ(mask.at<uint8_t>(10, 35), 0);    // x=335 > 320
+}
+
+TEST(Lever, SegMaskUsesSameAngleConvention) {
+  cv::Mat mask(100, 100, CV_8U, cv::Scalar(0));
+  cv::rectangle(mask, cv::Rect(45, 44, 45, 12), cv::Scalar(255), cv::FILLED);  // center -> right
+  KnobLever module;
+  ASSERT_TRUE(module.is_valid_input(mask));
+  const auto angle = module.compute_result(mask);
+  ASSERT_TRUE(angle);
+  EXPECT_NEAR(*angle, CV_PI / 2, 0.05);
+  EXPECT_FALSE(module.compute_result(cv::Mat::zeros(100, 100, CV_8U)));
+  EXPECT_FALSE(module.is_valid_input(cv::Mat(10, 10, CV_8UC3)));
+}
+
+TEST(Lever, C310RejectsSegWithoutPrototypesOrLeverClass) {
+  C310Config c310;
+  c310.use_knob_lever = false;  // configuration checks only, no model load
+  c310.lever_source = "yolo_seg";
+  c310.lever_class_id = 4;
+  EXPECT_FALSE(C310Perception().configure(c310));  // detect model (no proto blob)
+  c310.yolo.proto_blob = "out1";
+  EXPECT_TRUE(C310Perception().configure(c310));
+  c310.lever_class_id = c310.knob_class_id;
+  EXPECT_FALSE(C310Perception().configure(c310));
+  c310.lever_source = "color";
+  EXPECT_FALSE(C310Perception().configure(c310));
+  c310.lever_source = "hsv";
+  EXPECT_TRUE(C310Perception().configure(c310));
 }

@@ -7,6 +7,7 @@ struct Detection {
   cv::Rect2f box;
   int class_id;
   float score;
+  cv::Mat mask;  // seg models only: CV_8U (255 = object) over clipped(box); empty otherwise
 };
 struct Intrinsics { double fx, fy, cx, cy; };
 

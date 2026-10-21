@@ -23,8 +23,8 @@ def generate_launch_description():
     perception_yaml = os.path.join(get_package_share_directory('craft_perception'), 'config', 'perception.yaml')
     params = {'craft_sensors': [camera_yaml], 'craft_control': [control_yaml],
               'craft_perception': [perception_yaml, {
-                  'd435.yolo.model_dir': LaunchConfiguration('perception_model_dir'),
-                  'c310.yolo.model_dir': LaunchConfiguration('perception_model_dir')}]}
+                  'd435.yolo.model_dir': LaunchConfiguration('d435_model_dir'),
+                  'c310.yolo.model_dir': LaunchConfiguration('c310_model_dir')}]}
 
     nodes = [Node(package=pkg, executable=exe, output='screen',
                   parameters=params.get(pkg, []))
@@ -38,7 +38,9 @@ def generate_launch_description():
         DeclareLaunchArgument('map_file', default_value='maps/maze.stl',
                               description='Gazebo binary STL, ROS map YAML or block text '
                                           '(relative to craft_planning share)'),
-        DeclareLaunchArgument('perception_model_dir', default_value='models/knob_sign',
-                              description='knob/sign NCNN model for D435 and C310; relative to craft_perception share'),
+        DeclareLaunchArgument('d435_model_dir', default_value='models/knob_sign',
+                              description='D435 YOLO NCNN model; relative to craft_perception share'),
+        DeclareLaunchArgument('c310_model_dir', default_value='models/knob_sign',
+                              description='C310 YOLO NCNN model (knob_lever); relative to craft_perception share'),
         *nodes,
     ])

@@ -1,4 +1,5 @@
 #include "craft_perception/yolo_detector.hpp"
+#include "geometry_utils.hpp"
 #include <opencv2/imgproc.hpp>
 #include <algorithm>
 #include <cmath>
@@ -22,17 +23,19 @@ Letterbox letterbox(const cv::Mat &bgr, int size) {
   return {padded, scale, left, top, bgr.size()};
 }
 
-std::vector<Detection> decode_yolo(
-  const float *data, int rows, int anchors, const Letterbox &t, int classes,
-  float confidence, float iou, int max_detections) {
-  // Ultralytics one-to-many export (ncnn, or ONNX with nms=None): [4+classes, anchors],
+namespace {
+// Shared by decode_yolo and seg: also returns each kept detection's anchor index.
+std::vector<std::pair<Detection, int>> decode(const float *data, int rows, int anchors,
+  const Letterbox &t, int classes, int mask_dim, float confidence, float iou, int max_detections) {
+  // Ultralytics one-to-many export (ncnn, or ONNX with nms=None): [4+classes(+mask_dim), anchors],
   // cxcywh in input pixels. Refuse incompatible exports instead of guessing end-to-end/DFL layouts.
-  if (data == nullptr || rows != classes + 4 || anchors <= 0) {
-    throw std::runtime_error("YOLO output must be float32 [4+class_count,anchors]; got rows=" +
-      std::to_string(rows) + " anchors=" + std::to_string(anchors));
+  if (data == nullptr || rows != classes + 4 + mask_dim || anchors <= 0) {
+    throw std::runtime_error("YOLO output must be float32 [4+class_count" +
+      std::string(mask_dim ? "+mask_dim" : "") + ",anchors]; got rows=" + std::to_string(rows) +
+      " anchors=" + std::to_string(anchors));
   }
   const auto row = [data, anchors](int r) { return data + static_cast<size_t>(r) * anchors; };
-  std::vector<Detection> candidates;
+  std::vector<std::pair<Detection, int>> candidates;
   for (int i = 0; i < anchors; ++i) {
     int id = -1;
     float score = confidence;
@@ -49,23 +52,57 @@ std::vector<Detection> decode_yolo(
     const float y1 = std::clamp((cy - height / 2 - t.top) / t.scale, 0.0f, float(t.original.height));
     const float x2 = std::clamp((cx + width / 2 - t.left) / t.scale, 0.0f, float(t.original.width));
     const float y2 = std::clamp((cy + height / 2 - t.top) / t.scale, 0.0f, float(t.original.height));
-    if (x2 > x1 && y2 > y1) candidates.push_back({{x1, y1, x2 - x1, y2 - y1}, id, score});
+    if (x2 > x1 && y2 > y1) candidates.push_back({{{x1, y1, x2 - x1, y2 - y1}, id, score, {}}, i});
   }
   std::stable_sort(candidates.begin(), candidates.end(),
-    [](const Detection &a, const Detection &b) { return a.score > b.score; });
-  std::vector<Detection> kept;
+    [](const auto &a, const auto &b) { return a.first.score > b.first.score; });
+  std::vector<std::pair<Detection, int>> kept;
   for (const auto &candidate : candidates) {
     bool suppressed = false;
     for (const auto &previous : kept) {
-      if (candidate.class_id != previous.class_id) continue;
-      const float intersection = (candidate.box & previous.box).area();
-      const float union_area = candidate.box.area() + previous.box.area() - intersection;
+      if (candidate.first.class_id != previous.first.class_id) continue;
+      const float intersection = (candidate.first.box & previous.first.box).area();
+      const float union_area = candidate.first.box.area() + previous.first.box.area() - intersection;
       if (union_area > 0 && intersection / union_area > iou) { suppressed = true; break; }
     }
     if (!suppressed) kept.push_back(candidate);
     if (static_cast<int>(kept.size()) >= max_detections) break;
   }
   return kept;
+}
+}  // namespace
+
+std::vector<Detection> decode_yolo(
+  const float *data, int rows, int anchors, const Letterbox &t, int classes,
+  float confidence, float iou, int max_detections) {
+  std::vector<Detection> output;
+  for (auto &kept : decode(data, rows, anchors, t, classes, 0, confidence, iou, max_detections)) {
+    output.push_back(std::move(kept.first));
+  }
+  return output;
+}
+
+cv::Mat decode_mask(const float *coefficients, size_t stride, const float *protos, size_t plane_stride,
+  int mask_dim, int h, int w, const Letterbox &t, int input_size, const cv::Rect &roi) {
+  cv::Mat logits(h, w, CV_32F, cv::Scalar(0));
+  for (int k = 0; k < mask_dim; ++k) {
+    const cv::Mat plane(h, w, CV_32F, const_cast<float *>(protos + k * plane_stride));
+    cv::scaleAdd(plane, coefficients[k * stride], logits, logits);
+  }
+  // Original pixel center -> letterboxed input -> proto grid (pixel centers at +0.5).
+  cv::Mat map_x(roi.height, roi.width, CV_32F), map_y(roi.height, roi.width, CV_32F);
+  const float to_proto_x = float(w) / input_size, to_proto_y = float(h) / input_size;
+  for (int y = 0; y < roi.height; ++y) {
+    const float py = ((roi.y + y + 0.5f) * t.scale + t.top) * to_proto_y - 0.5f;
+    for (int x = 0; x < roi.width; ++x) {
+      map_x.at<float>(y, x) = ((roi.x + x + 0.5f) * t.scale + t.left) * to_proto_x - 0.5f;
+      map_y.at<float>(y, x) = py;
+    }
+  }
+  cv::Mat sampled, mask;
+  cv::remap(logits, sampled, map_x, map_y, cv::INTER_LINEAR, cv::BORDER_REPLICATE);
+  cv::compare(sampled, 0, mask, cv::CMP_GT);
+  return mask;
 }
 
 std::vector<Detection> decode_yolo(
@@ -89,10 +126,11 @@ public:
     net_.opt.use_packing_layout = false;
     input_blob_ = config.input_blob;
     output_blob_ = config.output_blob;
+    proto_blob_ = config.proto_blob;
     return net_.load_param((config.model_dir + "/model.ncnn.param").c_str()) == 0 &&
            net_.load_model((config.model_dir + "/model.ncnn.bin").c_str()) == 0;
   }
-  const float *infer(const cv::Mat &image, int &rows, int &anchors) override {
+  InferenceOutput infer(const cv::Mat &image) override {
     ncnn::Mat input = ncnn::Mat::from_pixels(image.data, ncnn::Mat::PIXEL_BGR2RGB, image.cols, image.rows);
     const float scale[] = {1.0f / 255, 1.0f / 255, 1.0f / 255};
     input.substract_mean_normalize(nullptr, scale);
@@ -106,14 +144,27 @@ public:
         std::to_string(output_.dims) + " w=" + std::to_string(output_.w) + " h=" +
         std::to_string(output_.h) + " c=" + std::to_string(output_.c));
     }
-    rows = output_.h;
-    anchors = output_.w;
-    return static_cast<const float *>(output_.data);
+    InferenceOutput result;
+    result.boxes = static_cast<const float *>(output_.data);
+    result.rows = output_.h;
+    result.anchors = output_.w;
+    if (!proto_blob_.empty()) {
+      if (extractor.extract(proto_blob_.c_str(), protos_) != 0 || protos_.dims != 3 ||
+          protos_.elempack != 1 || protos_.elemsize != sizeof(float)) {
+        throw std::runtime_error("NCNN seg proto '" + proto_blob_ + "' must be float32 [mask_dim,h,w]");
+      }
+      result.protos = static_cast<const float *>(protos_.data);
+      result.plane_stride = protos_.cstep;
+      result.mask_dim = protos_.c;
+      result.mask_h = protos_.h;
+      result.mask_w = protos_.w;
+    }
+    return result;
   }
 private:
   ncnn::Net net_;
-  ncnn::Mat output_;
-  std::string input_blob_, output_blob_;
+  ncnn::Mat output_, protos_;
+  std::string input_blob_, output_blob_, proto_blob_;
 };
 }  // namespace
 
@@ -160,10 +211,26 @@ bool YoloDetector::is_valid_input(const cv::Mat &bgr) const {
 std::vector<Detection> YoloDetector::compute_result(const cv::Mat &bgr) {
   if (!backend_) throw std::logic_error("YoloDetector used before a successful configure()");
   const auto transform = letterbox(bgr, config_.input_size);
-  int rows = 0, anchors = 0;
-  const float *output = backend_->infer(transform.image, rows, anchors);
-  return decode_yolo(output, rows, anchors, transform, config_.classes, config_.confidence,
-                     config_.iou, config_.max_detections);
+  const auto out = backend_->infer(transform.image);
+  if (is_segmentation() && (!out.protos || out.mask_dim <= 0)) {
+    throw std::runtime_error("seg model configured but the backend returned no prototype masks");
+  }
+  auto kept = decode(out.boxes, out.rows, out.anchors, transform, config_.classes,
+                     is_segmentation() ? out.mask_dim : 0, config_.confidence, config_.iou,
+                     config_.max_detections);
+  std::vector<Detection> output;
+  for (auto &[detection, anchor] : kept) {
+    if (is_segmentation()) {
+      const auto roi = detail::clipped(detection.box, bgr.size());
+      if (!roi.empty()) {
+        const float *coefficients = out.boxes + static_cast<size_t>(4 + config_.classes) * out.anchors + anchor;
+        detection.mask = decode_mask(coefficients, out.anchors, out.protos, out.plane_stride,
+          out.mask_dim, out.mask_h, out.mask_w, transform, config_.input_size, roi);
+      }
+    }
+    output.push_back(std::move(detection));
+  }
+  return output;
 }
 
 }  // namespace craft_perception

@@ -146,10 +146,14 @@ DetectorConfig PerceptionMaster::yolo_param(const std::string &prefix, std::vect
   config.engine_path = share_path(param<std::string>(prefix + ".engine"));
   // Blob names differ per export: ncnn in0/out0, Ultralytics ONNX -> TensorRT images/output0.
   const std::string blobs = config.backend == "tensorrt" ? ".tensorrt_blobs" : ".ncnn_blobs";
+  // Two names = detect model; a third (prototype masks) makes it a seg model.
   const auto names = param<std::vector<std::string>>(prefix + blobs);
-  if (names.size() != 2) throw std::invalid_argument(prefix + blobs + " must be [input, output]");
+  if (names.size() != 2 && names.size() != 3) {
+    throw std::invalid_argument(prefix + blobs + " must be [input, output] or [input, output, protos]");
+  }
   config.input_blob = names[0];
   config.output_blob = names[1];
+  if (names.size() == 3) config.proto_blob = names[2];
   config.input_size = param<int64_t>(prefix + ".input_size");
   labels = param<std::vector<std::string>>(prefix + ".class_names");
   config.classes = labels.size();
@@ -215,6 +219,12 @@ void PerceptionMaster::configure() {
   c310.use_knob_lever = enabled("knob_lever");
   c310.yolo = yolo_param("c310.yolo", c310_labels_);
   c310.knob_class_id = param<int64_t>("c310.yolo.knob_class_id");
+  c310.lever_source = param<std::string>("c310.knob_lever.lever_source");
+  c310.lever_class_id = param<int64_t>("c310.knob_lever.lever_class_id");
+  if (c310.lever_source == "yolo_seg" && c310.yolo.proto_blob.empty()) {
+    throw std::invalid_argument("c310.knob_lever.lever_source yolo_seg needs a seg model: give "
+      "c310.yolo blobs as [input, output, protos]");
+  }
 
   cv::setNumThreads(1); // Executor handles module parallelism; avoid nested CPU pools.
   if (!d435_.configure(d435)) {

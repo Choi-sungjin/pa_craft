@@ -45,7 +45,7 @@ craft_perception/
 | D435 | `obstacle_detector` | 10 | YOLO 장애물 클래스 박스 + depth → 박스 내 가까운 면(하위 분위수), 거리 제한 |
 | D435 | `apriltag` | 15 | BGR → 왼쪽부터 정렬한 AprilTag ID (YOLO와 별개, 기본 tag36h11) |
 | D435 | `puck_axis` | 10 | 자체 puck YOLO(`puck_blue`) + depth → 선반 평면 RANSAC, standing/lying, 축 |
-| C310 | `knob_lever` | 10 | 자체 knob_sign YOLO + 영상 평면 레버 방향 |
+| C310 | `knob_lever` | 10 | 자체 YOLO + 영상 평면 레버 방향. 레버 픽셀은 `c310.knob_lever.lever_source`로 선택 (`hsv` / `yolo_seg`) |
 | - | `lidar_obstacle` | 20 | LaserScan 유효 점 투영 (기존 그대로) |
 | - | `state_estimator` | 100 | 지정 odometry 검증·전달 (대기, 기존 그대로) |
 
@@ -163,6 +163,20 @@ rad, 위쪽=0, 시계방향 양수**이며 로봇 관절각이 아닙니다. 관
 빈 배열은 새 프레임에서 해당 물체를 찾지 못한 결과입니다. 입력이 끊기면 새 배열도
 나오지 않으므로 소비자는 header 시각/수신 timeout을 확인해야 합니다.
 
+### knob 레버 마스크 (`c310.knob_lever.lever_source`)
+
+| 값 | 레버 픽셀을 얻는 법 | 필요한 모델 |
+| --- | --- | --- |
+| `hsv` (기본) | knob 박스 안 빨강(HSV) 중 Otsu로 밝은 부분 → 노이즈 제거 → 가장 큰 덩어리 | 지금 knob_sign detect 모델 |
+| `yolo_seg` | knob 박스 안에 중심이 있는 lever 클래스 중 최고 점수의 seg 마스크 | lever 클래스를 포함한 YOLO-seg 모델 |
+
+두 방식 모두 그 뒤는 같습니다: PCA 축 → knob 박스 중심(피벗)에서 더 멀리 뻗은 쪽 → 시계 각도.
+`yolo_seg`를 쓰려면 `c310.yolo`를 seg 모델로 바꾸고 blob을 3개(`ncnn_blobs: [in0, out0, out1]`,
+`tensorrt_blobs: [images, output0, output1]`)로 적어 prototype 출력을 받고, `class_names`에 lever를 넣은 뒤
+`lever_class_id`를 그 인덱스로 맞춥니다. blob이 3개면 `YoloDetector`가 seg 모델로 동작해 박스마다
+`Detection::mask`를 채웁니다(계수·prototype 곱 → letterbox 역변환 → sigmoid>0.5). seg export의 blob 이름은
+Ultralytics 기본값을 가정했으니 실제 export 결과로 확인하세요.
+
 중심 bbox의 유효 깊이 중앙값을 사용하고,
 주변 사각 고리에서 깊이 차이가 작은 점을 모아 평면을 fitting합니다. 법선은
 카메라를 향합니다. 레버는 빨강 HSV·밝기 Otsu·가장 큰 성분의 PCA로 추정합니다.
@@ -215,8 +229,8 @@ ros2 run craft_perception perception_master --ros-args --params-file \
   "$(ros2 pkg prefix craft_perception)/share/craft_perception/config/perception.yaml"
 ```
 
-기존 `craft.launch.py`도 master를 실행하며 `perception_model_dir:=/absolute/model_dir`로
-D435·C310의 knob_sign 모델 경로를 바꿀 수 있습니다. 모델이 없거나 로드가 실패하면 시작 시 오류로 종료합니다.
+기존 `craft.launch.py`도 master를 실행하며 `d435_model_dir:=...`, `c310_model_dir:=...`로
+카메라별 YOLO 모델 경로를 따로 바꿀 수 있습니다(launch 값이 yaml의 `*.yolo.model_dir`보다 우선). 모델이 없거나 로드가 실패하면 시작 시 오류로 종료합니다.
 모델 없이 AprilTag만 점검하려면 `schedule.d435_yolo`, `schedule.puck_axis`, `schedule.knob_lever`의
 `enabled`를 false로 설정하세요(꺼진 작업의 모델은 로드하지 않습니다).
 

@@ -1,6 +1,7 @@
 // TensorRT YOLO backend (Jetson). Built only with CRAFT_WITH_TENSORRT; see CMakeLists.txt.
 // Engine contract: input  <input_blob>  float32 [1,3,S,S] RGB in [0,1]
-//                  output <output_blob> float32 [1,4+classes,anchors]  (ONNX export with nms=None)
+//                  output <output_blob> float32 [1,4+classes(+mask_dim),anchors]  (ONNX export, nms=None)
+//                  seg:   <proto_blob>  float32 [1,mask_dim,h,w] prototype masks
 // Uses the TensorRT >= 8.5 named-tensor API (JetPack 5.1+ / 6.x).
 #include "craft_perception/yolo_detector.hpp"
 #include <NvInfer.h>
@@ -39,8 +40,10 @@ public:
     if (stream_) cudaStreamDestroy(stream_);
     cudaFree(device_input_);
     cudaFree(device_output_);
+    cudaFree(device_protos_);
     cudaFreeHost(host_input_);
     cudaFreeHost(host_output_);
+    cudaFreeHost(host_protos_);
   }
 
   // Returns false with a message on stderr; never leaves a half-usable backend.
@@ -58,6 +61,7 @@ public:
 
     input_ = config.input_blob;
     output_ = config.output_blob;
+    protos_ = config.proto_blob;
     if (!is_float_tensor(input_, nvinfer1::TensorIOMode::kINPUT) ||
         !is_float_tensor(output_, nvinfer1::TensorIOMode::kOUTPUT)) {
       return fail("engine needs float32 input '" + input_ + "' and output '" + output_ +
@@ -73,9 +77,22 @@ public:
     if (!context_->setInputShape(input_.c_str(), nvinfer1::Dims4{1, 3, s, s})) {
       return fail("setInputShape failed for " + shape(in));
     }
+    if (!protos_.empty()) {
+      if (!is_float_tensor(protos_, nvinfer1::TensorIOMode::kOUTPUT)) {
+        return fail("seg engine needs float32 output '" + protos_ + "' (Ultralytics ONNX: output1)");
+      }
+      const auto p = context_->getTensorShape(protos_.c_str());
+      if (p.nbDims != 4 || p.d[0] != 1 || p.d[1] <= 0 || p.d[2] <= 0 || p.d[3] <= 0) {
+        return fail("proto shape " + shape(p) + " is not [1,mask_dim,h,w]");
+      }
+      mask_dim_ = p.d[1];
+      mask_h_ = p.d[2];
+      mask_w_ = p.d[3];
+    }
     const auto out = context_->getTensorShape(output_.c_str());
-    if (out.nbDims != 3 || out.d[0] != 1 || out.d[1] != config.classes + 4 || out.d[2] <= 0) {
-      return fail("output shape " + shape(out) + " is not [1," + std::to_string(config.classes + 4) +
+    const int expected_rows = config.classes + 4 + mask_dim_;
+    if (out.nbDims != 3 || out.d[0] != 1 || out.d[1] != expected_rows || out.d[2] <= 0) {
+      return fail("output shape " + shape(out) + " is not [1," + std::to_string(expected_rows) +
                   ",anchors]; export ONNX with nms=None and match class_names");
     }
     size_ = s;
@@ -92,10 +109,18 @@ public:
         !context_->setTensorAddress(output_.c_str(), device_output_)) {
       return fail("setTensorAddress failed");
     }
+    if (mask_dim_) {
+      const size_t proto_bytes = sizeof(float) * mask_dim_ * mask_h_ * mask_w_;
+      check(cudaMalloc(&device_protos_, proto_bytes), "malloc protos");
+      check(cudaMallocHost(reinterpret_cast<void **>(&host_protos_), proto_bytes), "host protos");
+      if (!context_->setTensorAddress(protos_.c_str(), device_protos_)) {
+        return fail("setTensorAddress failed for " + protos_);
+      }
+    }
     return true;
   }
 
-  const float *infer(const cv::Mat &image, int &rows, int &anchors) override {
+  InferenceOutput infer(const cv::Mat &image) override {
     if (image.cols != size_ || image.rows != size_ || image.type() != CV_8UC3) {
       throw std::invalid_argument("TensorRT input must be the letterboxed BGR8 square image");
     }
@@ -114,10 +139,24 @@ public:
     if (!context_->enqueueV3(stream_)) throw std::runtime_error("TensorRT enqueueV3 failed");
     check(cudaMemcpyAsync(host_output_, device_output_, sizeof(float) * rows_ * anchors_,
                           cudaMemcpyDeviceToHost, stream_), "copy output");
+    const size_t plane = static_cast<size_t>(mask_h_) * mask_w_;
+    if (mask_dim_) {
+      check(cudaMemcpyAsync(host_protos_, device_protos_, sizeof(float) * mask_dim_ * plane,
+                            cudaMemcpyDeviceToHost, stream_), "copy protos");
+    }
     check(cudaStreamSynchronize(stream_), "synchronize");
-    rows = rows_;
-    anchors = anchors_;
-    return host_output_;
+    InferenceOutput result;
+    result.boxes = host_output_;
+    result.rows = rows_;
+    result.anchors = anchors_;
+    if (mask_dim_) {
+      result.protos = host_protos_;
+      result.plane_stride = plane;
+      result.mask_dim = mask_dim_;
+      result.mask_h = mask_h_;
+      result.mask_w = mask_w_;
+    }
+    return result;
   }
 
 private:
@@ -138,11 +177,11 @@ private:
   std::unique_ptr<nvinfer1::IRuntime> runtime_;
   std::unique_ptr<nvinfer1::ICudaEngine> engine_;
   std::unique_ptr<nvinfer1::IExecutionContext> context_;
-  std::string input_, output_;
-  int size_ = 0, rows_ = 0, anchors_ = 0;
+  std::string input_, output_, protos_;
+  int size_ = 0, rows_ = 0, anchors_ = 0, mask_dim_ = 0, mask_h_ = 0, mask_w_ = 0;
   cudaStream_t stream_ = nullptr;
-  void *device_input_ = nullptr, *device_output_ = nullptr;
-  float *host_input_ = nullptr, *host_output_ = nullptr;
+  void *device_input_ = nullptr, *device_output_ = nullptr, *device_protos_ = nullptr;
+  float *host_input_ = nullptr, *host_output_ = nullptr, *host_protos_ = nullptr;
 };
 
 }  // namespace

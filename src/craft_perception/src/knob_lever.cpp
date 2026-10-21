@@ -31,14 +31,28 @@ std::optional<double> KnobLever::compute_result(const cv::Mat &bgr, const cv::Re
   cv::compare(channels[2], threshold, bright, cv::CMP_GT);
   cv::bitwise_and(red, bright, mask);
   cv::morphologyEx(mask, mask, cv::MORPH_OPEN, cv::Mat::ones(3, 3, CV_8U));
+  return angle(mask, true);
+}
+
+bool KnobLever::is_valid_input(const cv::Mat &lever_mask) const {
+  return !lever_mask.empty() && lever_mask.dims == 2 && lever_mask.type() == CV_8UC1;
+}
+
+std::optional<double> KnobLever::compute_result(const cv::Mat &lever_mask) const {
+  return angle(lever_mask, false);  // a learned mask needs no red-background area guard
+}
+
+std::optional<double> KnobLever::angle(const cv::Mat &mask, bool bound_area) const {
   cv::Mat labels, stats, centroids;
   const int count = cv::connectedComponentsWithStats(mask, labels, stats, centroids);
   if (count < 2) return {};
   int largest = 1;
   for (int i = 2; i < count; ++i) if (stats.at<int>(i, cv::CC_STAT_AREA) >
       stats.at<int>(largest, cv::CC_STAT_AREA)) largest = i;
-  const double fraction = static_cast<double>(stats.at<int>(largest, cv::CC_STAT_AREA)) / mask.total();
-  if (fraction < 0.02 || fraction > 0.5) return {};
+  const int area = stats.at<int>(largest, cv::CC_STAT_AREA);
+  const double fraction = static_cast<double>(area) / mask.total();
+  // hsv: too small = noise, too big = red background. Any mask: PCA needs a few points.
+  if (area < 3 || (bound_area && (fraction < 0.02 || fraction > 0.5))) return {};
   std::vector<cv::Point> locations;
   cv::findNonZero(labels == largest, locations);
   cv::Mat points(locations.size(), 2, CV_64F);
@@ -50,7 +64,7 @@ std::optional<double> KnobLever::compute_result(const cv::Mat &bgr, const cv::Re
   cv::Vec2d direction(pca.eigenvectors.at<double>(0, 0), pca.eigenvectors.at<double>(0, 1));
   double minimum = 1e100, maximum = -1e100;
   for (const auto &p : locations) {
-    const double projection = direction.dot(cv::Vec2d(p.x - roi.width / 2.0, p.y - roi.height / 2.0));
+    const double projection = direction.dot(cv::Vec2d(p.x - mask.cols / 2.0, p.y - mask.rows / 2.0));
     minimum = std::min(minimum, projection); maximum = std::max(maximum, projection);
   }
   if (maximum < -minimum) direction = -direction;
