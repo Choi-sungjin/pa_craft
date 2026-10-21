@@ -4,85 +4,180 @@
 #include <cmath>
 
 namespace craft_perception {
+namespace {
+const char *const kTasks[] = {"d435_yolo", "aruco", "knob_depth", "object_detector",
+  "obstacle_detector", "puck_axis", "knob_lever", "lidar_obstacle", "state_estimator"};
+
+geometry_msgs::msg::Point point(const cv::Vec3d &v) {
+  geometry_msgs::msg::Point output; output.x = v[0]; output.y = v[1]; output.z = v[2]; return output;
+}
+geometry_msgs::msg::Vector3 vector(const cv::Vec3d &v) {
+  geometry_msgs::msg::Vector3 output; output.x = v[0]; output.y = v[1]; output.z = v[2]; return output;
+}
+// Orientation is identity: PoseArray carries positions only.
+std::unique_ptr<geometry_msgs::msg::PoseArray> poses(
+  const std_msgs::msg::Header &header, const std::vector<ObjectPoint> &points) {
+  auto output = std::make_unique<geometry_msgs::msg::PoseArray>(); output->header = header;
+  for (const auto &p : points) {
+    geometry_msgs::msg::Pose pose; pose.position = point(p.position); pose.orientation.w = 1;
+    output->poses.push_back(pose);
+  }
+  return output;
+}
+}  // namespace
 
 PerceptionMaster::PerceptionMaster() : Node("perception_master") {
-  const int threads = declare_parameter("executor_threads", 6);
-  if (threads < 2) throw std::invalid_argument("executor_threads must be >=2");
-  load_schedules();
-  max_age_ = load_positive_param("max_input_age_s", 0.5);
-  camera_frames_[0] = declare_parameter("realsense_frame", "camera_color_optical_frame");
-  camera_frames_[1] = declare_parameter("c310_frame", "c310_optical_frame");
-  shm_names_[0] = declare_parameter("realsense_shm", "/craft_vision");
-  shm_names_[1] = declare_parameter("c310_shm", "/craft_c310");
-  for (int camera = 0; camera < 2; ++camera) {
-    cameras_[camera].reader = std::make_unique<SharedFrameReader>(shm_names_[camera], camera == 0);
-  }
-  labels_ = declare_parameter<std::vector<std::string>>("class_names",
-    {"knob", "sign_red", "sign_yellow", "sign_green", "sign_off"});
-  knob_id_ = declare_parameter("knob_class_id", 0);
-  if (labels_.empty() || knob_id_ < 0 || knob_id_ >= static_cast<int>(labels_.size())) {
-    throw std::invalid_argument("class_names and knob_class_id do not match");
-  }
-  DetectorConfig config;
-  config.model_dir = declare_parameter("model_dir", "models/knob_sign");
-  if (!std::filesystem::path(config.model_dir).is_absolute()) {
-    config.model_dir = ament_index_cpp::get_package_share_directory("craft_perception") + "/" + config.model_dir;
-  }
-  config.input_blob = declare_parameter("input_blob", "in0");
-  config.output_blob = declare_parameter("output_blob", "out0");
-  config.input_size = declare_parameter("input_size", 640);
-  config.classes = labels_.size();
-  config.threads = declare_parameter("ncnn_threads_per_detector", 1);
-  config.confidence = declare_parameter("confidence", 0.5);
-  config.iou = declare_parameter("nms_iou", 0.45);
-  config.max_detections = declare_parameter("max_detections", 100);
-  cv::setNumThreads(1); // Executor handles module parallelism; avoid nested CPU pools.
-  if (!aruco_.configure(declare_parameter("aruco_dictionary", 0))) {
-    throw std::invalid_argument("invalid ArUco dictionary configuration");
-  }
-  const double panel_grow = declare_parameter("panel_grow", 2.0);
-  const double panel_tolerance = load_positive_param("panel_tolerance_m", 0.03);
-  const int panel_min_points = declare_parameter("panel_min_points", 50);
-  if (!depth_.configure(panel_grow, panel_tolerance, panel_min_points)) {
-    throw std::invalid_argument("invalid knob depth configuration");
-  }
-  const double obstacle_range = load_positive_param("obstacle_max_range_m", 3.0);
-  const int obstacle_stride = declare_parameter("obstacle_stride", 1);
-  if (!obstacle_.configure(obstacle_range, obstacle_stride)) {
-    throw std::invalid_argument("invalid obstacle detector configuration");
-  }
-  const double near_m = declare_parameter("heatmap_near_m", 0.2);
-  const double far_m = load_positive_param("heatmap_far_m", 0.3);
-  if (!heatmap_.configure(near_m, far_m)) {
-    throw std::invalid_argument("invalid depth heatmap configuration");
-  }
+  configure();
+  connect();
+  RCLCPP_WARN(get_logger(), "StateEstimator relays one odometry source; wheel/IMU/lidar fusion is not implemented");
+  RCLCPP_INFO(get_logger(), "PerceptionMaster ready; D435 classes=%zu, C310 classes=%zu, puck classes=%zu, "
+    "executor_threads=%d", d435_labels_.size(), c310_labels_.size(), puck_labels_.size(), executor_threads_);
+}
 
-  aruco_pub_ = create_publisher<std_msgs::msg::Int32MultiArray>("/vision/aruco", 10);
-  detection_pubs_[0] = create_publisher<msg::DetectionArray>("/vision/detections", 10);
-  detection_pubs_[1] = create_publisher<msg::DetectionArray>("/vision/c310_detections", 10);
-  knob_pubs_[0] = create_publisher<msg::KnobObservationArray>("/vision/knob_observations", 10);
-  knob_pubs_[1] = create_publisher<msg::KnobObservationArray>("/vision/c310_knob_observations", 10);
-  heatmap_pub_ = create_publisher<sensor_msgs::msg::Image>("/vision/depth_heatmap", rclcpp::SensorDataQoS());
-  object_points_pub_ = create_publisher<geometry_msgs::msg::PoseArray>("/vision/object_detection", 10);
-  obstacle_pub_ = create_publisher<geometry_msgs::msg::PoseArray>("/lidar/obstacle", 10);
-  odom_pub_ = create_publisher<nav_msgs::msg::Odometry>("/state/odom", 10);
+template <typename T> T PerceptionMaster::param(const std::string &name) {
+  // No C++ defaults: perception.yaml is the only source of configuration values.
+  try { return declare_parameter<T>(name); }
+  catch (const std::exception &e) {
+    throw std::invalid_argument("provide " + name + " with the right type in perception.yaml "
+      "(--params-file): " + e.what());
+  }
+}
+
+double PerceptionMaster::positive_param(const std::string &name) {
+  const double value = param<double>(name);
+  if (!std::isfinite(value) || value <= 0) throw std::invalid_argument(name + " must be finite and positive");
+  return value;
+}
+
+DetectorConfig PerceptionMaster::yolo_param(const std::string &prefix, std::vector<std::string> &labels) {
+  const auto share_path = [](const std::string &path) {
+    return std::filesystem::path(path).is_absolute() ? path :
+      ament_index_cpp::get_package_share_directory("craft_perception") + "/" + path;
+  };
+  DetectorConfig config;
+  config.backend = param<std::string>(prefix + ".backend");
+  if (config.backend != "ncnn" && config.backend != "tensorrt") {
+    throw std::invalid_argument(prefix + ".backend must be ncnn or tensorrt");
+  }
+  config.model_dir = share_path(param<std::string>(prefix + ".model_dir"));
+  config.engine_path = share_path(param<std::string>(prefix + ".engine"));
+  // Blob names differ per export: ncnn in0/out0, Ultralytics ONNX -> TensorRT images/output0.
+  const std::string blobs = config.backend == "tensorrt" ? ".tensorrt_blobs" : ".ncnn_blobs";
+  const auto names = param<std::vector<std::string>>(prefix + blobs);
+  if (names.size() != 2) throw std::invalid_argument(prefix + blobs + " must be [input, output]");
+  config.input_blob = names[0];
+  config.output_blob = names[1];
+  config.input_size = param<int64_t>(prefix + ".input_size");
+  labels = param<std::vector<std::string>>(prefix + ".class_names");
+  config.classes = labels.size();
+  config.threads = param<int64_t>(prefix + ".ncnn_threads");
+  config.confidence = param<double>(prefix + ".confidence");
+  config.iou = param<double>(prefix + ".nms_iou");
+  config.max_detections = param<int64_t>(prefix + ".max_detections");
+  return config;
+}
+
+void PerceptionMaster::configure() {
+  executor_threads_ = param<int64_t>("executor_threads");
+  if (executor_threads_ < 2) throw std::invalid_argument("executor_threads must be >=2");
+  max_age_ = positive_param("max_input_age_s");
+  for (const std::string name : kTasks) {
+    const bool on = param<bool>("schedule." + name + ".enabled");
+    const double hz = positive_param("schedule." + name + ".hz");
+    const double seconds = 1.0 / hz;
+    const double maximum = std::chrono::duration<double>(std::chrono::nanoseconds::max()).count();
+    if (!std::isfinite(seconds) || seconds < 1e-9 || seconds >= maximum) {
+      throw std::invalid_argument("schedule." + name + ".hz must yield a timer period >=1ns");
+    }
+    schedules_.emplace(name, ModuleSchedule{on, hz});
+  }
+  for (const char *name : {"knob_depth", "object_detector", "obstacle_detector"}) {
+    if (enabled(name) && !enabled("d435_yolo")) {
+      RCLCPP_WARN(get_logger(), "%s is enabled but d435_yolo is disabled; it will never get boxes", name);
+    }
+  }
+  cameras_[kD435].frame_id = param<std::string>("d435.frame");
+  cameras_[kD435].shm = param<std::string>("d435.shm");
+  cameras_[kC310].frame_id = param<std::string>("c310.frame");
+  cameras_[kC310].shm = param<std::string>("c310.shm");
+
+  D435Config d435;
+  d435.use_yolo = enabled("d435_yolo");
+  d435.use_aruco = enabled("aruco");
+  d435.use_puck = enabled("puck_axis");
+  d435.yolo = yolo_param("d435.yolo", d435_labels_);
+  d435.knob_class_id = param<int64_t>("d435.yolo.knob_class_id");
+  d435.aruco_dictionary = param<int64_t>("d435.aruco_dictionary");
+  d435.knob_grow = param<double>("d435.knob_depth.grow");
+  d435.knob_tolerance_m = param<double>("d435.knob_depth.tolerance_m");
+  d435.knob_min_points = param<int64_t>("d435.knob_depth.min_points");
+  d435.object_inner_fraction = param<double>("d435.object_detector.inner_fraction");
+  for (const auto id : param<std::vector<int64_t>>("d435.obstacle_detector.class_ids")) {
+    d435.obstacle_class_ids.push_back(id);
+  }
+  d435.obstacle_max_range_m = param<double>("d435.obstacle_detector.max_range_m");
+  d435.obstacle_near_quantile = param<double>("d435.obstacle_detector.near_quantile");
+  d435.puck_yolo = yolo_param("d435.puck_yolo", puck_labels_);
+  d435.puck.grow = param<double>("d435.puck_axis.grow");
+  d435.puck.plane_threshold_m = param<double>("d435.puck_axis.plane_threshold_m");
+  d435.puck.min_height_m = param<double>("d435.puck_axis.min_height_m");
+  d435.puck.max_height_m = param<double>("d435.puck_axis.max_height_m");
+  d435.puck.standing_height_m = param<double>("d435.puck_axis.standing_height_m");
+  d435.puck.min_depth_m = param<double>("d435.puck_axis.min_depth_m");
+  d435.puck.max_depth_m = param<double>("d435.puck_axis.max_depth_m");
+  d435.puck.min_points = param<int64_t>("d435.puck_axis.min_points");
+  d435.puck.ransac_iterations = param<int64_t>("d435.puck_axis.ransac_iterations");
+
+  C310Config c310;
+  c310.use_knob_lever = enabled("knob_lever");
+  c310.yolo = yolo_param("c310.yolo", c310_labels_);
+  c310.knob_class_id = param<int64_t>("c310.yolo.knob_class_id");
+
+  cv::setNumThreads(1); // Executor handles module parallelism; avoid nested CPU pools.
+  if (!d435_.configure(d435)) {
+    throw std::invalid_argument("invalid d435 configuration in perception.yaml, or cannot load the "
+      + d435.yolo.backend + " model for d435.yolo / d435.puck_yolo (see stderr)");
+  }
+  if (!c310_.configure(c310)) {
+    throw std::invalid_argument("invalid c310 configuration in perception.yaml, or cannot load the "
+      + c310.yolo.backend + " model for c310.yolo (see stderr)");
+  }
+  if (!lidar_obstacle_.configure(positive_param("lidar_obstacle.max_range_m"),
+                                 param<int64_t>("lidar_obstacle.stride"))) {
+    throw std::invalid_argument("invalid lidar_obstacle configuration");
+  }
+  odometry_topic_ = param<std::string>("odometry_source_topic");
+}
+
+void PerceptionMaster::connect() {
+  for (int camera = 0; camera < 2; ++camera) {
+    cameras_[camera].reader = std::make_unique<SharedFrameReader>(cameras_[camera].shm, camera == kD435);
+  }
+  aruco_pub_ = create_publisher<std_msgs::msg::Int32MultiArray>("/perception/vision/d435/aruco", 10);
+  detection_pubs_[kD435] = create_publisher<msg::DetectionArray>("/perception/vision/d435/detections", 10);
+  detection_pubs_[kC310] = create_publisher<msg::DetectionArray>("/perception/vision/c310/detections", 10);
+  knob_pubs_[kD435] = create_publisher<msg::KnobObservationArray>("/perception/vision/d435/knob_observations", 10);
+  knob_pubs_[kC310] = create_publisher<msg::KnobObservationArray>("/perception/vision/c310/knob_observations", 10);
+  puck_pub_ = create_publisher<msg::PuckObservationArray>("/perception/vision/d435/puck_observations", 10);
+  object_pub_ = create_publisher<geometry_msgs::msg::PoseArray>("/perception/vision/d435/object_detection", 10);
+  obstacle_pub_ = create_publisher<geometry_msgs::msg::PoseArray>("/perception/vision/d435/obstacle", 10);
+  lidar_obstacle_pub_ = create_publisher<geometry_msgs::msg::PoseArray>("/perception/lidar/obstacle", 10);
+  odom_pub_ = create_publisher<nav_msgs::msg::Odometry>("/perception/state/odom", 10);
   diagnostics_pub_ = create_publisher<diagnostic_msgs::msg::DiagnosticArray>("/perception/diagnostics", 10);
 
-  for (int camera = 0; camera < 2; ++camera) {
-    auto group = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
-    input_groups_.push_back(group);
+  for (const Camera camera : {kD435, kC310}) {
     rclcpp::SubscriptionOptions options;
-    options.callback_group = group;
+    options.callback_group = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
     image_subs_[camera] = create_subscription<std_msgs::msg::UInt64MultiArray>(
-      camera == 0 ? "/vision/image_offset" : "/vision/c310_image_offset", rclcpp::QoS(1),
-      [this, camera](std_msgs::msg::UInt64MultiArray::ConstSharedPtr input) { receive_frame(camera, input->data); }, options);
+      camera == kD435 ? "/vision/d435/image_offset" : "/vision/c310/image_offset", rclcpp::QoS(1),
+      [this, camera](std_msgs::msg::UInt64MultiArray::ConstSharedPtr input) { receive_frame(camera, input->data); },
+      options);
   }
-  info_sub_ = create_subscription<sensor_msgs::msg::CameraInfo>("/vision/camera_info", 10,
+  info_sub_ = create_subscription<sensor_msgs::msg::CameraInfo>("/vision/d435/camera_info", 10,
     [this](sensor_msgs::msg::CameraInfo::ConstSharedPtr info) {
       std::lock_guard<std::mutex> lock(data_mutex_); info_ = std::move(info);
     });
-  odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
-    declare_parameter("odometry_source_topic", "/wheel/odom"), rclcpp::SensorDataQoS(),
+  odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(odometry_topic_, rclcpp::SensorDataQoS(),
     [this](nav_msgs::msg::Odometry::ConstSharedPtr input) {
       std::lock_guard<std::mutex> lock(data_mutex_); odom_ = std::move(input); ++odom_id_;
     });
@@ -91,92 +186,22 @@ PerceptionMaster::PerceptionMaster() : Node("perception_master") {
       std::lock_guard<std::mutex> lock(data_mutex_); scan_ = std::move(input); ++scan_id_;
     });
 
-  for (int camera = 0; camera < 2; ++camera) {
-    const auto name = camera == 0 ? "object_detector" : "c310_detector";
-    if (schedules_.at(name).enabled) {
-      if (!detectors_[camera].configure(config)) {
-        throw std::runtime_error("invalid NCNN configuration or cannot load model: " + config.model_dir);
-      }
-      add_task(name,
-        [this, camera](Task &task) { return detect(camera, task); });
-    }
-  }
-  add_task("aruco", [this](Task &task) {
-    auto frame = latest_frame(0);
-    if (!consume(frame, task)) return false;
-    if (!aruco_.is_valid_input(frame->data->bgr)) return false;
-    const auto ids = aruco_.compute_result(frame->data->bgr);
-    if (!is_fresh_input(frame->header.stamp)) return false;
-    std_msgs::msg::Int32MultiArray output;
-    output.data.assign(ids.begin(), ids.end()); aruco_pub_->publish(output); return true;
-  });
-  add_task("knob_depth", [this](Task &task) { return geometry(0, task); });
-  add_task("knob_lever", [this](Task &task) { return geometry(1, task); });
-  add_task("depth_heatmap", [this](Task &task) {
-    auto frame = latest_frame(0);
-    if (!consume(frame, task)) return false;
-    if (!heatmap_.is_valid_input(frame->data->depth)) return false;
-    auto image = heatmap_.compute_result(frame->data->depth);
-    sensor_msgs::msg::Image output;
-    output.header = frame->header; output.height = image.rows; output.width = image.cols;
-    output.encoding = "bgr8"; output.step = image.cols * 3;
-    output.data.assign(image.data, image.data + image.total() * image.elemSize());
-    heatmap_pub_->publish(output); return true;
-  });
-  add_task("state_estimator", [this](Task &task) {
-    nav_msgs::msg::Odometry::ConstSharedPtr input;
-    uint64_t id;
-    { std::lock_guard<std::mutex> lock(data_mutex_); input = odom_; id = odom_id_; }
-    if (!input || task.seen == id || !is_fresh_input(input->header.stamp)) return false;
-    task.seen = id;
-    if (!state_estimator_.is_valid_input(*input)) return false;
-    odom_pub_->publish(state_estimator_.compute_result(*input)); return true;
-  });
-  add_task("obstacle_detector", [this](Task &task) {
-    sensor_msgs::msg::LaserScan::ConstSharedPtr input;
-    uint64_t id;
-    { std::lock_guard<std::mutex> lock(data_mutex_); input = scan_; id = scan_id_; }
-    if (!input || task.seen == id || !is_fresh_input(input->header.stamp)) return false;
-    task.seen = id;
-    if (!obstacle_.is_valid_input(*input)) return false;
-    obstacle_pub_->publish(obstacle_.compute_result(*input)); return true;
-  });
+  add_task("d435_yolo", [this](Task &task) { return d435_yolo(task); });
+  add_task("aruco", [this](Task &task) { return d435_aruco(task); });
+  add_task("knob_depth", [this](Task &task) { return d435_knob_depth(task); });
+  add_task("object_detector", [this](Task &task) { return d435_object_detector(task); });
+  add_task("obstacle_detector", [this](Task &task) { return d435_obstacle_detector(task); });
+  add_task("puck_axis", [this](Task &task) { return d435_puck_axis(task); });
+  add_task("knob_lever", [this](Task &task) { return c310_knob_lever(task); });
+  add_task("lidar_obstacle", [this](Task &task) { return lidar_obstacle(task); });
+  add_task("state_estimator", [this](Task &task) { return state_estimator(task); });
   diagnostics_at_ = Steady::now();
   diagnostics_timer_ = create_wall_timer(std::chrono::seconds(1), [this] { diagnostics(); });
-  RCLCPP_WARN(get_logger(), "StateEstimator relays one odometry source; wheel/IMU/lidar fusion is not implemented");
-  RCLCPP_INFO(get_logger(), "PerceptionMaster ready; model=%s, classes=%zu, executor_threads=%d",
-    config.model_dir.c_str(), labels_.size(), threads);
-}
-
-double PerceptionMaster::load_positive_param(const std::string &name, double fallback) {
-  const double value = declare_parameter(name, fallback);
-  if (!std::isfinite(value) || value <= 0) throw std::invalid_argument(name + " must be finite and positive");
-  return value;
 }
 
 bool PerceptionMaster::is_fresh_input(const builtin_interfaces::msg::Time &stamp) const {
   const double age = (now() - rclcpp::Time(stamp, get_clock()->get_clock_type())).seconds();
   return age >= -0.01 && age <= max_age_;
-}
-
-void PerceptionMaster::load_schedules() {
-  for (const std::string name : {"object_detector", "c310_detector", "aruco", "knob_depth",
-       "knob_lever", "depth_heatmap", "state_estimator", "obstacle_detector"}) {
-    const bool enabled = declare_parameter(name + ".enabled", true);
-    // No duplicated C++ Hz defaults: perception.yaml is the schedule source.
-    declare_parameter(name + ".hz", rclcpp::ParameterType::PARAMETER_DOUBLE);
-    double hz;
-    try { hz = get_parameter(name + ".hz").as_double(); }
-    catch (const std::exception &) {
-      throw std::invalid_argument("provide " + name + ".hz in perception.yaml (--params-file)");
-    }
-    const double seconds = 1.0 / hz;
-    const double maximum = std::chrono::duration<double>(std::chrono::nanoseconds::max()).count();
-    if (!std::isfinite(hz) || hz <= 0 || !std::isfinite(seconds) || seconds < 1e-9 || seconds >= maximum) {
-      throw std::invalid_argument(name + ".hz must yield a finite, positive timer period >=1ns");
-    }
-    schedules_.emplace(name, ModuleSchedule{enabled, hz});
-  }
 }
 
 void PerceptionMaster::add_task(const std::string &name, std::function<bool(Task &)> compute) {
@@ -203,9 +228,9 @@ void PerceptionMaster::add_task(const std::string &name, std::function<bool(Task
   tasks_.push_back(task);
 }
 
-void PerceptionMaster::receive_frame(int camera, const std::vector<uint64_t> &meta) {
+void PerceptionMaster::receive_frame(Camera camera, const std::vector<uint64_t> &meta) {
   // Subscription only stores small metadata. No image read, allocation or conversion here.
-  if (!SharedFrameReader::is_valid_metadata(meta, camera == 0)) return;
+  if (!SharedFrameReader::is_valid_metadata(meta, camera == kD435)) return;
   const auto stamp = rclcpp::Time(static_cast<int64_t>(meta[4]), get_clock()->get_clock_type());
   if (!is_fresh_input(stamp)) return;
   auto &input = cameras_[camera];
@@ -215,7 +240,7 @@ void PerceptionMaster::receive_frame(int camera, const std::vector<uint64_t> &me
   ++input.generation;
 }
 
-std::shared_ptr<const Frame> PerceptionMaster::latest_frame(int camera) {
+std::shared_ptr<const Frame> PerceptionMaster::latest_frame(Camera camera) {
   auto &input = cameras_[camera];
   std::lock_guard<std::mutex> lock(input.mutex);
   if (input.metadata.empty()) return {};
@@ -229,9 +254,9 @@ std::shared_ptr<const Frame> PerceptionMaster::latest_frame(int camera) {
     return {};
   }
   auto frame = std::make_shared<Frame>(); frame->data = std::move(data);
-  frame->header.frame_id = camera_frames_[camera]; frame->header.stamp = stamp;
+  frame->header.frame_id = input.frame_id; frame->header.stamp = stamp;
   frame->id = input.generation;
-  if (camera == 0) {
+  if (camera == kD435) {
     std::lock_guard<std::mutex> data_lock(data_mutex_);
     if (info_ && info_->width == static_cast<uint32_t>(frame->data->bgr.cols) &&
         info_->height == static_cast<uint32_t>(frame->data->bgr.rows) &&
@@ -246,66 +271,155 @@ bool PerceptionMaster::consume(const std::shared_ptr<const Frame> &frame, Task &
   task.seen = frame->id; return true;
 }
 
-msg::Detection PerceptionMaster::message(const Detection &box) const {
+std::shared_ptr<const DetectedFrame> PerceptionMaster::new_detection(Task &task) {
+  std::shared_ptr<const DetectedFrame> result;
+  { std::lock_guard<std::mutex> lock(data_mutex_); result = d435_detected_; }
+  if (!result || !consume(result->frame, task)) return {};
+  return result;
+}
+
+std::optional<Intrinsics> PerceptionMaster::intrinsics(const Frame &frame) {
+  if (!frame.info) return {};
+  const auto &k = frame.info->k;
+  return Intrinsics{k[0], k[4], k[2], k[5]};
+}
+
+msg::Detection PerceptionMaster::message(const Detection &box, const std::vector<std::string> &labels) {
   msg::Detection output; output.class_id = box.class_id;
-  output.label = labels_.at(box.class_id); output.confidence = box.score;
+  output.label = labels.at(box.class_id); output.confidence = box.score;
   output.bbox = {box.box.x, box.box.y, box.box.width, box.box.height}; return output;
 }
 
-bool PerceptionMaster::detect(int camera, Task &task) {
-  auto frame = latest_frame(camera);
+// D435: one YOLO inference per frame; the boxes stay attached to the frame they came from.
+bool PerceptionMaster::d435_yolo(Task &task) {
+  auto frame = latest_frame(kD435);
   if (!consume(frame, task)) return false;
-  auto result = std::make_shared<DetectedFrame>(); result->frame = frame;
-  if (!detectors_[camera].is_valid_input(frame->data->bgr)) return false;
-  result->boxes = detectors_[camera].compute_result(frame->data->bgr);
-  if (!is_fresh_input(frame->header.stamp)) return false;
-  msg::DetectionArray output; output.header = frame->header;
-  for (const auto &box : result->boxes) output.detections.push_back(message(box));
-  detection_pubs_[camera]->publish(output);
-  { std::lock_guard<std::mutex> lock(data_mutex_); detected_[camera] = std::move(result); }
+  auto boxes = d435_.detect(*frame->data);
+  if (!boxes || !is_fresh_input(frame->header.stamp)) return false;
+  auto output = std::make_unique<msg::DetectionArray>(); output->header = frame->header;
+  for (const auto &box : *boxes) output->detections.push_back(message(box, d435_labels_));
+  detection_pubs_[kD435]->publish(std::move(output));
+  auto result = std::make_shared<DetectedFrame>(); result->frame = frame; result->boxes = std::move(*boxes);
+  { std::lock_guard<std::mutex> lock(data_mutex_); d435_detected_ = std::move(result); }
   return true;
 }
 
-bool PerceptionMaster::geometry(int camera, Task &task) {
-  std::shared_ptr<const DetectedFrame> result;
-  { std::lock_guard<std::mutex> lock(data_mutex_); result = detected_[camera]; }
-  if (!result || !consume(result->frame, task)) return false;
-  const auto &frame = *result->frame;
-  if (camera == 0 && !frame.info) return false;
-  msg::KnobObservationArray output; output.header = frame.header;
-  geometry_msgs::msg::PoseArray points; points.header = frame.header;
-  for (const auto &box : result->boxes) {
-    std::optional<DepthResult> depth;
-    if (camera == 0) {
-      const auto &k = frame.info->k;
-      const Intrinsics intrinsics{k[0], k[4], k[2], k[5]};
-      if (depth_.is_valid_input(frame.data->depth, box.box, intrinsics)) {
-        depth = depth_.compute_result(frame.data->depth, box.box, intrinsics);
-      }
-      if (depth) {
-        geometry_msgs::msg::Pose pose;
-        pose.position.x = depth->position[0]; pose.position.y = depth->position[1];
-        pose.position.z = depth->position[2]; pose.orientation.w = 1; points.poses.push_back(pose);
-      }
+bool PerceptionMaster::d435_aruco(Task &task) {
+  auto frame = latest_frame(kD435);
+  if (!consume(frame, task)) return false;
+  const auto ids = d435_.read_aruco(*frame->data);
+  if (!ids || !is_fresh_input(frame->header.stamp)) return false;
+  auto output = std::make_unique<std_msgs::msg::Int32MultiArray>();
+  output->data.assign(ids->begin(), ids->end()); aruco_pub_->publish(std::move(output)); return true;
+}
+
+bool PerceptionMaster::d435_knob_depth(Task &task) {
+  const auto detected = new_detection(task);
+  if (!detected) return false;
+  const auto &frame = *detected->frame;
+  const auto in = intrinsics(frame);
+  if (!in) return false;
+  const auto result = d435_.knob_depth(*frame.data, detected->boxes, *in);
+  if (!result || !is_fresh_input(frame.header.stamp)) return false;
+  auto output = std::make_unique<msg::KnobObservationArray>(); output->header = frame.header;
+  for (const auto &knob : *result) {
+    msg::KnobObservation observation; observation.detection = message(knob.detection, d435_labels_);
+    if (knob.depth) {
+      observation.depth_valid = true; observation.position = point(knob.depth->position);
+      observation.normal_valid = knob.depth->normal_valid;
+      observation.panel_normal = vector(knob.depth->normal);
+      observation.plane_rms_m = knob.depth->plane_rms_m;
     }
-    if (box.class_id != knob_id_) continue;
-    msg::KnobObservation observation; observation.detection = message(box);
-    if (depth) {
-      observation.depth_valid = true;
-      observation.position.x = depth->position[0]; observation.position.y = depth->position[1];
-      observation.position.z = depth->position[2]; observation.normal_valid = depth->normal_valid;
-      observation.panel_normal.x = depth->normal[0]; observation.panel_normal.y = depth->normal[1];
-      observation.panel_normal.z = depth->normal[2]; observation.plane_rms_m = depth->plane_rms_m;
-    }
-    const auto angle = lever_.is_valid_input(frame.data->bgr, box.box) ?
-      lever_.compute_result(frame.data->bgr, box.box) : std::nullopt;
-    observation.lever_valid = angle.has_value(); observation.lever_angle = angle.value_or(0);
-    output.observations.push_back(observation);
+    output->observations.push_back(observation);
   }
-  if (!is_fresh_input(frame.header.stamp)) return false;
-  knob_pubs_[camera]->publish(output);
-  if (camera == 0) object_points_pub_->publish(points);
+  knob_pubs_[kD435]->publish(std::move(output));
   return true;
+}
+
+bool PerceptionMaster::d435_object_detector(Task &task) {
+  const auto detected = new_detection(task);
+  if (!detected) return false;
+  const auto &frame = *detected->frame;
+  const auto in = intrinsics(frame);
+  if (!in) return false;
+  const auto result = d435_.detect_objects(*frame.data, detected->boxes, *in);
+  if (!result || !is_fresh_input(frame.header.stamp)) return false;
+  object_pub_->publish(poses(frame.header, *result));
+  return true;
+}
+
+bool PerceptionMaster::d435_obstacle_detector(Task &task) {
+  const auto detected = new_detection(task);
+  if (!detected) return false;
+  const auto &frame = *detected->frame;
+  const auto in = intrinsics(frame);
+  if (!in) return false;
+  const auto result = d435_.detect_obstacles(*frame.data, detected->boxes, *in);
+  if (!result || !is_fresh_input(frame.header.stamp)) return false;
+  obstacle_pub_->publish(poses(frame.header, *result));
+  return true;
+}
+
+// Puck runs its own model on the D435 frame, independent of d435_yolo.
+bool PerceptionMaster::d435_puck_axis(Task &task) {
+  auto frame = latest_frame(kD435);
+  if (!consume(frame, task)) return false;
+  const auto in = intrinsics(*frame);
+  if (!in) return false;
+  const auto result = d435_.puck_axis(*frame->data, *in);
+  if (!result || !is_fresh_input(frame->header.stamp)) return false;
+  auto output = std::make_unique<msg::PuckObservationArray>(); output->header = frame->header;
+  for (const auto &puck : *result) {
+    msg::PuckObservation observation; observation.detection = message(puck.detection, puck_labels_);
+    if (puck.axis) {
+      observation.axis_valid = true; observation.center = point(puck.axis->center);
+      observation.axis = vector(puck.axis->axis); observation.shelf_normal = vector(puck.axis->normal);
+      observation.standing = puck.axis->standing; observation.height_m = puck.axis->height_m;
+      observation.plane_rms_m = puck.axis->plane_rms_m; observation.points = puck.axis->points;
+    }
+    output->observations.push_back(observation);
+  }
+  puck_pub_->publish(std::move(output));
+  return true;
+}
+
+// C310: its own YOLO + lever per frame.
+bool PerceptionMaster::c310_knob_lever(Task &task) {
+  auto frame = latest_frame(kC310);
+  if (!consume(frame, task)) return false;
+  const auto result = c310_.knob_lever(*frame->data);
+  if (!result || !is_fresh_input(frame->header.stamp)) return false;
+  auto detections = std::make_unique<msg::DetectionArray>(); detections->header = frame->header;
+  for (const auto &box : result->detections) detections->detections.push_back(message(box, c310_labels_));
+  auto knobs = std::make_unique<msg::KnobObservationArray>(); knobs->header = frame->header;
+  for (const auto &lever : result->levers) {
+    msg::KnobObservation observation; observation.detection = message(lever.detection, c310_labels_);
+    observation.lever_valid = lever.angle.has_value(); observation.lever_angle = lever.angle.value_or(0);
+    knobs->observations.push_back(observation);
+  }
+  detection_pubs_[kC310]->publish(std::move(detections));
+  knob_pubs_[kC310]->publish(std::move(knobs));
+  return true;
+}
+
+bool PerceptionMaster::lidar_obstacle(Task &task) {
+  sensor_msgs::msg::LaserScan::ConstSharedPtr input;
+  uint64_t id;
+  { std::lock_guard<std::mutex> lock(data_mutex_); input = scan_; id = scan_id_; }
+  if (!input || task.seen == id || !is_fresh_input(input->header.stamp)) return false;
+  task.seen = id;
+  if (!lidar_obstacle_.is_valid_input(*input)) return false;
+  lidar_obstacle_pub_->publish(lidar_obstacle_.compute_result(*input)); return true;
+}
+
+bool PerceptionMaster::state_estimator(Task &task) {
+  nav_msgs::msg::Odometry::ConstSharedPtr input;
+  uint64_t id;
+  { std::lock_guard<std::mutex> lock(data_mutex_); input = odom_; id = odom_id_; }
+  if (!input || task.seen == id || !is_fresh_input(input->header.stamp)) return false;
+  task.seen = id;
+  if (!state_estimator_.is_valid_input(*input)) return false;
+  odom_pub_->publish(state_estimator_.compute_result(*input)); return true;
 }
 
 void PerceptionMaster::diagnostics() {
@@ -331,11 +445,11 @@ void PerceptionMaster::diagnostics() {
     value("errors", task->errors); value("overruns", task->overruns);
     task->previous_processed = task->processed; output.status.push_back(status);
   }
-  for (int camera = 0; camera < 2; ++camera) {
+  for (const Camera camera : {kD435, kC310}) {
     std::lock_guard<std::mutex> lock(cameras_[camera].mutex);
     diagnostic_msgs::msg::DiagnosticStatus status;
-    status.name = camera == 0 ? "perception/shared_memory/realsense" : "perception/shared_memory/c310";
-    status.hardware_id = shm_names_[camera]; status.message = "on-demand shared snapshots";
+    status.name = camera == kD435 ? "perception/shared_memory/realsense" : "perception/shared_memory/c310";
+    status.hardware_id = cameras_[camera].shm; status.message = "on-demand shared snapshots";
     const auto value = [&status](const std::string &key, uint64_t number) {
       diagnostic_msgs::msg::KeyValue item; item.key = key; item.value = std::to_string(number);
       status.values.push_back(item);
@@ -355,8 +469,7 @@ int main(int argc, char **argv) {
   int result = 0;
   try {
     auto master = std::make_shared<craft_perception::PerceptionMaster>();
-    rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(),
-      master->get_parameter("executor_threads").as_int());
+    rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), master->executor_threads());
     executor.add_node(master); executor.spin();
   } catch (const std::exception &e) {
     RCLCPP_FATAL(rclcpp::get_logger("perception_master"), "%s", e.what()); result = 1;

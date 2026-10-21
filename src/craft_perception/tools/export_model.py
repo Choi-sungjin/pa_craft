@@ -13,6 +13,8 @@ def main():
     parser.add_argument('weights', type=Path)
     parser.add_argument('--output', type=Path,
                         default=Path(__file__).resolve().parents[1] / 'models' / 'knob_sign')
+    parser.add_argument('--format', choices=('ncnn', 'onnx'), default='ncnn',
+                        help='onnx: input for trtexec on the Jetson (TensorRT backend)')
     args = parser.parse_args()
     from ultralytics import YOLO, __version__
     # Export from a temporary copy, preserving the training weight directory.
@@ -20,8 +22,21 @@ def main():
         copied = Path(temp) / args.weights.name
         shutil.copy2(args.weights, copied)
         model = YOLO(copied)
-        exported = Path(model.export(format='ncnn', imgsz=640, device='cpu'))
         args.output.mkdir(parents=True, exist_ok=True)
+        if args.format == 'onnx':
+            # nms=None keeps the one-to-many head: output0 [1,4+classes,anchors], same as ncnn.
+            # (nms=False selects the end-to-end head, nms=True appends NMS; decode_yolo accepts neither.)
+            exported = Path(model.export(format='onnx', imgsz=640, device='cpu', nms=None, opset=17))
+            import onnx
+            graph = onnx.load(exported).graph
+            dims = [d.dim_value for d in graph.output[0].type.tensor_type.shape.dim]
+            if len(graph.output) != 1 or dims[:2] != [1, 4 + len(model.names)]:
+                raise SystemExit(f'unexpected ONNX output {graph.output[0].name} {dims}')
+            shutil.copy2(exported, args.output / 'model.onnx')
+            print('ONNX', graph.input[0].name, '->', graph.output[0].name, dims)
+            print('On the Jetson: trtexec --onnx=model.onnx --saveEngine=model.engine --fp16')
+            return
+        exported = Path(model.export(format='ncnn', imgsz=640, device='cpu'))
         for name in ('model.ncnn.param', 'model.ncnn.bin', 'metadata.yaml'):
             shutil.copy2(exported / name, args.output / name)
         provenance = {

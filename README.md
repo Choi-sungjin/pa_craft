@@ -45,21 +45,24 @@ pa_craft/
     │   ├── CMakeLists.txt
     │   ├── package.xml
     │   ├── config/
+    │   │   ├── perception.yaml   # 모든 perception 설정 (master configure()가 읽음)
     │   │   └── slam.yaml
-    │   ├── scripts/
-    │   │   └── *.py              # 기존 비교·개발 도구 (런타임 미사용)
     │   ├── include/craft_perception/ # 일반 C++ 모듈 인터페이스
-    │   ├── msg/                  # 검출·손잡이 관측 메시지
-    │   ├── models/knob_sign/      # v3.pt에서 변환한 ncnn 모델
+    │   ├── msg/                  # 검출·손잡이·puck 관측 메시지
+    │   ├── models/               # knob_sign(v3.pt), puck_blue(target_blue_v3) ncnn 모델
     │   └── src/
-    │       ├── perception_master.cpp # 모듈별 타이머·실행 그룹·ROS 입출력
+    │       ├── perception_master.cpp # 연결·configure·타이머 (control_master 형식)
+    │       ├── d435_perception.cpp   # D435 클래스: yolo → knob_depth/object/obstacle, aruco, puck_axis
+    │       ├── c310_perception.cpp   # C310 클래스: knob_lever (자체 YOLO)
+    │       ├── yolo_detector.cpp     # ncnn YOLO
     │       ├── aruco_reader.cpp
-    │       ├── object_detector.cpp # ncnn YOLO
     │       ├── knob_depth.cpp
     │       ├── knob_lever.cpp
-    │       ├── depth_heatmap.cpp
+    │       ├── object_detector.cpp   # YOLO 박스 + depth → 3D 위치
+    │       ├── obstacle_detector.cpp # YOLO 박스 + depth → 가까운 장애물 면
+    │       ├── puck_axis.cpp         # puck 축 (puck_axis_live.py 이식)
     │       ├── shared_frame.cpp
-    │       ├── obstacle_detector.cpp
+    │       ├── lidar_obstacle_detector.cpp
     │       └── state_estimator.cpp
     ├── craft_planning/
     │   ├── CMakeLists.txt
@@ -94,7 +97,7 @@ pa_craft/
 | --- | --- |
 | `src/craft_bringup` | ROS 2 노드를 함께 실행하는 launch 파일 |
 | `src/craft_sensors` | LiDAR, 카메라, IMU, 엔코더 입력 처리 |
-| `src/craft_perception` | C++ PerceptionMaster·ncnn·ArUco·깊이·레버 인지 ([실행·주기 설정](src/craft_perception/README.md)) |
+| `src/craft_perception` | C++ PerceptionMaster + D435/C310 클래스 (ncnn·ArUco·깊이·레버·puck 인지) ([실행·주기 설정](src/craft_perception/README.md)) |
 | `src/craft_mission` | 미션 상태와 진행 순서 관리 |
 | `src/craft_planning` | 주행 경로 계획 |
 | `src/craft_control` | 로봇 팔·시계 조작 계획, 주행 및 조작 목표를 제어 입력으로 연결 |

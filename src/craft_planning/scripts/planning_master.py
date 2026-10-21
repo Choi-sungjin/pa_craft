@@ -55,13 +55,13 @@ class PlanningMaster(Node):
         self.arm_joint_target_pub = self.create_publisher(JointState, '/planning/target_arm_joints', 10)
 
         self.create_subscription(String, '/planning/mission', self.on_mission, 10)
-        self.create_subscription(Odometry, '/state/odom', self.on_odom, 10)
+        self.create_subscription(Odometry, '/perception/state/odom', self.on_odom, 10)
         # The planning map is fixed to map_file; SLAM is used for localization only, so /map is unused.
         self.get_logger().info('planning map loaded from ' + self.path_planner.map_file)
         self.create_subscription(PoseStamped, '/planning/target_base_pose', self.on_base_pose_goal, 10)
-        self.create_subscription(PoseArray, '/lidar/obstacle', self.on_obstacle, 10)
-        self.create_subscription(PoseStamped, '/vision/object_pose', self.on_object_pose, 10)
-        self.create_subscription(PoseArray, '/vision/object_detection', self.on_object_detection, 10)
+        self.create_subscription(PoseArray, '/perception/lidar/obstacle', self.on_obstacle, 10)
+        self.create_subscription(PoseStamped, '/perception/vision/object_pose', self.on_object_pose, 10)
+        self.create_subscription(PoseArray, '/perception/vision/d435/object_detection', self.on_object_detection, 10)
         self.create_subscription(PoseStamped, '/planning/target_tcp_pose', self.on_tcp_pose_goal, 10)
         self.create_subscription(JointState, '/ik_solution', self.on_ik_solution, 10)
 

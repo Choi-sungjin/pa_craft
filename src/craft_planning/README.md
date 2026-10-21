@@ -24,7 +24,7 @@ in the planning node, separately from the control timer process.
 
 | Topic | Type | Direction |
 | --- | --- | --- |
-| `/state/odom` | `nav_msgs/Odometry` | Current robot pose input |
+| `/perception/state/odom` | `nav_msgs/Odometry` | Current robot pose input |
 | `/planning/target_base_pose` | `geometry_msgs/PoseStamped` | New mobile-base goal input |
 | `/planning/target_path` | `nav_msgs/Path` | Collision-checked sampled path output |
 | `/planning/odom` | `nav_msgs/Odometry` | Forwarded odometry for control |

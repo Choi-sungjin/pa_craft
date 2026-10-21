@@ -1,11 +1,15 @@
+#include "craft_perception/yolo_detector.hpp"
 #include "craft_perception/object_detector.hpp"
+#include "craft_perception/puck_axis.hpp"
+#include "craft_perception/d435_perception.hpp"
+#include "craft_perception/c310_perception.hpp"
 #include "craft_perception/aruco_reader.hpp"
 #include "craft_perception/knob_depth.hpp"
 #include "craft_perception/knob_lever.hpp"
-#include "craft_perception/depth_heatmap.hpp"
 #include "craft_perception/shared_frame.hpp"
 #include "craft_perception/state_estimator.hpp"
 #include "craft_perception/obstacle_detector.hpp"
+#include "craft_perception/lidar_obstacle_detector.hpp"
 #include <fcntl.h>
 #include <sys/file.h>
 #include <sys/mman.h>
@@ -24,20 +28,35 @@ TEST(ModuleContract, RejectsInvalidConfigurationWithoutThrowing) {
   EXPECT_FALSE(depth.configure(1.0, 0.03, 50));
   EXPECT_FALSE(depth.configure(2.0, std::numeric_limits<double>::quiet_NaN(), 50));
   EXPECT_FALSE(depth.configure(2.0, 0.03, 2));
-  DepthHeatmap heatmap;
-  EXPECT_FALSE(heatmap.configure(0.3, 0.2));
-  ObstacleDetector obstacle;
+  LidarObstacleDetector obstacle;
   EXPECT_FALSE(obstacle.configure(3.0, 0));
-  ObjectDetector detector;
+  YoloDetector detector;
   DetectorConfig config;
   config.model_dir = "/does-not-exist";
   config.confidence = std::numeric_limits<float>::infinity();
   EXPECT_FALSE(detector.configure(config));
+  EXPECT_FALSE(ObjectDetector().configure(0));
+  EXPECT_FALSE(ObstacleDetector().configure({}, 1.0, 0.1));
+  EXPECT_FALSE(ObstacleDetector().configure({1}, 1.0, 1.5));
+  PuckAxisConfig puck;
+  puck.min_height_m = puck.max_height_m;
+  EXPECT_FALSE(PuckAxis().configure(puck));
+  D435Config d435;  // knob id outside the class list, nothing to load
+  d435.use_yolo = d435.use_aruco = d435.use_puck = false;
+  d435.obstacle_class_ids = {1};
+  d435.knob_class_id = 5;
+  EXPECT_FALSE(D435Perception().configure(d435));
+  d435.knob_class_id = 0;
+  EXPECT_TRUE(D435Perception().configure(d435));
+  C310Config c310;
+  c310.use_knob_lever = false;
+  c310.knob_class_id = -1;
+  EXPECT_FALSE(C310Perception().configure(c310));
 }
 
 TEST(ModuleContract, SeparatesInvalidInputsFromValidEmptyObservations) {
   cv::Mat gray(10, 10, CV_8UC1), bgr(10, 10, CV_8UC3, cv::Scalar(0, 0, 0));
-  ObjectDetector detector;
+  YoloDetector detector;
   ArucoReader aruco;
   EXPECT_FALSE(detector.is_valid_input(gray));
   EXPECT_FALSE(aruco.is_valid_input(gray));
@@ -46,10 +65,8 @@ TEST(ModuleContract, SeparatesInvalidInputsFromValidEmptyObservations) {
   EXPECT_TRUE(aruco.is_valid_input(bgr));
   KnobDepth depth;
   EXPECT_FALSE(depth.is_valid_input({gray, 1.0, {}}, {0, 0, 5, 5}, {100, 100, 5, 5}));
-  DepthHeatmap heatmap;
-  EXPECT_FALSE(heatmap.is_valid_input({gray, 1.0, {}}));
   sensor_msgs::msg::LaserScan scan;
-  ObstacleDetector obstacle;
+  LidarObstacleDetector obstacle;
   ASSERT_TRUE(obstacle.configure(3.0, 1));
   EXPECT_FALSE(obstacle.is_valid_input(scan));
   scan.header.frame_id = "laser";
@@ -136,18 +153,6 @@ TEST(Lever, RightLeverIsClockwiseQuarterTurn) {
   EXPECT_FALSE(module.compute_result(cv::Mat::zeros(100, 100, CV_8UC3), {0, 0, 100, 100}));
 }
 
-TEST(Heatmap, MissingBlackNearRedFarBlue) {
-  cv::Mat depth(1, 3, CV_32FC1);
-  depth.at<float>(0, 0) = 0; depth.at<float>(0, 1) = 0.2; depth.at<float>(0, 2) = 0.3;
-  DepthHeatmap module;
-  ASSERT_TRUE(module.configure(0.2, 0.3));
-  ASSERT_TRUE(module.is_valid_input({depth, 1.0, {}}));
-  const auto image = module.compute_result({depth, 1.0, {}});
-  EXPECT_EQ(image.at<cv::Vec3b>(0, 0), cv::Vec3b(0, 0, 0));
-  EXPECT_EQ(image.at<cv::Vec3b>(0, 1), cv::Vec3b(0, 0, 255));
-  EXPECT_EQ(image.at<cv::Vec3b>(0, 2), cv::Vec3b(255, 0, 0));
-}
-
 TEST(SharedMemory, OwnsSnapshotRejectsOverwrittenSlotAndBusyWriter) {
   const std::string name = "/craft_perception_test_" + std::to_string(getpid());
   int fd = shm_open(name.c_str(), O_CREAT | O_EXCL | O_RDWR, 0600);
@@ -191,7 +196,7 @@ TEST(Feedback, KeepsFramesAndRejectsInvalidOdom) {
   scan.header.frame_id = "laser"; scan.angle_min = 0; scan.angle_increment = CV_PI / 2;
   scan.range_min = 0.1; scan.range_max = 10;
   scan.ranges = {1, 2, std::numeric_limits<float>::infinity(), 9};
-  ObstacleDetector module;
+  LidarObstacleDetector module;
   ASSERT_TRUE(module.configure(3, 1));
   ASSERT_TRUE(module.is_valid_input(scan));
   const auto points = module.compute_result(scan);
@@ -211,11 +216,6 @@ TEST(Depth, RawZ16UsesScaleWithoutAFullFrameConversion) {
   EXPECT_NEAR(result->position[2], 0.25, 1e-6);
   EXPECT_TRUE(result->normal_valid);
   EXPECT_NEAR(result->normal[2], -1, 1e-6);
-  DepthHeatmap heatmap;
-  ASSERT_TRUE(heatmap.configure(0.25, 0.3));
-  ASSERT_TRUE(heatmap.is_valid_input(input));
-  auto heat = heatmap.compute_result(input);
-  EXPECT_EQ(heat.at<cv::Vec3b>(0, 0), cv::Vec3b(0, 0, 255));
   EXPECT_EQ(input.raw.type(), CV_16UC1);
 }
 
@@ -259,4 +259,66 @@ TEST(SharedMemory, HandlesOddPixelsResizeAndProducerReplacement) {
   }
   // A retained depth view owns its snapshot even after the reader was destroyed.
   EXPECT_DOUBLE_EQ(retained.at(0, 0), 0.25);
+}
+
+TEST(Objects, BoxCenterMedianAndNearestObstacleSurface) {
+  cv::Mat depth(100, 100, CV_32FC1, cv::Scalar(2.0));
+  depth(cv::Rect(40, 40, 20, 20)).setTo(1.0);  // object face
+  depth(cv::Rect(30, 30, 4, 4)).setTo(0.5);    // near edge inside the box
+  const Intrinsics in{100, 100, 50, 50};
+  const std::vector<Detection> boxes{{{30, 30, 40, 40}, 2, 0.9f}, {{0, 0, 10, 10}, 0, 0.8f}};
+  ObjectDetector objects;
+  ASSERT_TRUE(objects.configure(0.5));
+  ASSERT_TRUE(objects.is_valid_input({depth, 1.0, {}}, in));
+  const auto points = objects.compute_result({depth, 1.0, {}}, boxes, in);
+  ASSERT_EQ(points.size(), 2u);
+  EXPECT_NEAR(points[0].position[2], 1.0, 1e-6);
+  EXPECT_NEAR(points[0].position[0], 0.0, 1e-6);
+  EXPECT_EQ(points[0].detection.class_id, 2);
+  ObstacleDetector obstacles;
+  ASSERT_TRUE(obstacles.configure({2}, 1.5, 0.0));
+  const auto near = obstacles.compute_result({depth, 1.0, {}}, boxes, in);
+  ASSERT_EQ(near.size(), 1u);  // class 0 is not an obstacle class
+  EXPECT_NEAR(near[0].position[2], 0.5, 1e-6);
+  ASSERT_TRUE(obstacles.configure({2}, 0.4, 0.0));
+  EXPECT_TRUE(obstacles.compute_result({depth, 1.0, {}}, boxes, in).empty());
+  EXPECT_FALSE(objects.is_valid_input({depth, 1.0, {}}, {0, 100, 50, 50}));
+}
+
+namespace {
+// Shelf at z=0.5 facing the camera, puck block 2 cm (lying) or 6 cm (standing) closer.
+cv::Mat shelf_with_puck(float height, cv::Rect puck) {
+  cv::Mat depth(120, 160, CV_32FC1, cv::Scalar(0.5));
+  depth(puck).setTo(0.5 - height);
+  return depth;
+}
+}
+
+TEST(Puck, LyingPuckAxisFollowsLongSideOnShelf) {
+  const Intrinsics in{200, 200, 80, 60};
+  const auto depth = shelf_with_puck(0.02f, {60, 52, 40, 16});  // long side along image x
+  PuckAxis module;
+  ASSERT_TRUE(module.configure({}));
+  const cv::Rect2f box(58, 50, 44, 20);
+  ASSERT_TRUE(module.is_valid_input({depth, 1.0, {}}, box, in));
+  const auto result = module.compute_result({depth, 1.0, {}}, box, in);
+  ASSERT_TRUE(result);
+  EXPECT_FALSE(result->standing);
+  EXPECT_NEAR(result->normal[2], -1, 1e-6);
+  EXPECT_NEAR(result->height_m, 0.02, 1e-3);
+  EXPECT_GT(result->axis[0], 0.99);
+  EXPECT_NEAR(result->center[2], 0.49, 1e-3);
+}
+
+TEST(Puck, StandingPuckUsesShelfNormalAndEmptyRingFails) {
+  const Intrinsics in{200, 200, 80, 60};
+  const auto depth = shelf_with_puck(0.06f, {70, 50, 20, 20});
+  PuckAxis module;
+  ASSERT_TRUE(module.configure({}));
+  const auto result = module.compute_result({depth, 1.0, {}}, {68, 48, 24, 24}, in);
+  ASSERT_TRUE(result);
+  EXPECT_TRUE(result->standing);
+  EXPECT_NEAR(result->axis[2], -1, 1e-6);
+  cv::Mat empty(120, 160, CV_32FC1, cv::Scalar(0));
+  EXPECT_FALSE(module.compute_result({empty, 1.0, {}}, {68, 48, 24, 24}, in));
 }

@@ -14,11 +14,16 @@ import subprocess
 import tempfile
 import time
 
+# Tasks that read the D435 frame besides d435_yolo/aruco (puck_axis runs its own model).
+D435_CONSUMERS = ('knob_depth', 'object_detector', 'obstacle_detector', 'puck_axis')
+
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--executable', required=True)
     parser.add_argument('--model', required=True)
+    parser.add_argument('--puck-model', type=Path,
+                        default=Path(__file__).resolve().parents[1] / 'models' / 'puck_blue')
     parser.add_argument('--config', type=Path,
                         default=Path(__file__).resolve().parents[1] / 'config' / 'perception.yaml')
     parser.add_argument('--low-copy', action='store_true',
@@ -40,7 +45,7 @@ def main():
     node = rclpy.create_node('perception_synthetic_input')
     detections, statuses = [], {}
     odometry_results, obstacle_results = [], []
-    node.create_subscription(Int32MultiArray, '/vision/aruco',
+    node.create_subscription(Int32MultiArray, '/perception/vision/d435/aruco',
                              lambda msg: detections.append(list(msg.data)), 10)
 
     def on_diagnostic(message):
@@ -49,13 +54,13 @@ def main():
 
     node.create_subscription(DiagnosticArray, '/perception/diagnostics', on_diagnostic, 10)
     from geometry_msgs.msg import PoseArray
-    node.create_subscription(Odometry, '/state/odom', odometry_results.append, 10)
-    node.create_subscription(PoseArray, '/lidar/obstacle', obstacle_results.append, 10)
+    node.create_subscription(Odometry, '/perception/state/odom', odometry_results.append, 10)
+    node.create_subscription(PoseArray, '/perception/lidar/obstacle', obstacle_results.append, 10)
     odometry_pub = node.create_publisher(Odometry, '/wheel/odom', 1)
     scan_pub = node.create_publisher(LaserScan, '/lidar/merged', 1)
     publishers = [node.create_publisher(UInt64MultiArray, topic, 1)
-                  for topic in ('/vision/image_offset', '/vision/c310_image_offset')]
-    info_pub = node.create_publisher(CameraInfo, '/vision/camera_info', 10)
+                  for topic in ('/vision/d435/image_offset', '/vision/c310/image_offset')]
+    info_pub = node.create_publisher(CameraInfo, '/vision/d435/camera_info', 10)
     image = np.full((360, 640, 3), 255, dtype=np.uint8)
     dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
     marker = cv2.aruco.drawMarker(dictionary, 7, 100)
@@ -67,12 +72,12 @@ def main():
     overrides = tempfile.NamedTemporaryFile(mode='w+', suffix='.yaml')
     detector_hz, aruco_hz = (2.0, 2.0) if args.low_copy else (100.0, 7.0)
     overrides.write('perception_master:\n  ros__parameters:\n'
-                    f'    object_detector.hz: {detector_hz}\n'
-                    f'    c310_detector.hz: {detector_hz}\n'
-                    f'    aruco.hz: {aruco_hz}\n')
+                    f'    schedule.d435_yolo.hz: {detector_hz}\n'
+                    f'    schedule.knob_lever.hz: {detector_hz}\n'
+                    f'    schedule.aruco.hz: {aruco_hz}\n')
     if args.low_copy:
-        overrides.write('    depth_heatmap.hz: 2.0\n    knob_depth.hz: 2.0\n    knob_lever.hz: 2.0\n'
-                        '    max_input_age_s: 1.5\n')
+        overrides.write(''.join(f'    schedule.{name}.hz: 2.0\n' for name in D435_CONSUMERS)
+                        + '    max_input_age_s: 1.5\n')
     overrides.flush()
     try:
         for name, size in zip(names, sizes):
@@ -82,8 +87,10 @@ def main():
         child = subprocess.Popen([
             args.executable, '--ros-args', '--params-file', str(args.config.resolve()),
             '--params-file', overrides.name,
-            '-p', f'model_dir:={Path(args.model).resolve()}',
-            '-p', f'realsense_shm:={names[0]}', '-p', f'c310_shm:={names[1]}',
+            '-p', f'd435.yolo.model_dir:={Path(args.model).resolve()}',
+            '-p', f'c310.yolo.model_dir:={Path(args.model).resolve()}',
+            '-p', f'd435.puck_yolo.model_dir:={args.puck_model.resolve()}',
+            '-p', f'd435.shm:={names[0]}', '-p', f'c310.shm:={names[1]}',
         ], stdout=log, stderr=log)
         deadline, next_frame, sequence = time.monotonic() + 8, 0, 0
         next_odometry, next_scan = 0, 0
@@ -131,12 +138,12 @@ def main():
         assert all(ids == [7] for ids in detections), detections[:5]
         assert len(odometry_results) >= 500, f'odometry starved: {len(odometry_results)}'
         assert len(obstacle_results) >= 100, f'scan processing starved: {len(obstacle_results)}'
-        for name in ('object_detector', 'c310_detector', 'aruco', 'knob_depth', 'knob_lever',
-                     'depth_heatmap', 'state_estimator', 'obstacle_detector'):
+        for name in ('d435_yolo', 'aruco', 'knob_lever', 'lidar_obstacle', 'state_estimator',
+                     *D435_CONSUMERS):
             stats = statuses['perception/' + name]
             assert stats['processed'] > 0, (name, stats)
             assert stats['errors'] == 0, (name, stats)
-        for name, expected in (('object_detector', detector_hz), ('c310_detector', detector_hz), ('aruco', aruco_hz)):
+        for name, expected in (('d435_yolo', detector_hz), ('knob_lever', detector_hz), ('aruco', aruco_hz)):
             assert statuses['perception/' + name]['configured_hz'] == expected
         for camera, key in enumerate(('realsense', 'c310')):
             stats = statuses['perception/shared_memory/' + key]
@@ -157,7 +164,7 @@ def main():
         assert len(detections) == count, 'repeated ArUco output without a new frame'
         print('Master integration passed:', len(detections), 'ArUco results under two-camera NCNN load')
         print('Odometry results:', len(odometry_results), 'obstacle results:', len(obstacle_results))
-        for name in ('object_detector', 'c310_detector', 'aruco'):
+        for name in ('d435_yolo', 'knob_lever', 'puck_axis', 'aruco'):
             print(name, statuses['perception/' + name])
     finally:
         if child:

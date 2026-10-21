@@ -1,39 +1,86 @@
 perception_master:
   ros__parameters:
+    # Every value below is required: PerceptionMaster::configure() reads them all and
+    # C++ keeps no duplicate defaults. Startup fails on a missing or mistyped key.
     executor_threads: 6
-    ncnn_threads_per_detector: 1
     max_input_age_s: 0.5
-    model_dir: models/knob_sign  # relative to installed craft_perception share
-    input_blob: in0
-    output_blob: out0
-    input_size: 640
-    # Must match exported metadata.yaml exactly. Current custom_yolo26 v3 model.
-    class_names: [knob, sign_red, sign_yellow, sign_green, sign_off]
-    knob_class_id: 0
-    confidence: 0.5
-    nms_iou: 0.45
-    max_detections: 100
-    realsense_frame: camera_color_optical_frame
-    c310_frame: c310_optical_frame
-    realsense_shm: /craft_vision
-    c310_shm: /craft_c310
-    aruco_dictionary: 0  # DICT_4X4_50
-    panel_grow: 2.0
-    panel_tolerance_m: 0.03
-    panel_min_points: 50
-    heatmap_near_m: 0.2
-    heatmap_far_m: 0.3
-    # Explicit passthrough until actual state fusion is implemented.
-    odometry_source_topic: /wheel/odom
-    obstacle_max_range_m: 3.0
-    obstacle_stride: 1
-    # Every module's Hz is required here. Master validates and creates timers;
-    # modules do not declare ROS parameters or run their own loops.
-    object_detector: {enabled: true, hz: 10.0}
-    c310_detector: {enabled: true, hz: 10.0}
-    aruco: {enabled: true, hz: 15.0}
-    knob_depth: {enabled: true, hz: 10.0}
-    knob_lever: {enabled: true, hz: 15.0}
-    depth_heatmap: {enabled: true, hz: 5.0}
-    state_estimator: {enabled: true, hz: 100.0}
-    obstacle_detector: {enabled: true, hz: 20.0}
+    odometry_source_topic: /wheel/odom  # StateEstimator relays this source (fusion on hold)
+
+    d435:
+      frame: camera_color_optical_frame
+      shm: /craft_vision
+      yolo:  # one inference per frame, shared by knob_depth / object_detector / obstacle_detector
+        model_dir: models/knob_sign  # relative to installed craft_perception share
+        backend: ncnn  # ncnn (laptop/CPU) | tensorrt (Jetson; build with TensorRT)
+        engine: models/knob_sign/model.engine  # tensorrt only: built on the Jetson with trtexec
+        ncnn_blobs: [in0, out0]
+        tensorrt_blobs: [images, output0]  # Ultralytics ONNX names
+        input_size: 640
+        # Must match exported metadata.yaml exactly. Current custom_yolo26 v3 model.
+        class_names: [knob, sign_red, sign_yellow, sign_green, sign_off]
+        knob_class_id: 0
+        confidence: 0.5
+        nms_iou: 0.45
+        max_detections: 100
+        ncnn_threads: 1
+      aruco_dictionary: 0  # DICT_4X4_50; independent of YOLO
+      knob_depth: {grow: 2.0, tolerance_m: 0.03, min_points: 50}
+      object_detector: {inner_fraction: 0.5}  # median depth of the box center part
+      obstacle_detector:
+        class_ids: [1, 2, 3, 4]  # YOLO classes treated as obstacles (traffic sign stands)
+        max_range_m: 1.5
+        near_quantile: 0.1       # nearest-surface depth of the box
+      puck_yolo:  # puck_axis runs this separate model itself (not d435.yolo)
+        model_dir: models/puck_blue
+        backend: ncnn  # ncnn (laptop/CPU) | tensorrt (Jetson; build with TensorRT)
+        engine: models/puck_blue/model.engine  # tensorrt only: built on the Jetson with trtexec
+        ncnn_blobs: [in0, out0]
+        tensorrt_blobs: [images, output0]  # Ultralytics ONNX names
+        input_size: 640
+        class_names: [target_blue]
+        confidence: 0.5
+        nms_iou: 0.45
+        max_detections: 10
+        ncnn_threads: 1
+      puck_axis:  # puck_axis_live.py constants
+        grow: 2.0
+        plane_threshold_m: 0.004
+        min_height_m: 0.008
+        max_height_m: 0.08
+        standing_height_m: 0.045
+        min_depth_m: 0.1
+        max_depth_m: 3.0
+        min_points: 30
+        ransac_iterations: 100
+
+    c310:
+      frame: c310_optical_frame
+      shm: /craft_c310
+      yolo:  # knob_lever runs its own instance on the C310 image
+        model_dir: models/knob_sign
+        backend: ncnn  # ncnn (laptop/CPU) | tensorrt (Jetson; build with TensorRT)
+        engine: models/knob_sign/model.engine  # tensorrt only: built on the Jetson with trtexec
+        ncnn_blobs: [in0, out0]
+        tensorrt_blobs: [images, output0]  # Ultralytics ONNX names
+        input_size: 640
+        class_names: [knob, sign_red, sign_yellow, sign_green, sign_off]
+        knob_class_id: 0
+        confidence: 0.5
+        nms_iou: 0.45
+        max_detections: 100
+        ncnn_threads: 1
+
+    lidar_obstacle: {max_range_m: 3.0, stride: 1}
+
+    # Master validates these and creates one timer per enabled task. Hz is an upper bound:
+    # a task only runs on new input (consumers of d435_yolo are capped at its rate).
+    schedule:
+      d435_yolo: {enabled: true, hz: 10.0}
+      aruco: {enabled: true, hz: 15.0}
+      knob_depth: {enabled: true, hz: 10.0}
+      object_detector: {enabled: true, hz: 10.0}
+      obstacle_detector: {enabled: true, hz: 10.0}
+      puck_axis: {enabled: true, hz: 10.0}
+      knob_lever: {enabled: true, hz: 10.0}
+      lidar_obstacle: {enabled: true, hz: 20.0}
+      state_estimator: {enabled: true, hz: 100.0}

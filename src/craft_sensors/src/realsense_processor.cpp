@@ -1,9 +1,9 @@
 // realsense_processor: D435 color + depth (librealsense2) -> depth aligned to color -> shared memory
-// pub: /vision/image_offset (UInt64MultiArray [offset,w,h,sequence,stamp_ns,depth_unit_nm])
+// pub: /vision/d435/image_offset (UInt64MultiArray [offset,w,h,sequence,stamp_ns,depth_unit_nm])
 //      /dev/shm/craft_vision slot: BGR8, aligned depth Z16, uint64 sequence trailer
 //      (no image copy over DDS; readers that only need color read the first w*h*3 bytes)
-// pub: /vision/camera_info (color intrinsics, valid for the aligned depth too)
-// pub: /vision/image, /lidar/merged (TODO)
+// pub: /vision/d435/camera_info (color intrinsics, valid for the aligned depth too)
+// pub: /vision/d435/image, /lidar/merged (TODO)
 
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -89,9 +89,9 @@ public:
     RCLCPP_INFO(get_logger(), "D435 color %dx%d + depth %dx%d @%dfps (aligned) -> /dev/shm%s (%zu slots)",
       w_, h_, depth_w, depth_h, fps, kShmName, kSlots);
 
-    vision_image_pub_ = create_publisher<sensor_msgs::msg::Image>("/vision/image", 10);
-    vision_image_offset_pub_ = create_publisher<std_msgs::msg::UInt64MultiArray>("/vision/image_offset", 1);
-    camera_info_pub_ = create_publisher<sensor_msgs::msg::CameraInfo>("/vision/camera_info", 10);
+    vision_image_pub_ = create_publisher<sensor_msgs::msg::Image>("/vision/d435/image", 10);
+    vision_image_offset_pub_ = create_publisher<std_msgs::msg::UInt64MultiArray>("/vision/d435/image_offset", 1);
+    camera_info_pub_ = create_publisher<sensor_msgs::msg::CameraInfo>("/vision/d435/camera_info", 10);
     lidar_merged_pub_ = create_publisher<sensor_msgs::msg::LaserScan>("/lidar/merged", 10);
     timer_ = create_wall_timer(5ms, [this]() {realsense_loop();});
   }

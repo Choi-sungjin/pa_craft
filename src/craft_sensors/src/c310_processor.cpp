@@ -1,7 +1,7 @@
 // c310_processor: Logitech C310 (V4L2) -> shared memory for PerceptionMaster
-// pub: /vision/c310_image_offset (UInt64MultiArray [offset,w,h,sequence,stamp_ns])
+// pub: /vision/c310/image_offset (UInt64MultiArray [offset,w,h,sequence,stamp_ns])
 //      /dev/shm/craft_c310 slot: BGR8, uint64 sequence trailer (no image copy over DDS)
-// pub: /vision/c310_image (TODO)
+// pub: /vision/c310/image (TODO)
 
 #include <fcntl.h>
 #include <glob.h>
@@ -67,7 +67,7 @@ public:
     cap_.set(cv::CAP_PROP_FRAME_WIDTH, width);
     cap_.set(cv::CAP_PROP_FRAME_HEIGHT, height);
     cap_.set(cv::CAP_PROP_FPS, fps);
-    // driver picks the closest supported mode; the real size goes to shm and /vision/c310_image_offset
+    // driver picks the closest supported mode; the real size goes to shm and /vision/c310/image_offset
     w_ = static_cast<int>(cap_.get(cv::CAP_PROP_FRAME_WIDTH));
     h_ = static_cast<int>(cap_.get(cv::CAP_PROP_FRAME_HEIGHT));
     if (w_ != width || h_ != height) {
@@ -88,8 +88,8 @@ public:
     shm_ = std::unique_ptr<uint8_t, Unmap>(static_cast<uint8_t *>(p), Unmap{slot_size_ * kSlots});
     RCLCPP_INFO(get_logger(), "camera %s %dx%d -> /dev/shm%s (%zu slots)", camera.c_str(), w_, h_, kShmName, kSlots);
 
-    vision_c310_image_pub_ = create_publisher<sensor_msgs::msg::Image>("/vision/c310_image", 10);
-    vision_c310_image_offset_pub_ = create_publisher<std_msgs::msg::UInt64MultiArray>("/vision/c310_image_offset", 1);
+    vision_c310_image_pub_ = create_publisher<sensor_msgs::msg::Image>("/vision/c310/image", 10);
+    vision_c310_image_offset_pub_ = create_publisher<std_msgs::msg::UInt64MultiArray>("/vision/c310/image_offset", 1);
     timer_ = create_wall_timer(10ms, [this]() {c310_loop();});
   }
 

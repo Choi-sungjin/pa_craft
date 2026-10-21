@@ -1,15 +1,18 @@
 #pragma once
-#include <geometry_msgs/msg/pose_array.hpp>
-#include <sensor_msgs/msg/laser_scan.hpp>
+#include "craft_perception/perception_types.hpp"
+#include <vector>
 
 namespace craft_perception {
+// YOLO boxes of obstacle classes + aligned depth -> nearest surface of each obstacle
+// within range. Uses a low depth quantile of the whole box, not the center median.
 class ObstacleDetector {
 public:
-  bool configure(double maximum_range, int stride);
-  bool is_valid_input(const sensor_msgs::msg::LaserScan &scan) const;
-  geometry_msgs::msg::PoseArray compute_result(const sensor_msgs::msg::LaserScan &scan) const;
+  bool configure(const std::vector<int> &class_ids, double maximum_range_m, double near_quantile);
+  bool is_valid_input(const DepthImage &depth, const Intrinsics &intrinsics) const;
+  std::vector<ObjectPoint> compute_result(const DepthImage &depth,
+    const std::vector<Detection> &boxes, const Intrinsics &intrinsics) const;
 private:
-  double maximum_range_ = 0;
-  int stride_ = 0;
+  std::vector<int> class_ids_;
+  double maximum_range_m_ = 0, near_quantile_ = 0;
 };
 }

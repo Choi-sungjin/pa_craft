@@ -1,5 +1,5 @@
 // mission_fsm: mission state machine (page 2 of craft_data_flowchart.drawio)
-// sub: /vision/aruco, /control/arm_lm_state
+// sub: /perception/vision/d435/aruco, /control/arm_lm_state
 // pub: /planning/mission
 
 #include <chrono>
@@ -20,7 +20,7 @@ public:
   {
     mission_pub_ = create_publisher<std_msgs::msg::String>("/planning/mission", 10);
     aruco_sub_ = create_subscription<std_msgs::msg::Int32MultiArray>(
-      "/vision/aruco", 10, [this](const std_msgs::msg::Int32MultiArray & msg) {on_aruco(msg);});
+      "/perception/vision/d435/aruco", 10, [this](const std_msgs::msg::Int32MultiArray & msg) {on_aruco(msg);});
     arm_lm_state_sub_ = create_subscription<std_msgs::msg::Int32>(
       "/control/arm_lm_state", 10, [this](const std_msgs::msg::Int32 & msg) {on_arm_lm_state(msg);});
     timer_ = create_wall_timer(100ms, [this]() {mission_loop();});
