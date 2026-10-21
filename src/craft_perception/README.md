@@ -15,6 +15,37 @@
 모듈별로 `configured` 플래그를 두지 않으며 master가 설정 성공 후 타이머를 시작합니다.
 입력·결과 보관은 master가 소유합니다. 추론·자원 접근 실패는 예외로 master의 진단에 기록됩니다.
 
+### 소유 관계
+
+```text
+PerceptionMaster  (rclcpp::Node, perception_master.cpp)
+│   ROS 입출력 · configure() · 작업 타이머 · 진단
+│
+├── D435Perception d435_                     (d435_perception.cpp)
+│   ├── YoloDetector    yolo_                → d435_yolo 작업 (knob_sign)
+│   │   └── InferenceBackend  (NcnnBackend | TensorRtBackend)
+│   ├── YoloDetector    puck_yolo_           → puck_axis 작업 (puck_blue)  ※ TODO: yolo_로 일원화
+│   │   └── InferenceBackend
+│   ├── AprilTagReader  apriltag_            → apriltag 작업
+│   ├── KnobDepth       knob_depth_          → knob_depth 작업       ┐
+│   ├── ObjectDetector  object_detector_     → object_detector 작업  ├ d435_yolo 박스 공유
+│   ├── ObstacleDetector obstacle_detector_  → obstacle_detector 작업 ┘
+│   └── PuckAxis        puck_axis_           → puck_axis 작업 (puck_yolo_ 박스 사용)
+│
+├── C310Perception c310_                     (c310_perception.cpp)
+│   ├── YoloDetector    yolo_                → knob_lever 작업 (knob_sign, 또는 seg 모델)
+│   │   └── InferenceBackend
+│   └── KnobLever       lever_               → hsv | yolo_seg 마스크 → 각도
+│
+├── LidarObstacleDetector lidar_obstacle_    → lidar_obstacle 작업 (/lidar/merged)
+├── StateEstimator        state_estimator_   → state_estimator 작업 (대기, odom 전달만)
+│
+└── CameraInput cameras_[2]   [kD435], [kC310]
+    └── SharedFrameReader reader   → /dev/shm/craft_vision, /dev/shm/craft_c310 읽기
+```
+
+### 파일
+
 ```text
 craft_perception/
 ├── config/perception.yaml          # 모든 값 필수, C++ 기본값 없음
@@ -22,7 +53,7 @@ craft_perception/
 │   ├── perception_master.hpp
 │   ├── d435_perception.hpp         # D435Config, D435Perception
 │   ├── c310_perception.hpp         # C310Config, C310Perception
-│   ├── yolo_detector.hpp           # ncnn YOLO (구 ObjectDetector)
+│   ├── yolo_detector.hpp           # YOLO (구 ObjectDetector), ncnn/TensorRT 백엔드, seg 마스크
 │   ├── apriltag_reader.hpp
 │   ├── knob_depth.hpp
 │   ├── knob_lever.hpp
@@ -34,7 +65,7 @@ craft_perception/
 │   ├── shared_frame.hpp
 │   └── perception_types.hpp
 ├── models/knob_sign/, models/puck_blue/
-└── src/ (같은 이름의 .cpp, geometry_utils.hpp)
+└── src/ (같은 이름의 .cpp, tensorrt_backend.cpp, geometry_utils.hpp)
 ```
 
 | 카메라 | 작업 (`schedule.<이름>`) | 기본 Hz | 입력 / 역할 |
@@ -251,3 +282,35 @@ python3 src/craft_perception/test/test_master_integration.py \
 통합 테스트는 독립 ROS domain과 고유 shm 이름으로 합성 D435/C310 입력을 보내며
 실제 ncnn 추론 중 AprilTag 처리와 입력 단절 시 발행 중단을 검사합니다. 실제 장치의
 성능·캘리브레이션·검출 정확도 검증을 대신하지 않습니다.
+
+## TODO
+
+### D435 YOLO 일원화 (knob_sign + puck_blue → 모델 1개)
+
+현재 D435는 프레임마다 YOLO를 두 번 돌립니다(`yolo_` knob_sign 5클래스, `puck_yolo_` target_blue).
+하나로 합치면 D435 추론이 절반이 되고 `puck_yolo_`, `d435.puck_yolo` 설정이 사라집니다.
+
+```text
+현재:   D435 프레임 ─┬─ yolo_      (knob + 신호등 4종) ─→ knob_depth / object / obstacle
+                     └─ puck_yolo_ (target_blue)       ─→ puck_axis
+일원화: D435 프레임 ── yolo_ (knob + 신호등 4종 + target_blue) ─→ knob_depth / object / obstacle / puck_axis
+```
+
+- [ ] **모델:** knob_sign과 puck_blue 데이터셋을 합쳐 6클래스로 재학습
+  - 한쪽 이미지에 찍힌 다른 쪽 물체(knob 이미지 속 puck 등)는 라벨을 보완해야 함.
+    라벨이 빠지면 모델이 배경으로 학습함
+  - 합친 뒤 puck 검출 성능이 전용 모델 대비 떨어지지 않는지 확인
+  - ncnn(`tools/export_model.py`)과 ONNX/TensorRT 둘 다 export
+- [ ] **코드:** `puck_axis`가 `d435_yolo` 결과를 쓰도록 선택지 추가
+  ```yaml
+  d435:
+    puck_axis:
+      source: shared     # shared: d435.yolo 박스 사용 | own: 지금처럼 d435.puck_yolo 별도 모델
+      puck_class_id: 5   # shared일 때 d435.yolo.class_names 안의 puck 인덱스
+  ```
+  - `shared`면 `puck_yolo_`를 로드하지 않고 `puck_axis`를 `on_detection` 작업으로 실행
+    (knob_depth 등과 같은 박스·프레임 공유)
+  - 합친 모델 검증 후 `own` 경로와 `d435.puck_yolo` 블록 제거
+- [ ] **설정:** `d435.yolo.class_names`에 puck 추가. `obstacle_detector.class_ids`에 puck이
+  들어가지 않게 확인
+
