@@ -98,13 +98,19 @@ private:
   double max_age_ = 0;
   std::string odometry_topic_;
 
-  std::mutex data_mutex_;
+  // One mutex per input, held only to swap pointers; computation runs unlocked.
+  // Lock order: cameras_[i].mutex before info_mutex_ (latest_frame); no other nesting.
   CameraInput cameras_[2];
+  std::mutex detected_mutex_;
   std::shared_ptr<const DetectedFrame> d435_detected_;
+  std::mutex info_mutex_;
   sensor_msgs::msg::CameraInfo::ConstSharedPtr info_;
+  std::mutex odom_mutex_;
   nav_msgs::msg::Odometry::ConstSharedPtr odom_;
+  uint64_t odom_id_ = 0;
+  std::mutex scan_mutex_;
   sensor_msgs::msg::LaserScan::ConstSharedPtr scan_;
-  uint64_t odom_id_ = 0, scan_id_ = 0;
+  uint64_t scan_id_ = 0;
 
   std::vector<std::shared_ptr<Task>> tasks_;
   rclcpp::Subscription<std_msgs::msg::UInt64MultiArray>::SharedPtr image_subs_[2];

@@ -9,17 +9,28 @@ const char *const kTasks[] = {"d435_yolo", "aruco", "knob_depth", "object_detect
   "obstacle_detector", "puck_axis", "knob_lever", "lidar_obstacle", "state_estimator"};
 
 geometry_msgs::msg::Point point(const cv::Vec3d &v) {
-  geometry_msgs::msg::Point output; output.x = v[0]; output.y = v[1]; output.z = v[2]; return output;
+  geometry_msgs::msg::Point output; 
+  output.x = v[0]; 
+  output.y = v[1]; 
+  output.z = v[2]; 
+  return output;
 }
 geometry_msgs::msg::Vector3 vector(const cv::Vec3d &v) {
-  geometry_msgs::msg::Vector3 output; output.x = v[0]; output.y = v[1]; output.z = v[2]; return output;
+  geometry_msgs::msg::Vector3 output; 
+  output.x = v[0]; 
+  output.y = v[1]; 
+  output.z = v[2]; 
+  return output;
 }
 // Orientation is identity: PoseArray carries positions only.
 std::unique_ptr<geometry_msgs::msg::PoseArray> poses(
   const std_msgs::msg::Header &header, const std::vector<ObjectPoint> &points) {
-  auto output = std::make_unique<geometry_msgs::msg::PoseArray>(); output->header = header;
+  auto output = std::make_unique<geometry_msgs::msg::PoseArray>(); 
+  output->header = header;
   for (const auto &p : points) {
-    geometry_msgs::msg::Pose pose; pose.position = point(p.position); pose.orientation.w = 1;
+    geometry_msgs::msg::Pose pose; 
+    pose.position = point(p.position); 
+    pose.orientation.w = 1;
     output->poses.push_back(pose);
   }
   return output;
@@ -175,15 +186,15 @@ void PerceptionMaster::connect() {
   }
   info_sub_ = create_subscription<sensor_msgs::msg::CameraInfo>("/vision/d435/camera_info", 10,
     [this](sensor_msgs::msg::CameraInfo::ConstSharedPtr info) {
-      std::lock_guard<std::mutex> lock(data_mutex_); info_ = std::move(info);
+      std::lock_guard<std::mutex> lock(info_mutex_); info_ = std::move(info);
     });
   odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(odometry_topic_, rclcpp::SensorDataQoS(),
     [this](nav_msgs::msg::Odometry::ConstSharedPtr input) {
-      std::lock_guard<std::mutex> lock(data_mutex_); odom_ = std::move(input); ++odom_id_;
+      std::lock_guard<std::mutex> lock(odom_mutex_); odom_ = std::move(input); ++odom_id_;
     });
   scan_sub_ = create_subscription<sensor_msgs::msg::LaserScan>("/lidar/merged", rclcpp::SensorDataQoS(),
     [this](sensor_msgs::msg::LaserScan::ConstSharedPtr input) {
-      std::lock_guard<std::mutex> lock(data_mutex_); scan_ = std::move(input); ++scan_id_;
+      std::lock_guard<std::mutex> lock(scan_mutex_); scan_ = std::move(input); ++scan_id_;
     });
 
   add_task("d435_yolo", [this](Task &task) { return d435_yolo(task); });
@@ -257,7 +268,7 @@ std::shared_ptr<const Frame> PerceptionMaster::latest_frame(Camera camera) {
   frame->header.frame_id = input.frame_id; frame->header.stamp = stamp;
   frame->id = input.generation;
   if (camera == kD435) {
-    std::lock_guard<std::mutex> data_lock(data_mutex_);
+    std::lock_guard<std::mutex> info_lock(info_mutex_);
     if (info_ && info_->width == static_cast<uint32_t>(frame->data->bgr.cols) &&
         info_->height == static_cast<uint32_t>(frame->data->bgr.rows) &&
         info_->header.frame_id == frame->header.frame_id) frame->info = info_;
@@ -273,7 +284,7 @@ bool PerceptionMaster::consume(const std::shared_ptr<const Frame> &frame, Task &
 
 std::shared_ptr<const DetectedFrame> PerceptionMaster::new_detection(Task &task) {
   std::shared_ptr<const DetectedFrame> result;
-  { std::lock_guard<std::mutex> lock(data_mutex_); result = d435_detected_; }
+  { std::lock_guard<std::mutex> lock(detected_mutex_); result = d435_detected_; }
   if (!result || !consume(result->frame, task)) return {};
   return result;
 }
@@ -300,7 +311,7 @@ bool PerceptionMaster::d435_yolo(Task &task) {
   for (const auto &box : *boxes) output->detections.push_back(message(box, d435_labels_));
   detection_pubs_[kD435]->publish(std::move(output));
   auto result = std::make_shared<DetectedFrame>(); result->frame = frame; result->boxes = std::move(*boxes);
-  { std::lock_guard<std::mutex> lock(data_mutex_); d435_detected_ = std::move(result); }
+  { std::lock_guard<std::mutex> lock(detected_mutex_); d435_detected_ = std::move(result); }
   return true;
 }
 
@@ -405,7 +416,7 @@ bool PerceptionMaster::c310_knob_lever(Task &task) {
 bool PerceptionMaster::lidar_obstacle(Task &task) {
   sensor_msgs::msg::LaserScan::ConstSharedPtr input;
   uint64_t id;
-  { std::lock_guard<std::mutex> lock(data_mutex_); input = scan_; id = scan_id_; }
+  { std::lock_guard<std::mutex> lock(scan_mutex_); input = scan_; id = scan_id_; }
   if (!input || task.seen == id || !is_fresh_input(input->header.stamp)) return false;
   task.seen = id;
   if (!lidar_obstacle_.is_valid_input(*input)) return false;
@@ -415,7 +426,7 @@ bool PerceptionMaster::lidar_obstacle(Task &task) {
 bool PerceptionMaster::state_estimator(Task &task) {
   nav_msgs::msg::Odometry::ConstSharedPtr input;
   uint64_t id;
-  { std::lock_guard<std::mutex> lock(data_mutex_); input = odom_; id = odom_id_; }
+  { std::lock_guard<std::mutex> lock(odom_mutex_); input = odom_; id = odom_id_; }
   if (!input || task.seen == id || !is_fresh_input(input->header.stamp)) return false;
   task.seen = id;
   if (!state_estimator_.is_valid_input(*input)) return false;
