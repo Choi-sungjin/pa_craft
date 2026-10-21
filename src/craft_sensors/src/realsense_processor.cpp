@@ -1,5 +1,5 @@
 // realsense_processor: D435 color + depth (librealsense2) -> depth aligned to color -> shared memory
-// pub: /vision/d435/image_offset (UInt64MultiArray [offset,w,h,sequence,stamp_ns,depth_unit_nm])
+// pub: /vision/d435/frame_meta (UInt64MultiArray [offset,w,h,sequence,stamp_ns,depth_unit_nm])
 //      /dev/shm/craft_vision slot: BGR8, aligned depth Z16, uint64 sequence trailer
 //      (no image copy over DDS; readers that only need color read the first w*h*3 bytes)
 // pub: /vision/d435/camera_info (color intrinsics, valid for the aligned depth too)
@@ -90,7 +90,7 @@ public:
       w_, h_, depth_w, depth_h, fps, kShmName, kSlots);
 
     vision_image_pub_ = create_publisher<sensor_msgs::msg::Image>("/vision/d435/image", 10);
-    vision_image_offset_pub_ = create_publisher<std_msgs::msg::UInt64MultiArray>("/vision/d435/image_offset", 1);
+    vision_frame_meta_pub_ = create_publisher<std_msgs::msg::UInt64MultiArray>("/vision/d435/frame_meta", 1);
     camera_info_pub_ = create_publisher<sensor_msgs::msg::CameraInfo>("/vision/d435/camera_info", 10);
     lidar_merged_pub_ = create_publisher<sensor_msgs::msg::LaserScan>("/lidar/merged", 10);
     timer_ = create_wall_timer(5ms, [this]() {realsense_loop();});
@@ -132,7 +132,7 @@ private:
     const auto stamp = now();
     msg->data = {offset, static_cast<uint64_t>(w_), static_cast<uint64_t>(h_),
       sequence_, static_cast<uint64_t>(stamp.nanoseconds()), depth_unit_nm_};
-    vision_image_offset_pub_->publish(std::move(msg));
+    vision_frame_meta_pub_->publish(std::move(msg));
     camera_info_.header.stamp = stamp;
     camera_info_pub_->publish(camera_info_);
     // TODO: depth frame -> /lidar/merged
@@ -148,7 +148,7 @@ private:
   sensor_msgs::msg::CameraInfo camera_info_;
 
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr vision_image_pub_;
-  rclcpp::Publisher<std_msgs::msg::UInt64MultiArray>::SharedPtr vision_image_offset_pub_;
+  rclcpp::Publisher<std_msgs::msg::UInt64MultiArray>::SharedPtr vision_frame_meta_pub_;
   rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_pub_;
   rclcpp::Publisher<sensor_msgs::msg::LaserScan>::SharedPtr lidar_merged_pub_;
   rclcpp::TimerBase::SharedPtr timer_;

@@ -1,5 +1,5 @@
 // c310_processor: Logitech C310 (V4L2) -> shared memory for PerceptionMaster
-// pub: /vision/c310/image_offset (UInt64MultiArray [offset,w,h,sequence,stamp_ns])
+// pub: /vision/c310/frame_meta (UInt64MultiArray [offset,w,h,sequence,stamp_ns])
 //      /dev/shm/craft_c310 slot: BGR8, uint64 sequence trailer (no image copy over DDS)
 // pub: /vision/c310/image (TODO)
 
@@ -67,7 +67,7 @@ public:
     cap_.set(cv::CAP_PROP_FRAME_WIDTH, width);
     cap_.set(cv::CAP_PROP_FRAME_HEIGHT, height);
     cap_.set(cv::CAP_PROP_FPS, fps);
-    // driver picks the closest supported mode; the real size goes to shm and /vision/c310/image_offset
+    // driver picks the closest supported mode; the real size goes to shm and /vision/c310/frame_meta
     w_ = static_cast<int>(cap_.get(cv::CAP_PROP_FRAME_WIDTH));
     h_ = static_cast<int>(cap_.get(cv::CAP_PROP_FRAME_HEIGHT));
     if (w_ != width || h_ != height) {
@@ -89,7 +89,7 @@ public:
     RCLCPP_INFO(get_logger(), "camera %s %dx%d -> /dev/shm%s (%zu slots)", camera.c_str(), w_, h_, kShmName, kSlots);
 
     vision_c310_image_pub_ = create_publisher<sensor_msgs::msg::Image>("/vision/c310/image", 10);
-    vision_c310_image_offset_pub_ = create_publisher<std_msgs::msg::UInt64MultiArray>("/vision/c310/image_offset", 1);
+    vision_c310_frame_meta_pub_ = create_publisher<std_msgs::msg::UInt64MultiArray>("/vision/c310/frame_meta", 1);
     timer_ = create_wall_timer(10ms, [this]() {c310_loop();});
   }
 
@@ -122,7 +122,7 @@ private:
     auto msg = std::make_unique<std_msgs::msg::UInt64MultiArray>();
     msg->data = {offset, static_cast<uint64_t>(w_), static_cast<uint64_t>(h_),
       sequence_, static_cast<uint64_t>(now().nanoseconds())};
-    vision_c310_image_offset_pub_->publish(std::move(msg));
+    vision_c310_frame_meta_pub_->publish(std::move(msg));
   }
 
   cv::VideoCapture cap_;
@@ -134,7 +134,7 @@ private:
   std::unique_ptr<uint8_t, Unmap> shm_;
 
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr vision_c310_image_pub_;
-  rclcpp::Publisher<std_msgs::msg::UInt64MultiArray>::SharedPtr vision_c310_image_offset_pub_;
+  rclcpp::Publisher<std_msgs::msg::UInt64MultiArray>::SharedPtr vision_c310_frame_meta_pub_;
   rclcpp::TimerBase::SharedPtr timer_;
 };
 

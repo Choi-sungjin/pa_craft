@@ -1,6 +1,6 @@
 # Camera resolution / fps for the sensor processors.
 # ros2 run craft_sensors <node> --ros-args --params-file $(ros2 pkg prefix craft_sensors)/share/craft_sensors/config/camera.yaml
-# Perception readers take width/height from the *_image_offset message, so nothing else changes.
+# Perception readers take width/height from the */frame_meta message, so nothing else changes.
 
 c310_processor:
   ros__parameters:

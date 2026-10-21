@@ -59,7 +59,7 @@ def main():
     odometry_pub = node.create_publisher(Odometry, '/wheel/odom', 1)
     scan_pub = node.create_publisher(LaserScan, '/lidar/merged', 1)
     publishers = [node.create_publisher(UInt64MultiArray, topic, 1)
-                  for topic in ('/vision/d435/image_offset', '/vision/c310/image_offset')]
+                  for topic in ('/vision/d435/frame_meta', '/vision/c310/frame_meta')]
     info_pub = node.create_publisher(CameraInfo, '/vision/d435/camera_info', 10)
     image = np.full((360, 640, 3), 255, dtype=np.uint8)
     dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)

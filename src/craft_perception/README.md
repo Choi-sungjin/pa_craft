@@ -187,8 +187,8 @@ standing(축 = 선반 법선), 아니면 평면에 투영한 2D PCA 장축이며
 거부합니다. D435는 `/craft_vision`, C310은 `/craft_c310`을 사용합니다.
 
 ```text
-D435 /vision/d435/image_offset:      [offset,w,h,sequence,ROS stamp ns,depth unit nm]
-C310 /vision/c310/image_offset: [offset,w,h,sequence,ROS stamp ns]
+D435 /vision/d435/frame_meta: [offset,w,h,sequence,ROS stamp ns,depth unit nm]
+C310 /vision/c310/frame_meta: [offset,w,h,sequence,ROS stamp ns]
 slot: BGR8 + (D435 only Z16 depth) + uint64 sequence trailer
 ```
 
