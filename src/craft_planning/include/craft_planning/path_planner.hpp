@@ -27,6 +27,8 @@ struct PathPlannerConfig
 struct PathPlan
 {
   bool ok = false;
+  // True when changing obstacle input may make the same request feasible later.
+  bool retryable = false;
   nav_msgs::msg::Path path;
   std::string error;
 };

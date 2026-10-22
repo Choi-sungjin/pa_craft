@@ -116,7 +116,12 @@ TEST(AprilTag, SortsIdsByImagePosition) {
   AprilTagReader module;
   ASSERT_TRUE(module.configure("tag36h11"));
   ASSERT_TRUE(module.is_valid_input(bgr));
-  EXPECT_EQ(module.compute_result(bgr), (std::vector<int>{17, 3}));
+  const auto result = module.compute_result(bgr);
+  ASSERT_EQ(result.size(), 2u);
+  EXPECT_EQ(result[0].id, 17);
+  EXPECT_EQ(result[1].id, 3);
+  EXPECT_LT(result[0].center.x, result[1].center.x);
+  EXPECT_NEAR(result[0].box.width, 120, 2);
 }
 
 TEST(Depth, FitsFrontPlaneInMetresAndFacesCamera) {
@@ -193,6 +198,16 @@ TEST(Feedback, KeepsFramesAndRejectsInvalidOdom) {
   input.header.frame_id = "odom"; input.pose.pose.orientation.w = 1;
   ASSERT_TRUE(StateEstimator().is_valid_input(input));
   EXPECT_EQ(StateEstimator().compute_result(input).header.frame_id, "odom");
+  input.pose.pose.position.x = 1.0;
+  input.pose.pose.orientation.z = std::sin(CV_PI / 4); input.pose.pose.orientation.w = std::cos(CV_PI / 4);
+  geometry_msgs::msg::Transform map_from_odom;  // +2 m in y, then yaw +90 deg
+  map_from_odom.translation.y = 2.0;
+  map_from_odom.rotation.z = std::sin(CV_PI / 4); map_from_odom.rotation.w = std::cos(CV_PI / 4);
+  const auto in_map = StateEstimator().compute_result(input, map_from_odom, "map");
+  EXPECT_EQ(in_map.header.frame_id, "map");
+  EXPECT_NEAR(in_map.pose.pose.position.x, 0.0, 1e-9);
+  EXPECT_NEAR(in_map.pose.pose.position.y, 3.0, 1e-9);
+  EXPECT_NEAR(in_map.pose.pose.orientation.z, 1.0, 1e-9);  // yaw 180 deg
   sensor_msgs::msg::LaserScan scan;
   scan.header.frame_id = "laser"; scan.angle_min = 0; scan.angle_increment = CV_PI / 2;
   scan.range_min = 0.1; scan.range_max = 10;

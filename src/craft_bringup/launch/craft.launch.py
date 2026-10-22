@@ -8,10 +8,8 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 NODES = {
-    'craft_sensors': ['realsense_processor', 'c310_processor', 'imu_processor',
-                      'wheel_encoder_processor', 'arm_encoder_processor'],
+    'craft_sensors': ['realsense_processor', 'c310_processor'],
     'craft_perception': ['perception_master'],
-    'craft_mission': ['mission_fsm'],
     'craft_control': ['control_master'],
 }
 

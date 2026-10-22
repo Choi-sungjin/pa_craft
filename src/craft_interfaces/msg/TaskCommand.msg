@@ -1,0 +1,21 @@
+# EXECUTE is idempotent. UPDATE_PATH preserves the task ID and advances revision.
+uint8 EXECUTE=0
+uint8 UPDATE_PATH=1
+uint8 STOP=2
+uint8 NAVIGATE=0
+uint8 MANIPULATOR=1
+uint8 GRIPPER=2
+uint8 CLOCK=3
+uint8 WAIT=4
+std_msgs/Header header
+uint64 task_id
+uint64 revision
+uint8 operation
+uint8 kind
+nav_msgs/Path path
+sensor_msgs/JointState joints
+bool require_goal_heading
+float64 speed
+int32 clock_slot
+bool close
+float64 duration_s

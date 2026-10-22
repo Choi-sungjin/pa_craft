@@ -7,7 +7,10 @@ planning_master:
     occupancy_threshold: 65
     goal_heading_required: false
     mission_file: config/missions.yaml
+    # Shared with PerceptionMaster. Empty until the official allocation is published.
+    tag_registry_file: config/tag_registry.yaml
     loop_hz: 20.0
+    replan_period_s: 0.2
     # Acquisition age and steady-clock receive watchdogs are checked independently.
     odom_timeout_s: 0.5
     joint_timeout_s: 0.5
@@ -18,13 +21,13 @@ planning_master:
     observation_min_confidence: 0.5
     cruise_speed: 0.12  # [m/s]; control also applies chassis/motor limits.
     goal_tolerance: 0.03  # [m]
-    heading_tolerance: 0.5  # [rad]; unsupported base rotations fail explicitly.
     fsm:
+      initialization_timeout_s: 10.0
       ready_timeout_s: 5.0
       compute_timeout_s: 3.0
       execution_timeout_s: 30.0
       feedback_timeout_s: 0.5
-      completion_debounce_s: 0.1
+      stop_timeout_s: 3.0
       max_compute_retries: 1  # Calculations only, never physical action retries.
     ik:
       urdf: urdf/v75_robot.urdf

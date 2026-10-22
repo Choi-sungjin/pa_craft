@@ -26,7 +26,8 @@ from rclpy.parameter import Parameter
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry, Path as RosPath
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Bool, Float64, Int32
+from std_msgs.msg import Bool, Int32
+from craft_interfaces.msg import TaskCommand, TaskResult, ControlStatus
 
 
 class FakeBoard:
@@ -103,12 +104,13 @@ class Harness:
                 lambda message, name=board: self.board_states.update({name: message.data}), 10)
         self.node.create_subscription(JointState, '/control/arm_joints', self._on_joints, 10)
         self.hold_pub = self.node.create_publisher(Bool, '/planning/hold', 10)
-        self.path_pub = self.node.create_publisher(RosPath, '/planning/target_path', 10)
         self.odom_pub = self.node.create_publisher(Odometry, '/planning/odom', 10)
-        self.speed_pub = self.node.create_publisher(Float64, '/planning/target_v', 10)
-        self.arm_pub = self.node.create_publisher(JointState, '/planning/target_arm_joints', 10)
-        self.gripper_pub = self.node.create_publisher(Bool, '/planning/gripper_command', 10)
-        self.clock_pub = self.node.create_publisher(Int32, '/planning/target_clock_slot', 10)
+        self.task_pub = self.node.create_publisher(TaskCommand, '/planning/task_command', 10)
+        self.status = None
+        self.results = {}
+        self.node.create_subscription(ControlStatus, '/control/status', lambda m: setattr(self, 'status', m), 10)
+        self.node.create_subscription(TaskResult, '/control/task_result',
+                                      lambda m: self.results.update({m.task_id: m}), 10)
 
     def _on_held(self, message):
         self.held = message.data
@@ -143,21 +145,19 @@ class Harness:
         odom.header.frame_id = 'map'
         odom.pose.pose.orientation.w = 1.0
         self.odom_pub.publish(odom)
-        path = RosPath()
-        path.header.frame_id = 'map'
-        for x in [0.0, 2.0]:
-            pose = PoseStamped()
-            pose.header.frame_id = 'map'
-            pose.pose.position.x = x
-            path.poses.append(pose)
-        self.path_pub.publish(path)
-        self.speed_pub.publish(Float64(data=0.1))
-        self.arm_pub.publish(JointState(
-            name=['slide_joint', 'shoulder_joint', 'elbow_joint',
-                  'wrist_pitch_joint', 'tool_roll_joint'],
-            position=[0.1, 0.2, 0.3, 0.4, 0.5]))
-        self.gripper_pub.publish(Bool(data=True))
-        self.clock_pub.publish(Int32(data=7))
+
+    def nav(self, task_id, revision=1, operation=TaskCommand.EXECUTE):
+        c = TaskCommand(task_id=task_id, revision=revision, operation=operation,
+                        kind=TaskCommand.NAVIGATE, speed=.1)
+        c.path.header.frame_id = 'map'
+        for x in [0.,2.]:
+            p=PoseStamped(); p.header.frame_id='map'; p.pose.position.x=x; p.pose.orientation.w=1.
+            c.path.poses.append(p)
+        self.task_pub.publish(c)
+        return c
+
+    def stop_task(self, task_id):
+        self.task_pub.publish(TaskCommand(task_id=task_id, operation=TaskCommand.STOP))
 
     def board_holds(self, board):
         if board.command is None:
@@ -194,84 +194,75 @@ class Harness:
 
 def main():
     binary = Path(os.environ['CRAFT_CONTROL_BINARY']).resolve()
-    if not binary.is_file():
-        raise ValueError(f'control binary is missing: {binary}')
     rclpy.init()
-    harness = Harness(binary)
+    h=Harness(binary)
     try:
-        harness.pump(lambda: harness.held is True and harness.all_axes_hold())
-        assert harness.node.get_clock().now().nanoseconds == 0, '/clock must stay paused'
-        harness.pump(lambda: harness.joints is not None)
-        assert harness.joints.name == [
-            'slide_joint', 'shoulder_joint', 'elbow_joint', 'wrist_pitch_joint', 'tool_roll_joint']
-        assert harness.joints.header.frame_id == 'base_link'
-        assert all(math.isclose(a, b, abs_tol=1e-6) for a, b in
-                   zip(harness.joints.position, [0.05, 0.1, 0.2, 0.3, 0.4]))
-        harness.pump(lambda: harness.held is False, hold=False)
-        harness.pump(harness.executing, hold=False, commands=True)
-        harness.pump(lambda: harness.held is True and harness.all_axes_hold(), hold=True)
-        harness.run_for(0.2, hold=True, commands=True)
-        harness.pump(lambda: harness.held is False, hold=False)
-        harness.run_for(0.2, hold=False)
-        assert harness.all_axes_hold(), 'release revived a target received before/during hold'
+        h.pump(lambda: h.status is not None and h.status.ready and h.status.stopped, hold=True)
+        assert h.node.get_clock().now().nanoseconds == 0
+        h.pump(lambda: h.status.held is False,hold=False)
+        h.run_for(.1,hold=False,commands=True)
+        c=h.nav(101)
+        h.pump(lambda: h.results.get(101) is not None and h.drive.command[0] > 0,
+               hold=False,commands=True)
+        assert list(h.results[101].controllers) == [0,0,1,0,0]
+        h.nav(102)
+        h.pump(lambda:h.results.get(102) is not None,hold=False,commands=True)
+        assert h.results[102].status==TaskResult.REJECTED
+        h.nav(101,2,TaskCommand.UPDATE_PATH)
+        h.pump(lambda:h.results[101].revision==2,hold=False,commands=True)
+        h.task_pub.publish(c)  # repeated EXECUTE does not reset revision
+        h.run_for(.1,hold=False,commands=True)
+        assert h.results[101].revision==2
+        # A hold command is not a physical stop acknowledgement.
+        h.drive.feedback[0]=h.drive.feedback[1]=.5
+        h.stop_task(101)
+        h.pump(lambda:h.results[101].status==TaskResult.STOPPING,hold=True)
+        h.run_for(.15,hold=True)
+        assert h.results[101].status==TaskResult.STOPPING and not h.status.stopped
+        h.drive.feedback[0]=h.drive.feedback[1]=0
+        h.pump(lambda:h.results[101].status==TaskResult.STOPPED and h.status.stopped,hold=True)
+        h.pump(lambda:not h.status.held,hold=False)
+        h.run_for(.1,hold=False,commands=True)
+        h.task_pub.publish(c)  # retired ID cannot re-execute
+        h.run_for(.15,hold=False,commands=True)
+        assert h.all_axes_hold() and h.results[101].status==TaskResult.STOPPED
 
-        harness.pump(harness.executing, hold=False, commands=True)
-        harness.pump(lambda: harness.held is True and harness.all_axes_hold(), timeout=1.2)
-        harness.pump(lambda: harness.held is False, hold=False)
-        harness.run_for(0.2, hold=False)
-        assert harness.all_axes_hold(), 'heartbeat recovery revived an old target'
-
-        harness.pump(harness.executing, hold=False, commands=True)
-        harness.drive.feedback[3] = 2
-        harness.pump(lambda: harness.held is True and harness.all_axes_hold(), hold=False)
-        harness.drive.feedback[3] = 0
-        harness.pump(lambda: harness.held is False, hold=False)
-        harness.run_for(0.2, hold=False)
-        assert harness.all_axes_hold(), 'fault recovery revived an old target'
-
-        for board, state_name in [(harness.arm, 'arm_lm'), (harness.drive, 'wheel')]:
-            harness.pump(harness.executing, hold=False, commands=True)
-            board.streaming = False
-            other = harness.drive if board is harness.arm else harness.arm
-            harness.pump(lambda: harness.held is True and harness.board_holds(other)
-                         and harness.board_states.get(state_name) == 2
-                         and (board is not harness.drive
-                              or harness.board_states.get('clock') == 2),
-                         hold=False, timeout=1.2)
-            harness.run_for(0.06, hold=False)  # Let previously queued PTY bytes drain.
-            stale_tx_at = board.last_command_at
-            healthy_tx_at = other.last_command_at
-            samples = harness.joint_samples
-            harness.run_for(0.15, hold=False)
-            assert board.last_command_at == stale_tx_at, 'stale board still received cached targets'
-            assert other.last_command_at > healthy_tx_at, 'healthy board stopped receiving hold'
-            assert harness.board_holds(other), 'healthy board received a moving target during hold'
-            if board is harness.arm:
-                assert harness.joint_samples == samples, 'stale motor feedback was republished'
-                board.feedback[0] += 0.02
-            else:
-                board.feedback[2] += 0.1
-            board.streaming = True
-            harness.pump(lambda: harness.held is False
-                         and harness.board_states.get(state_name) == 0, hold=False)
-            harness.run_for(0.2, hold=False)
-            assert harness.all_axes_hold(), 'serial feedback recovery revived an old target'
-
-        harness.close()
-        harness = Harness(binary, calibrated=False)
-        harness.pump(lambda: harness.held is True and harness.all_axes_hold())
-        harness.run_for(0.3, hold=False)
-        assert harness.joints is None, 'unconfirmed calibration published a fabricated joint state'
-        print('PASS: startup, all-axis hold, resume, stale heartbeat, hardware fault, '
-              'each serial feedback timeout, measured joints/calibration gate, paused ROS clock')
+        arm=TaskCommand(task_id=103,revision=1,kind=TaskCommand.MANIPULATOR)
+        arm.joints=JointState(name=['slide_joint','shoulder_joint','elbow_joint',
+                             'wrist_pitch_joint','tool_roll_joint'],position=[.1,.2,.3,.4,.5])
+        h.task_pub.publish(arm)
+        h.pump(lambda:103 in h.results,hold=False)
+        assert list(h.results[103].controllers)==[1,1,0,0,0]
+        h.arm.feedback[1:5]=[.2,.3,.4,.5]
+        h.pump(lambda:h.results[103].controllers[0]==TaskResult.DONE,hold=False)
+        assert h.results[103].status==TaskResult.RUNNING  # LM still moving
+        h.arm.feedback[0]=.1
+        h.pump(lambda:h.results[103].status==TaskResult.SUCCEEDED,hold=False)
+        # A serial dropout must fail the task and hold the other board.
+        h.run_for(.1,hold=False,commands=True); h.nav(104)
+        h.pump(lambda:104 in h.results,hold=False,commands=True)
+        h.arm.streaming=False
+        h.pump(lambda:h.results[104].status==TaskResult.FAILED and h.status.fault,
+               hold=False,commands=True)
+        h.run_for(.08,hold=True)
+        tx=h.arm.last_command_at; h.run_for(.12,hold=True)
+        assert h.arm.last_command_at==tx and h.board_holds(h.drive)
+        h.arm.streaming=True
+        h.pump(lambda:h.status.ready and h.status.stopped,hold=True)
+        h.pump(lambda:not h.status.held,hold=False)
+        h.run_for(.1,hold=False,commands=True); h.nav(105)
+        h.pump(lambda:105 in h.results and h.drive.command[0]>0,hold=False,commands=True)
+        h.pump(lambda:h.status.held and h.all_axes_hold() and
+               h.results[105].status in (TaskResult.STOPPING,TaskResult.STOPPED),commands=True,timeout=2)
+        assert h.results[105].status in (TaskResult.STOPPING,TaskResult.STOPPED)
+        print('PASS: task IDs, deduplication, path revisions, per-controller matrix, measured stop, '
+              'serial timeout and planning watchdog with paused ROS clock')
     except Exception:
-        print(harness.close())
-        raise
+        print(h.close()); raise
     else:
-        harness.close()
+        h.close()
     finally:
         rclpy.shutdown()
-
 
 if __name__ == '__main__':
     main()

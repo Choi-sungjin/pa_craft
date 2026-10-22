@@ -10,6 +10,7 @@
   <buildtool_depend>ament_cmake_python</buildtool_depend>
 
   <depend>rclcpp</depend>
+  <depend>craft_interfaces</depend>
   <depend>ament_index_cpp</depend>
   <depend>craft_perception</depend>
   <depend>tf2_ros</depend>
@@ -31,6 +32,7 @@
   <exec_depend>python3-pil</exec_depend>
   <test_depend>ament_cmake_pytest</test_depend>
   <test_depend>ament_cmake_gtest</test_depend>
+  <test_depend>craft_control</test_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

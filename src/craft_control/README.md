@@ -1,24 +1,37 @@
 # Wheel and clock targets
 
-The control node consumes these planning inputs:
+ControlMaster receives `/planning/task_command` (`craft_interfaces/TaskCommand`),
+`/planning/odom` and the periodic `/planning/hold` heartbeat. It distributes each task:
 
-| Topic | Message | Meaning |
-| --- | --- | --- |
-| `/planning/target_v` | `std_msgs/Float64` | Signed chassis forward speed, m/s |
-| `/planning/target_path` | `nav_msgs/Path` | Ordered points from the current position toward the goal |
-| `/planning/odom` | `nav_msgs/Odometry` | Chassis pose at the wheel axle center |
-| `/planning/target_clock_slot` | `std_msgs/Int32` | Target storage slot, 1 through 12 |
-| `/planning/hold` | `std_msgs/Bool` | Periodic hold/release heartbeat for every axis |
+| Kind | Participants |
+| --- | --- |
+| NAVIGATE | Wheel (longitudinal + lateral) |
+| MANIPULATOR | Arm + LM, validated together before either target is applied |
+| GRIPPER | Gripper |
+| CLOCK | Clock |
+| WAIT | ControlMaster monotonic timer |
 
-The C++ planning master publishes `/planning/hold` every scheduling tick. Control
-starts held, acknowledges `/control/planning_held`, and accepts targets only after
-the acknowledgement is false. `true`, a heartbeat gap longer than
-`planning_watchdog_timeout_s` (default 0.5 s), or a board fault clears all stored
-and pending targets. Release needs new targets; it never resumes an old one.
-These deadlines use a steady clock, including when ROS simulation time pauses.
-Standalone control clients must supply this heartbeat too. The explicit
-`require_planning_heartbeat=false` compatibility setting permits operation before
-the first heartbeat; after one is received the watchdog remains enforced.
+`/control/task_result` (`TaskResult`) carries task ID, path revision, aggregate status,
+reason, and five matrix columns `[Arm, LM, Wheel, Clock, Gripper]`. UNUSED columns do
+not gate completion. Active participants must all report arrival and settle before
+SUCCEEDED. Failure stops the participating work and holds all axes. A stopped task is
+reported STOPPED only after measured settling, not merely because hold was requested.
+Results repeat every control tick; duplicate EXECUTE requests do not re-execute.
+Retired task IDs cannot be reused. Updates require the active navigation ID, an increasing
+revision, the same goal/frame, and a valid path. They do not reset the task execution timeout.
+New independent tasks are rejected while one is running/stopping; the FIFO lives in Planning.
+
+`/control/status` reports ready, fault, held, stopped and reason every tick. Ready requires
+fresh board feedback and confirmed arm/LM/gripper calibration. Stopped requires successful
+writes, fresh idle-board feedback, stable measured actuator positions over `settle_time_s`,
+and both measured wheel speeds within `wheel_stop_tolerance_rad_s`. Position stability uses
+`stop_position_tolerance_rad`. Planning consumes these aggregate reports only.
+
+Control starts held. Planning waits for held=false before dispatching a task. A true/missing/
+stale heartbeat (`planning_watchdog_timeout_s`) or board fault clears targets and holds current
+positions. Release cannot revive work. Task/serial/odometry deadlines use monotonic time,
+including when `/clock` pauses. The optional `require_planning_heartbeat=false` permits operation
+before the first heartbeat; once received, heartbeat expiry is always enforced.
 
 Each board also has a `serial_feedback_timeout_s` receive deadline (default
 0.5 s). No first sample keeps control held. Once a board has reported feedback,
@@ -56,31 +69,12 @@ hold its measured motor angle; they do not disable the rotational arm controller
 LM limits retain the former slide channel's values, in motor radians, pending
 hardware calibration. `GripperController` remains independent.
 
-The existing planning topic `/planning/target_arm_joints` still carries the full
-five-joint IK result: slide [m], shoulder, elbow, wrist_pitch, tool_roll [rad].
-Every planning input follows the same flow. The subscription callback only keeps
-the newest message pending; `control_loop()` validates it, then stores it with a
-setter that does no validation, or clears the target when validation fails:
-
-```text
-validate_arm_target      -> set_arm_target      | clear_arm_target
-validate_lm_target       -> set_lm_target       | clear_lm_target
-validate_gripper_target  -> set_gripper_target  | (ignored)
-validate_wheel_target    -> set_wheel_target    | clear_wheel_target
-validate_path_target     -> set_path_target     | clear_path_target
-validate_odom            -> lateral_.set_odom   | lateral_.clear_odom
-validate_clock_target    -> set_clock_target    | clear_clock_target
-```
-
-The manipulator JointState is split into LM and four rotational positions first.
-An invalid target means the previous target is no longer trustworthy, so the
-axis **stops** (holds its current position, or zero wheel speed) until planning
-sends a new valid target. An empty path is planning's "no route" result and also
-stops tracking. Arm, LM and gripper use independent confirmation flags; while a
-mapping is unconfirmed its targets are ignored. The clock slot is applied after
-fresh feedback, because the shortest turn depends on the current angle. Pending
-messages are consumed once, rather than reapplying targets on every timer tick.
-Planning remains responsible for coordinating these independently controlled axes.
+`TaskCommand.joints` carries the five-joint IK result: slide [m], then shoulder,
+elbow, wrist_pitch and tool_roll [rad]. ControlMaster validates the complete manipulator
+command before setting Arm and LM targets; invalid or uncalibrated requests are rejected.
+The callback queues commands and the control loop applies them once. ControlMaster aggregates
+independent controller results; Planning owns mission ordering. Legacy controller-specific
+planning target subscriptions have been removed to prevent bypassing the task protocol.
 
 Every controller uses the same method names:
 
@@ -108,14 +102,13 @@ the existing OpenCR order: slide, shoulder, elbow, wrist_pitch, tool_roll, gripp
 
 Path and odometry must have the same nonempty `header.frame_id`. Transform them in
 planning before publishing if necessary. Pose coordinates follow ROS convention:
-forward +x, left +y, counterclockwise positive yaw. Pose orientations in the path
-are not used; this controller tracks positions, without a final heading maneuver.
+forward +x, left +y, counterclockwise positive yaw. Large path-heading errors and optional
+final arrival-yaw errors use an in-place differential turn before path tracking continues.
 
-Incoming path points are joined by a natural cubic spline parameterized by
-cumulative chord length and resampled every `path_spacing` (the first and last
-points are kept exactly). The resampled path is tracked and republished on
-`/control/tracking_path` for visualization; an empty path is published when the
-target is cleared. Sharp corners may overshoot slightly between points.
+Incoming planner segments are subdivided to at most `path_spacing`, preserving all
+vertices and avoiding spline overshoot outside the checked path. `/control/tracking_path`
+remains a visualization output. Path endpoint position and optional requested goal yaw are
+checked in LateralController; `wheel_heading_tolerance` is configured in control YAML.
 
 The longitudinal controller limits `target_v`. Pure Pursuit
 selects a path point at least `lookahead_distance` away, starting at the nearest
@@ -135,8 +128,7 @@ wheel radius is 0.033 m. Tune lookahead and endpoint tolerance on the robot.
 
 Empty/invalid paths, missing/invalid odometry, differing frames, and endpoint
 arrival stop the wheels. The next valid path uses
-the most recently received `target_v`; planning should publish zero when canceling
-a driving task. Negative target speeds pursue path points behind the chassis.
+the speed carried in the task command; STOP or the hold heartbeat cancels motion. Negative target speeds pursue path points behind the chassis.
 Pure Pursuit does not generate an in-place turn at zero linear speed or when no
 point lies in the requested direction of travel.
 
@@ -194,18 +186,14 @@ The control node reports on each new valid serial sample:
 feedback, is validated and stored there, and immediately publishes `false` on
 `/control/clock_target_reached`. An invalid slot clears the target and holds position. Before any target, completion is false even if aligned.
 
-Planning owns sequencing and puck inventory. It should record the pending target
-slot, wait for `/control/clock_target_reached=true` **and** `/control/clock_slot` matching that
-target, and then issue the next clock command or arm loading/retrieval target.
-These reports are live feedback, not latched inventory records. No arm interlock
-is imposed by control. The current planning skeleton does not yet implement this
-mission sequence or produce a target speed.
+Planning owns sequencing and puck inventory. It waits for the matching aggregate task
+result before advancing. ClockController checks the target angle and ControlMaster checks
+fresh idle/settled board feedback. Diagnostic slot/reached topics are not task acknowledgements.
 
 ## Target reached topics
 
 Each axis reports arrival as `std_msgs/Bool`, published on fresh feedback after a
-successful OpenCR write. A newly stored target immediately publishes `false`, so a
-previous `true` is never mistaken for completion of the new target.
+successful OpenCR write. These Booleans are diagnostic only. Task ID correlation and completion aggregation use TaskResult.
 
 | Topic | True when |
 | --- | --- |
@@ -215,8 +203,8 @@ previous `true` is never mistaken for completion of the new target.
 | `/control/wheel_target_reached` | Path endpoint within `wheel_goal_tolerance` of odometry (same frame) |
 | `/control/clock_target_reached` | See Clock storage |
 
-Planning republishes the same path each tick, so only a changed path resets
-`/control/wheel_target_reached`. Every motor tolerance is 2 degrees. All tolerances come from `config/control.yaml`, are
+A new path revision resets
+`/control/wheel_target_reached`. Arrival tolerances are configured per controller. All tolerances come from `config/control.yaml`, are
 validated as positive by ControlMaster, and are stored in each controller at
 configuration, so every controller exposes `is_target_reached(feedback)`.
 Clock completion additionally requires `clock_state` idle, checked by ControlMaster.
@@ -225,7 +213,7 @@ Targets outside motor limits are not expected: planning accounts for them in IK.
 ## Verification
 
 ```bash
-colcon build --packages-select craft_control --cmake-args -DBUILD_TESTING=ON
+colcon build --packages-up-to craft_control --cmake-args -DBUILD_TESTING=ON
 colcon test --packages-select craft_control --event-handlers console_direct+
 colcon test-result --verbose
 ```

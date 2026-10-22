@@ -1,5 +1,7 @@
 #include "craft_planning/planning_config.hpp"
+#include "craft_perception/tag_registry.hpp"
 
+#include <ament_index_cpp/get_package_share_path.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <yaml-cpp/yaml.h>
 
@@ -228,28 +230,38 @@ PlanningConfig load_planning_config(rclcpp::Node &node, const std::string &share
   config.arm.orientation_tolerance = p.positive_param("ik.orientation_tolerance");
   config.arm.max_iterations = p.integer("ik.max_iterations", 1);
   config.arm.max_restarts = p.integer("ik.max_restarts", 0);
+  config.fsm.initialization_timeout_s = p.positive_param("fsm.initialization_timeout_s");
   config.fsm.ready_timeout_s = p.positive_param("fsm.ready_timeout_s");
   config.fsm.compute_timeout_s = p.positive_param("fsm.compute_timeout_s");
   config.fsm.execution_timeout_s = p.positive_param("fsm.execution_timeout_s");
   config.fsm.feedback_timeout_s = p.positive_param("fsm.feedback_timeout_s");
-  config.fsm.completion_debounce_s = p.nonnegative("fsm.completion_debounce_s");
+  config.fsm.stop_timeout_s = p.positive_param("fsm.stop_timeout_s");
   config.fsm.max_compute_retries = p.integer("fsm.max_compute_retries", 0);
   config.loop_hz = p.positive_param("loop_hz");
+  config.replan_period_s = p.positive_param("replan_period_s");
   config.odom_timeout_s = p.positive_param("odom_timeout_s");
   config.joint_timeout_s = p.positive_param("joint_timeout_s");
   config.observation_timeout_s = p.positive_param("observation_timeout_s");
   config.obstacle_timeout_s = p.positive_param("obstacle_timeout_s");
   config.cruise_speed = p.positive_param("cruise_speed");
   config.goal_tolerance = p.positive_param("goal_tolerance");
-  config.heading_tolerance = p.positive_param("heading_tolerance");
-  require(config.heading_tolerance <= std::acos(-1.0), "heading_tolerance must not exceed pi radians");
   config.observation_min_confidence = p.nonnegative("observation_min_confidence");
   require(config.observation_min_confidence <= 1.0, "observation_min_confidence must be in [0,1]");
   config.require_lidar = p.param<bool>("require_lidar");
   config.joint_state_topic = p.nonempty("joint_state_topic");
   const auto mission_file = file_path(p.nonempty("mission_file"), share_dir, "mission_file");
-  p.reject_unknown();
   config.missions = parse_missions(mission_file, config.path.map_frame, config.arm.base_frame);
+  auto tag_file = std::filesystem::path(p.nonempty("tag_registry_file"));
+  if (!tag_file.is_absolute()) {
+    tag_file = ament_index_cpp::get_package_share_path("craft_perception") / tag_file;
+  }
+  for (const auto &[tag_id, target] : craft_perception::load_tag_registry(tag_file.string())) {
+    if (target.role != craft_perception::TagRole::Mission) continue;
+    require(config.missions.count(target.mission) != 0,
+      "mission tag references unknown mission: " + target.mission);
+    config.mission_by_tag.emplace(tag_id, target.mission);
+  }
+  p.reject_unknown();
   return config;
 }
 

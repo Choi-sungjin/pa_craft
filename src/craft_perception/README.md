@@ -24,13 +24,11 @@ PerceptionMaster  (rclcpp::Node, perception_master.cpp)
 ├── D435Perception d435_                     (d435_perception.cpp)
 │   ├── YoloDetector    yolo_                → d435_yolo 작업 (knob_sign)
 │   │   └── InferenceBackend  (NcnnBackend | TensorRtBackend)
-│   ├── YoloDetector    puck_yolo_           → puck_axis 작업 (puck_blue)  ※ TODO: yolo_로 일원화
-│   │   └── InferenceBackend
-│   ├── AprilTagReader  apriltag_            → apriltag 작업
+│   ├── AprilTagReader  apriltag_            → 공용 태그 ID 인식
 │   ├── KnobDepth       knob_depth_          → knob_depth 작업       ┐
 │   ├── ObjectDetector  object_detector_     → object_detector 작업  ├ d435_yolo 박스 공유
 │   ├── ObstacleDetector obstacle_detector_  → obstacle_detector 작업 ┘
-│   └── PuckAxis        puck_axis_           → puck_axis 작업 (puck_yolo_ 박스 사용)
+│   └── PuckAxis        puck_axis_           → puck 태그 박스 + depth로 축 계산
 │
 ├── C310Perception c310_                     (c310_perception.cpp)
 │   ├── YoloDetector    yolo_                → knob_lever 작업 (knob_sign, 또는 seg 모델)
@@ -49,6 +47,7 @@ PerceptionMaster  (rclcpp::Node, perception_master.cpp)
 ```text
 craft_perception/
 ├── config/perception.yaml          # 모든 값 필수, C++ 기본값 없음
+├── config/tag_registry.yaml        # tag ID → mission 또는 puck 번호 공용 해시 테이블
 ├── include/craft_perception/
 │   ├── perception_master.hpp
 │   ├── d435_perception.hpp         # D435Config, D435Perception
@@ -64,7 +63,7 @@ craft_perception/
 │   ├── state_estimator.hpp         # 대기 (odometry 전달만)
 │   ├── shared_frame.hpp
 │   └── perception_types.hpp
-├── models/knob_sign/, models/puck_blue/
+├── models/knob_sign/
 └── src/ (같은 이름의 .cpp, tensorrt_backend.cpp, geometry_utils.hpp)
 ```
 
@@ -74,8 +73,8 @@ craft_perception/
 | D435 | `knob_depth` | 10 | YOLO knob 박스 + aligned depth → 위치·패널 법선 |
 | D435 | `object_detector` | 10 | YOLO 전체 박스 + depth → 박스 중앙부 중앙값 깊이의 3D 위치 |
 | D435 | `obstacle_detector` | 10 | YOLO 장애물 클래스 박스 + depth → 박스 내 가까운 면(하위 분위수), 거리 제한 |
-| D435 | `apriltag` | 15 | BGR → 왼쪽부터 정렬한 AprilTag ID (YOLO와 별개, 기본 tag36h11) |
-| D435 | `puck_axis` | 10 | 자체 puck YOLO(`puck_blue`) + depth → 선반 평면 RANSAC, standing/lying, 축 |
+| D435 | `apriltag` | 15 | BGR → 왼쪽부터 정렬한 AprilTag ID. Planning은 바닥·벽면 태그를 미션으로 매핑 |
+| D435 | `puck_axis` | 10 | 설정된 puck 밑면 AprilTag ID/ROI + depth → puck ID, 선반 평면, standing/lying, 축 |
 | C310 | `knob_lever` | 10 | 자체 YOLO + 영상 평면 레버 방향. 레버 픽셀은 `c310.knob_lever.lever_source`로 선택 (`hsv` / `yolo_seg`) |
 | - | `lidar_obstacle` | 20 | 전·후방 스캔 병합 + 장애물 점 투영 |
 | - | `state_estimator` | 100 | 지정 odometry 검증·전달 (대기, 기존 그대로) |
@@ -100,7 +99,7 @@ craft_perception/
   `MultiThreadedExecutor`가 실행하며 동일 모듈의 작업은 겹치지 않습니다.
 - 기본 executor 스레드는 6개, 각 카메라의 ncnn 추론 스레드는 1개입니다.
   OpenCV 내부 스레드도 1개로 제한합니다. 실제 온보드 CPU에서 처리율을 측정해 조정하세요.
-- 모델 인스턴스: D435 knob_sign, D435 puck, C310 knob_sign 각 1개. 각 인스턴스는 한 작업만
+- 모델 인스턴스: D435 knob_sign, C310 knob_sign 각 1개. 각 인스턴스는 한 작업만
   사용하므로 서로 다른 작업은 병렬로 돌아도 같은 `ncnn::Net`을 동시에 쓰지 않습니다.
   D435의 깊이·물체·장애물 계산은 `d435_yolo` 결과를 공유하여 재추론하지 않습니다.
 - 카메라 입력 콜백은 최신 **메타데이터만** 저장합니다. 입력이 30Hz여도 처리하지 않을
@@ -134,8 +133,10 @@ craft_perception/
 ```
 
 모델을 교체할 때는 `d435.yolo`/`c310.yolo`의 `class_names`와 `knob_class_id`도 함께 수정합니다.
-`models/puck_blue/`는 `puck_axis_live.py`가 쓰던 `target_blue_v3` 640 ncnn export를 그대로 복사했습니다
-(클래스 1개 `target_blue`, 출력 `[5,8400]`). 가중치 SHA256과 export 도구 버전은 각 `provenance.json`에 있습니다.
+Puck은 색상 YOLO를 사용하지 않습니다. `config/tag_registry.yaml`을
+`tag ID → {mission: 이름}` 또는 `tag ID → {puck: 번호}` 해시 테이블로 읽어
+바닥·벽면 미션 태그와 puck 밑면 태그를 구분합니다. 현재 레지스트리는
+발제의 공식 ID 배정을 기다리며 비어 있습니다.
 
 Ultralytics 8.4.160의 ncnn export는 end-to-end 분기를 비활성화합니다.
 이 구현은 디코딩된 **cx,cy,w,h + 클래스별 확률** 출력에 맞춰 정방형 letterbox,
@@ -176,14 +177,14 @@ YOLO_CONFIG_DIR=/tmp/craft-yolo-config custom_yolo26/.venv/bin/python \
 
 | 토픽 | 메시지 | 내용 |
 | --- | --- | --- |
-| `/perception/vision/d435/apriltag` | `std_msgs/Int32MultiArray` | AprilTag ID를 영상 왼쪽부터 정렬 (mission_fsm 구독) |
+| `/perception/vision/d435/apriltag` | `std_msgs/Int32MultiArray` | AprilTag ID를 영상 왼쪽부터 정렬. PlanningMaster가 설정된 미션 태그만 사용 |
 | `/perception/vision/d435/detections` | `craft_perception/DetectionArray` | D435 `d435_yolo`의 클래스·확률·픽셀 bbox |
 | `/perception/vision/c310/detections` | 같은 메시지 | C310 `knob_lever`의 YOLO 검출 |
 | `/perception/vision/d435/knob_observations` | `craft_perception/KnobObservationArray` | D435 손잡이 위치·법선 및 유효성; lever_valid=false |
 | `/perception/vision/c310/knob_observations` | 같은 메시지 | C310 손잡이 레버 방향; depth_valid=false |
 | `/perception/vision/d435/object_detection` | `geometry_msgs/PoseArray` | 깊이를 얻은 D435 YOLO 물체의 3D 위치, optical frame |
 | `/perception/vision/d435/obstacle` | `geometry_msgs/PoseArray` | 장애물 클래스의 가장 가까운 면 위치, optical frame (신규) |
-| `/perception/vision/d435/puck_observations` | `craft_perception/PuckObservationArray` | puck 중심·축·선반 법선·standing, optical frame (신규) |
+| `/perception/vision/d435/puck_observations` | `craft_perception/PuckObservationArray` | 태그로 확정한 `puck_id`, 중심·축·선반 법선·standing, optical frame |
 | `/perception/lidar/obstacle` | `geometry_msgs/PoseArray` | LaserScan 원래 frame의 유효 점 |
 | `/perception/state/odom` | `nav_msgs/Odometry` | 지정한 입력 odometry 전달 |
 | `/perception/diagnostics` | `diagnostic_msgs/DiagnosticArray` | 실제 처리 Hz, 실행 시간, skip/error/overrun, 카메라별 복사 횟수·바이트 |
@@ -301,14 +302,13 @@ ros2 run craft_perception perception_master --ros-args --params-file \
 
 기존 `craft.launch.py`도 master를 실행하며 `d435_model_dir:=...`, `c310_model_dir:=...`로
 카메라별 YOLO 모델 경로를 따로 바꿀 수 있습니다(launch 값이 yaml의 `*.yolo.model_dir`보다 우선). 모델이 없거나 로드가 실패하면 시작 시 오류로 종료합니다.
-모델 없이 AprilTag만 점검하려면 `schedule.d435_yolo`, `schedule.puck_axis`, `schedule.knob_lever`의
-`enabled`를 false로 설정하세요(꺼진 작업의 모델은 로드하지 않습니다).
+모델 없이 AprilTag와 puck depth를 점검하려면 `schedule.d435_yolo`와
+`schedule.knob_lever`를 false로 설정하세요. `puck_axis`는 AprilTag를 사용하므로 켜 둘 수 있습니다.
 
 ```bash
 colcon test --packages-select craft_perception --event-handlers console_direct+
 colcon test-result --verbose
 ./build/craft_perception/ncnn_smoke src/craft_perception/models/knob_sign
-./build/craft_perception/ncnn_smoke src/craft_perception/models/puck_blue 1
 python3 src/craft_perception/test/test_master_integration.py \
   --executable ./build/craft_perception/perception_master \
   --model src/craft_perception/models/knob_sign
@@ -321,35 +321,4 @@ python3 src/craft_perception/test/test_master_integration.py \
 통합 테스트는 독립 ROS domain과 고유 shm 이름으로 합성 D435/C310 입력을 보내며
 실제 ncnn 추론 중 AprilTag 처리와 입력 단절 시 발행 중단을 검사합니다. 실제 장치의
 성능·캘리브레이션·검출 정확도 검증을 대신하지 않습니다.
-
-## TODO
-
-### D435 YOLO 일원화 (knob_sign + puck_blue → 모델 1개)
-
-현재 D435는 프레임마다 YOLO를 두 번 돌립니다(`yolo_` knob_sign 5클래스, `puck_yolo_` target_blue).
-하나로 합치면 D435 추론이 절반이 되고 `puck_yolo_`, `d435.puck_yolo` 설정이 사라집니다.
-
-```text
-현재:   D435 프레임 ─┬─ yolo_      (knob + 신호등 4종) ─→ knob_depth / object / obstacle
-                     └─ puck_yolo_ (target_blue)       ─→ puck_axis
-일원화: D435 프레임 ── yolo_ (knob + 신호등 4종 + target_blue) ─→ knob_depth / object / obstacle / puck_axis
-```
-
-- [ ] **모델:** knob_sign과 puck_blue 데이터셋을 합쳐 6클래스로 재학습
-  - 한쪽 이미지에 찍힌 다른 쪽 물체(knob 이미지 속 puck 등)는 라벨을 보완해야 함.
-    라벨이 빠지면 모델이 배경으로 학습함
-  - 합친 뒤 puck 검출 성능이 전용 모델 대비 떨어지지 않는지 확인
-  - ncnn(`tools/export_model.py`)과 ONNX/TensorRT 둘 다 export
-- [ ] **코드:** `puck_axis`가 `d435_yolo` 결과를 쓰도록 선택지 추가
-  ```yaml
-  d435:
-    puck_axis:
-      source: shared     # shared: d435.yolo 박스 사용 | own: 지금처럼 d435.puck_yolo 별도 모델
-      puck_class_id: 5   # shared일 때 d435.yolo.class_names 안의 puck 인덱스
-  ```
-  - `shared`면 `puck_yolo_`를 로드하지 않고 `puck_axis`를 `on_detection` 작업으로 실행
-    (knob_depth 등과 같은 박스·프레임 공유)
-  - 합친 모델 검증 후 `own` 경로와 `d435.puck_yolo` 블록 제거
-- [ ] **설정:** `d435.yolo.class_names`에 puck 추가. `obstacle_detector.class_ids`에 puck이
-  들어가지 않게 확인
 

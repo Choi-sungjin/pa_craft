@@ -23,6 +23,11 @@ namespace
 {
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kInfinity = 1e15;
+class RouteUnavailable : public std::runtime_error
+{
+public:
+  using std::runtime_error::runtime_error;
+};
 struct Point {double x, y;};
 double squared(Point p) {return p.x * p.x + p.y * p.y;}
 Point operator-(Point a, Point b) {return {a.x - b.x, a.y - b.y};}
@@ -337,8 +342,11 @@ std::vector<Point> astar(const Grid & g, Point start, Point goal, double start_y
   const int first = g.cell(start), last = g.cell(goal);
   const double padding = config.r_robot + config.margin;
   require(first >= 0 && last >= 0, "Start or goal is outside the map");
-  require(!g.blocked[first] && !g.blocked[last] && segment_free(g, start, start, padding) &&
-    segment_free(g, goal, goal, padding), "Start or goal is in an inflated obstacle");
+  if (g.blocked[first] || g.blocked[last] || !segment_free(g, start, start, padding) ||
+    !segment_free(g, goal, goal, padding))
+  {
+    throw RouteUnavailable("Start or goal is in an inflated obstacle");
+  }
   constexpr std::array<int, 8> dx{1, 1, 0, -1, -1, -1, 0, 1}, dy{0, 1, 1, 1, 0, -1, -1, -1};
   struct Entry {double f, cost; int state; bool operator<(const Entry & other) const {return f > other.f;}};
   std::priority_queue<Entry> open;
@@ -367,7 +375,7 @@ std::vector<Point> astar(const Grid & g, Point start, Point goal, double start_y
       if (candidate < costs[next]) {costs[next] = candidate; parent[next] = current.state; open.push({candidate + heuristic(next_cell), candidate, next});}
     }
   }
-  require(final >= 0, "No route through the inflated map");
+  if (final < 0) {throw RouteUnavailable("No route through the inflated map");}
   std::vector<Point> reversed;
   for (int state = final; state >= 0; state = parent[state]) {reversed.push_back(g.center(state / 8));}
   std::reverse(reversed.begin(), reversed.end());
@@ -454,7 +462,11 @@ PathPlan PathPlanner::plan(
     result.path.poses.back().pose.position.x = goal.pose.position.x;
     result.path.poses.back().pose.position.y = goal.pose.position.y;
     result.ok = true;
-  } catch (const std::exception & error) {result.path = nav_msgs::msg::Path(); result.error = error.what();}
+  } catch (const RouteUnavailable & error) {
+    result.path = nav_msgs::msg::Path(); result.error = error.what(); result.retryable = true;
+  } catch (const std::exception & error) {
+    result.path = nav_msgs::msg::Path(); result.error = error.what();
+  }
   return result;
 }
 

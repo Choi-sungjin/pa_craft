@@ -5,6 +5,7 @@ find_package(ament_cmake REQUIRED)
 find_package(ament_cmake_python REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(craft_interfaces REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
@@ -26,16 +27,17 @@ target_include_directories(planning_modules PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
   PRIVATE v75_ws/src/v75_arm_ik/include)
-target_link_libraries(planning_modules PUBLIC rclcpp::rclcpp
+target_link_libraries(planning_modules PUBLIC rclcpp::rclcpp ${craft_interfaces_TARGETS}
   ${nav_msgs_TARGETS} ${geometry_msgs_TARGETS} ${sensor_msgs_TARGETS}
-  PRIVATE pinocchio::pinocchio yaml-cpp PNG::PNG Threads::Threads)
+  PRIVATE pinocchio::pinocchio yaml-cpp PNG::PNG Threads::Threads
+    craft_perception::perception_modules ament_index_cpp::ament_index_cpp)
 
 add_executable(planning_master src/planning_master.cpp)
 target_compile_features(planning_master PRIVATE cxx_std_17)
 target_compile_options(planning_master PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(planning_master PRIVATE planning_modules
   ament_index_cpp::ament_index_cpp tf2_ros::tf2_ros ${tf2_geometry_msgs_TARGETS}
-  ${craft_perception_TARGETS} ${std_msgs_TARGETS} ${diagnostic_msgs_TARGETS})
+  craft_perception::craft_perception__rosidl_typesupport_cpp ${std_msgs_TARGETS} ${diagnostic_msgs_TARGETS})
 install(TARGETS planning_modules planning_master
   ARCHIVE DESTINATION lib LIBRARY DESTINATION lib RUNTIME DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)

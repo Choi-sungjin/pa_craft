@@ -14,6 +14,7 @@ namespace craft_planning {
 
 struct PlanningStep {
   std::string id;
+  uint64_t task_id = 0;
   StepKind kind = StepKind::Wait;
   geometry_msgs::msg::PoseStamped goal;
   // For an observed source, goal.position is an offset expressed in goal.frame_id.
@@ -29,18 +30,19 @@ struct PlanningConfig {
   ArmPlannerConfig arm;
   StateMachineConfig fsm;
   double loop_hz = 20.0;
+  double replan_period_s = 0.2;
   double odom_timeout_s = 0.5;
   double joint_timeout_s = 0.5;
   double observation_timeout_s = 0.5;
   double obstacle_timeout_s = 0.5;
   double cruise_speed = 0.12;
   double goal_tolerance = 0.03;
-  double heading_tolerance = 0.5;
   double observation_min_confidence = 0.5;
   bool require_lidar = true;
   bool goal_heading_required = false;
   std::string joint_state_topic = "/control/arm_joints";
   std::map<std::string, std::vector<PlanningStep>> missions;
+  std::map<int, std::string> mission_by_tag;
 };
 
 // Invalid files, unknown fields and invalid values throw invalid_argument.

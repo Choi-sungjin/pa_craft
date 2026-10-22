@@ -14,7 +14,7 @@ import subprocess
 import tempfile
 import time
 
-# Tasks that read the D435 frame besides d435_yolo/apriltag (puck_axis runs its own model).
+# Tasks that read the D435 frame besides d435_yolo/apriltag (puck_axis uses AprilTag + depth).
 D435_CONSUMERS = ('knob_depth', 'object_detector', 'obstacle_detector', 'puck_axis')
 
 
@@ -22,8 +22,6 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--executable', required=True)
     parser.add_argument('--model', required=True)
-    parser.add_argument('--puck-model', type=Path,
-                        default=Path(__file__).resolve().parents[1] / 'models' / 'puck_blue')
     parser.add_argument('--config', type=Path,
                         default=Path(__file__).resolve().parents[1] / 'config' / 'perception.yaml')
     parser.add_argument('--low-copy', action='store_true',
@@ -38,15 +36,18 @@ def main():
     from sensor_msgs.msg import CameraInfo, LaserScan
     from nav_msgs.msg import Odometry
     from std_msgs.msg import Int32MultiArray, UInt64MultiArray
+    from craft_perception.msg import PuckObservationArray
 
     names = [f'/craft_test_{os.getpid()}_rs', f'/craft_test_{os.getpid()}_c310']
     files, child = [], None
     rclpy.init()
     node = rclpy.create_node('perception_synthetic_input')
-    detections, statuses = [], {}
+    detections, pucks, statuses = [], [], {}
     odometry_results, obstacle_results = [], []
     node.create_subscription(Int32MultiArray, '/perception/vision/d435/apriltag',
                              lambda msg: detections.append(list(msg.data)), 10)
+    node.create_subscription(PuckObservationArray, '/perception/vision/d435/puck_observations',
+                             lambda msg: pucks.extend(msg.observations), 10)
 
     def on_diagnostic(message):
         for status in message.status:
@@ -57,6 +58,15 @@ def main():
     node.create_subscription(Odometry, '/perception/state/odom', odometry_results.append, 10)
     node.create_subscription(PoseArray, '/perception/lidar/obstacle', obstacle_results.append, 10)
     odometry_pub = node.create_publisher(Odometry, '/wheel/odom', 1)
+    from geometry_msgs.msg import TransformStamped
+    from rclpy.qos import DurabilityPolicy, QoSProfile
+    from tf2_msgs.msg import TFMessage
+    tf_pub = node.create_publisher(TFMessage, '/tf_static',
+                                   QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
+    map_from_odom = TransformStamped()  # stands in for slam_toolbox
+    map_from_odom.header.frame_id, map_from_odom.child_frame_id = 'map', 'odom'
+    map_from_odom.transform.rotation.w = 1.0
+    tf_pub.publish(TFMessage(transforms=[map_from_odom]))
     scan_pub = node.create_publisher(LaserScan, '/lidar/merged', 1)
     publishers = [node.create_publisher(UInt64MultiArray, topic, 1)
                   for topic in ('/vision/d435/frame_meta', '/vision/c310/frame_meta')]
@@ -70,12 +80,16 @@ def main():
     sizes = [len(payload) + 8 for payload in payloads]
     log = tempfile.TemporaryFile(mode='w+')
     overrides = tempfile.NamedTemporaryFile(mode='w+', suffix='.yaml')
+    registry = tempfile.NamedTemporaryFile(mode='w+', suffix='.yaml')
+    registry.write('tags:\n  7: {puck: 7}\n')
+    registry.flush()
     detector_hz, apriltag_hz = (2.0, 2.0) if args.low_copy else (100.0, 7.0)
     overrides.write('perception_master:\n  ros__parameters:\n'
                     '    lidar.input_mode: merged\n'
                     f'    schedule.d435_yolo.hz: {detector_hz}\n'
                     f'    schedule.knob_lever.hz: {detector_hz}\n'
-                    f'    schedule.apriltag.hz: {apriltag_hz}\n')
+                    f'    schedule.apriltag.hz: {apriltag_hz}\n'
+                    f'    tag_registry_file: {registry.name}\n')
     if args.low_copy:
         overrides.write(''.join(f'    schedule.{name}.hz: 2.0\n' for name in D435_CONSUMERS)
                         + '    max_input_age_s: 1.5\n')
@@ -90,7 +104,6 @@ def main():
             '--params-file', overrides.name,
             '-p', f'd435.yolo.model_dir:={Path(args.model).resolve()}',
             '-p', f'c310.yolo.model_dir:={Path(args.model).resolve()}',
-            '-p', f'd435.puck_yolo.model_dir:={args.puck_model.resolve()}',
             '-p', f'd435.shm:={names[0]}', '-p', f'c310.shm:={names[1]}',
         ], stdout=log, stderr=log)
         deadline, next_frame, sequence = time.monotonic() + 8, 0, 0
@@ -136,6 +149,7 @@ def main():
                     publishers[camera].publish(UInt64MultiArray(data=meta))
             rclpy.spin_once(node, timeout_sec=0.002)
         assert len(detections) >= (10 if args.low_copy else 40), f'AprilTag starved: {len(detections)}'
+        assert pucks and all(p.tag_valid and p.puck_id == 7 for p in pucks)
         assert all(ids == [7] for ids in detections), detections[:5]
         assert len(odometry_results) >= 500, f'odometry starved: {len(odometry_results)}'
         assert len(obstacle_results) >= 100, f'scan processing starved: {len(obstacle_results)}'

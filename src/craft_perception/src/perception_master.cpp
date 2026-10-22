@@ -1,7 +1,9 @@
 #include "craft_perception/perception_master.hpp"
+#include "craft_perception/tag_registry.hpp"
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <filesystem>
 #include <cmath>
+#include <limits>
 
 namespace craft_perception {
 namespace {
@@ -87,12 +89,18 @@ std::unique_ptr<msg::KnobObservationArray> knob_lever_message(const std_msgs::ms
 }
 
 std::unique_ptr<msg::PuckObservationArray> puck_message(const std_msgs::msg::Header &header,
-  const std::vector<PuckObservation> &pucks, const std::vector<std::string> &labels) {
+  const std::vector<PuckObservation> &pucks) {
   auto output = std::make_unique<msg::PuckObservationArray>();
   output->header = header;
   for (const auto &puck : pucks) {
     msg::PuckObservation observation;
-    observation.detection = message(puck.detection, labels);
+    observation.detection.class_id = puck.detection.class_id;
+    observation.detection.label = "puck_tag_" + std::to_string(puck.detection.class_id);
+    observation.detection.confidence = puck.detection.score;
+    observation.detection.bbox = {puck.detection.box.x, puck.detection.box.y,
+      puck.detection.box.width, puck.detection.box.height};
+    observation.puck_id = puck.detection.class_id;
+    observation.tag_valid = true;
     if (puck.axis) {
       observation.axis_valid = true;
       observation.center = point(puck.axis->center);
@@ -112,9 +120,9 @@ std::unique_ptr<msg::PuckObservationArray> puck_message(const std_msgs::msg::Hea
 PerceptionMaster::PerceptionMaster() : Node("perception_master") {
   configure();
   connect();
-  RCLCPP_WARN(get_logger(), "StateEstimator relays one odometry source; wheel/IMU/lidar fusion is not implemented");
-  RCLCPP_INFO(get_logger(), "PerceptionMaster ready; D435 classes=%zu, C310 classes=%zu, puck classes=%zu, "
-    "executor_threads=%d", d435_labels_.size(), c310_labels_.size(), puck_labels_.size(), executor_threads_);
+  RCLCPP_WARN(get_logger(), "StateEstimator re-expresses one odometry source in the map frame; wheel/IMU/lidar fusion is not implemented");
+  RCLCPP_INFO(get_logger(), "PerceptionMaster ready; D435 classes=%zu, C310 classes=%zu, "
+    "executor_threads=%d", d435_labels_.size(), c310_labels_.size(), executor_threads_);
 }
 
 template <typename T> T PerceptionMaster::param(const std::string &name) {
@@ -195,6 +203,10 @@ void PerceptionMaster::configure() {
   d435.yolo = yolo_param("d435.yolo", d435_labels_);
   d435.knob_class_id = param<int64_t>("d435.yolo.knob_class_id");
   d435.apriltag_family = param<std::string>("d435.apriltag_family");
+  const auto registry_file = param<std::string>("tag_registry_file");
+  d435.tag_registry = load_tag_registry(std::filesystem::path(registry_file).is_absolute() ?
+    registry_file : ament_index_cpp::get_package_share_directory("craft_perception") + "/" + registry_file);
+  d435.puck_tag_box_scale = positive_param("d435.puck_axis.tag_box_scale");
   d435.knob_grow = param<double>("d435.knob_depth.grow");
   d435.knob_tolerance_m = param<double>("d435.knob_depth.tolerance_m");
   d435.knob_min_points = param<int64_t>("d435.knob_depth.min_points");
@@ -204,7 +216,6 @@ void PerceptionMaster::configure() {
   }
   d435.obstacle_max_range_m = param<double>("d435.obstacle_detector.max_range_m");
   d435.obstacle_near_quantile = param<double>("d435.obstacle_detector.near_quantile");
-  d435.puck_yolo = yolo_param("d435.puck_yolo", puck_labels_);
   d435.puck.grow = param<double>("d435.puck_axis.grow");
   d435.puck.plane_threshold_m = param<double>("d435.puck_axis.plane_threshold_m");
   d435.puck.min_height_m = param<double>("d435.puck_axis.min_height_m");
@@ -229,7 +240,7 @@ void PerceptionMaster::configure() {
   cv::setNumThreads(1); // Executor handles module parallelism; avoid nested CPU pools.
   if (!d435_.configure(d435)) {
     throw std::invalid_argument("invalid d435 configuration in perception.yaml, or cannot load the "
-      + d435.yolo.backend + " model for d435.yolo / d435.puck_yolo (see stderr)");
+      + d435.yolo.backend + " model for d435.yolo (see stderr)");
   }
   if (!c310_.configure(c310)) {
     throw std::invalid_argument("invalid c310 configuration in perception.yaml, or cannot load the "
@@ -252,6 +263,7 @@ void PerceptionMaster::configure() {
     throw std::invalid_argument("invalid lidar / lidar_obstacle configuration");
   }
   odometry_topic_ = param<std::string>("odometry_source_topic");
+  map_frame_ = param<std::string>("map_frame");
 }
 
 void PerceptionMaster::connect() {
@@ -282,6 +294,8 @@ void PerceptionMaster::connect() {
     [this](sensor_msgs::msg::CameraInfo::ConstSharedPtr info) {
       std::lock_guard<std::mutex> lock(info_mutex_); info_ = std::move(info);
     });
+  tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
+  tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
   odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(odometry_topic_, rclcpp::SensorDataQoS(),
     [this](nav_msgs::msg::Odometry::ConstSharedPtr input) {
       std::lock_guard<std::mutex> lock(odom_mutex_); odom_ = std::move(input); ++odom_id_;
@@ -289,8 +303,6 @@ void PerceptionMaster::connect() {
   // Raw mode calls LidarPerception directly, just like the camera modules.
   // Merged mode supports a merger already running on a separate sensor computer.
   if (lidar_input_mode_ == "raw" && enabled("lidar_obstacle")) {
-    lidar_tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
-    lidar_tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*lidar_tf_buffer_);
     merged_scan_pub_ = create_publisher<sensor_msgs::msg::LaserScan>("/lidar/merged", 10);
     rear_scan_sub_ = create_subscription<sensor_msgs::msg::LaserScan>("/lidar/rear/scan",
       rclcpp::SensorDataQoS(), [this](sensor_msgs::msg::LaserScan::ConstSharedPtr input) {
@@ -448,9 +460,9 @@ bool PerceptionMaster::d435_yolo(Task &task) {
 bool PerceptionMaster::d435_apriltag(Task &task) {
   return on_frame(kD435, task,
     [this](const FramePtr &frame) { return d435_.read_apriltag(*frame->data); },
-    [this](const FramePtr &, std::vector<int> &ids) {
+    [this](const FramePtr &, std::vector<AprilTagDetection> &tags) {
       auto output = std::make_unique<std_msgs::msg::Int32MultiArray>();
-      output->data.assign(ids.begin(), ids.end());
+      for (const auto &tag : tags) output->data.push_back(tag.id);
       apriltag_pub_->publish(std::move(output));
     });
 }
@@ -485,7 +497,7 @@ bool PerceptionMaster::d435_obstacle_detector(Task &task) {
     });
 }
 
-// Puck runs its own model on the D435 frame, independent of d435_yolo.
+// Puck identity and ROI come from configured AprilTag IDs; color is not used.
 bool PerceptionMaster::d435_puck_axis(Task &task) {
   return on_frame(kD435, task,
     [this](const FramePtr &frame) {
@@ -493,7 +505,7 @@ bool PerceptionMaster::d435_puck_axis(Task &task) {
       return in ? d435_.puck_axis(*frame->data, *in) : std::nullopt;
     },
     [this](const FramePtr &frame, std::vector<PuckObservation> &pucks) {
-      puck_pub_->publish(puck_message(frame->header, pucks, puck_labels_));
+      puck_pub_->publish(puck_message(frame->header, pucks));
     });
 }
 
@@ -509,7 +521,7 @@ bool PerceptionMaster::c310_knob_lever(Task &task) {
 
 std::optional<lidar_processing::Pose2D> PerceptionMaster::lidar_pose(const std::string &frame) {
   try {
-    const auto tf = lidar_tf_buffer_->lookupTransform(lidar_config_.target_frame, frame, tf2::TimePointZero);
+    const auto tf = tf_buffer_->lookupTransform(lidar_config_.target_frame, frame, tf2::TimePointZero);
     const auto &q = tf.transform.rotation;
     return lidar_processing::Pose2D{tf.transform.translation.x, tf.transform.translation.y,
       std::atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))};
@@ -557,7 +569,18 @@ bool PerceptionMaster::state_estimator(Task &task) {
   if (!input || task.seen == id || !is_fresh_input(input->header.stamp)) return false;
   task.seen = id;
   if (!state_estimator_.is_valid_input(*input)) return false;
-  odom_pub_->publish(state_estimator_.compute_result(*input)); return true;
+  if (input->header.frame_id == map_frame_) {
+    odom_pub_->publish(state_estimator_.compute_result(*input)); return true;
+  }
+  try {  // slam_toolbox owns map->odom; latest is fine because it changes slowly.
+    const auto tf = tf_buffer_->lookupTransform(map_frame_, input->header.frame_id, tf2::TimePointZero);
+    odom_pub_->publish(state_estimator_.compute_result(*input, tf.transform, map_frame_));
+    return true;
+  } catch (const std::exception &e) {
+    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "odometry TF %s->%s: %s",
+      map_frame_.c_str(), input->header.frame_id.c_str(), e.what());
+    return false;
+  }
 }
 
 void PerceptionMaster::diagnostics() {

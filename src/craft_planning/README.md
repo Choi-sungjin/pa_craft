@@ -1,7 +1,7 @@
 # craft_planning
 
 `planning_master` is a C++17 ROS 2 node that sequences base navigation, Cartesian
-arm goals, gripper commands, carousel slots and waits. Startup is `IDLE` with all
+arm goals, gripper commands, carousel slots and waits. Startup is `Idle` with all
 axes held. The supplied `config/missions.yaml` contains `missions: {}`: loading
 the package never starts an example mission or invents physical target positions.
 
@@ -19,11 +19,10 @@ the package never starts an example mission or invents physical target positions
 and configures the modules. `connect()` creates ROS interfaces, TF and the timer.
 `planning_loop()` checks readiness, collects calculations, advances one step,
 issues commands and reports state. Path/IK calculations run outside ROS callbacks;
-only one is in flight. Cancellation/replacement changes a generation so old
+only one is in flight. Cancellation/fault changes a generation so old
 results are discarded. Only calculations may retry, never physical actions.
 
-The installed executable is C++. `scripts/planning_master.py` remains legacy
-source and is not installed as the executable. Python `src/path_planner.py` and
+The installed executable is C++. `scripts/planning_master.py` forwards to the C++ executable. Python `src/path_planner.py` and
 `src/kant_astar_arc.py` remain importable references with regression tests. Native
 C++ planning does not execute KANT `PASS`/`STOP_TURN`/`ALIGN` metadata or its
 corner-fillet/speed-profile algorithm. Provenance remains in `third_party/`.
@@ -36,9 +35,10 @@ Types use the ROS `package/msg/Type` convention.
 
 | Topic | Type | Meaning |
 | --- | --- | --- |
-| `/planning/mission` | `std_msgs/msg/String` | Configured mission name or control command below |
-| `/planning/target_base_pose` | `geometry_msgs/msg/PoseStamped` | Replace work with one navigation step |
-| `/planning/target_tcp_pose` | `geometry_msgs/msg/PoseStamped` | Replace work with one TCP step |
+| `/planning/mission` | `std_msgs/msg/String` | Optional manual input of a configured mission name |
+| `/perception/vision/d435/apriltag` | `std_msgs/msg/Int32MultiArray` | Floor/wall tag IDs mapped to configured missions |
+| `/planning/target_base_pose` | `geometry_msgs/msg/PoseStamped` | Queue one navigation task |
+| `/planning/target_tcp_pose` | `geometry_msgs/msg/PoseStamped` | Queue one TCP task |
 | `/perception/state/odom` | `nav_msgs/msg/Odometry` | Fresh base pose in `map_frame` |
 | `/control/arm_joints` | `sensor_msgs/msg/JointState` | Default measured, inverse-calibrated URDF joints; configurable with `joint_state_topic` |
 | `/perception/lidar/obstacle` | `geometry_msgs/msg/PoseArray` | LiDAR points; required for navigation by default |
@@ -47,31 +47,28 @@ Types use the ROS `package/msg/Type` convention.
 | `/perception/vision/d435/puck_observations` | `craft_perception/msg/PuckObservationArray` | Axis-valid puck targets |
 | `/perception/vision/object_pose` | `geometry_msgs/msg/PoseStamped` | Optional generic observation source |
 | `/perception/vision/d435/object_detection` | `geometry_msgs/msg/PoseArray` | Generic object positions |
-| `/control/arm_lm_state`, `/control/wheel_state`, `/control/clock_state` | `std_msgs/msg/Int32` | 0 idle, 1 using, 2 fault |
-| `/control/{arm,lm,wheel,clock,gripper}_target_reached` | `std_msgs/msg/Bool` | Target acknowledgements/completion |
-| `/control/clock_slot` | `std_msgs/msg/Int32` | Measured slot; 0 means unavailable |
-| `/control/planning_held` | `std_msgs/msg/Bool` | Hold/release acknowledgement |
-| `/control/tracking_path` | `nav_msgs/msg/Path` | Control's resampled path for collision validation |
+| `/control/task_result` | `craft_interfaces/msg/TaskResult` | ID-correlated aggregate result and controller matrix |
+| `/control/status` | `craft_interfaces/msg/ControlStatus` | Ready/fault/held/measured stop status |
+| `/planning/command` | `std_msgs/msg/String` | START, CANCEL, STOP, RESET |
 
 ## ROS outputs
 
 | Topic | Type | Meaning |
 | --- | --- | --- |
-| `/planning/target_path` | `nav_msgs/msg/Path` | Navigation path; empty on stop/failure |
+| `/planning/task_command` | `craft_interfaces/msg/TaskCommand` | Task ID, operation, revision and existing path/joints/slot/gripper/wait payload |
 | `/planning/odom` | `nav_msgs/msg/Odometry` | Fresh validated odometry forwarded to control |
-| `/planning/target_v` | `std_msgs/msg/Float64` | Base speed [m/s]; nonzero only after tracking-path validation |
-| `/planning/target_arm_joints` | `sensor_msgs/msg/JointState` | Slide [m], shoulder/elbow/wrist pitch/tool roll [rad] |
-| `/planning/gripper_command` | `std_msgs/msg/Bool` | true closes, false opens |
-| `/planning/target_clock_slot` | `std_msgs/msg/Int32` | Slot 1..12 |
-| `/planning/hold` | `std_msgs/msg/Bool` | Periodic all-axis hold level and heartbeat |
-| `/planning/state` | `std_msgs/msg/String` | Transient-local FSM state |
-| `/planning/diagnostics` | `diagnostic_msgs/msg/DiagnosticArray` | State, step, generation and readiness/fault reason |
+| `/planning/hold` | `std_msgs/msg/Bool` | Periodic all-axis hold level and watchdog heartbeat |
+| `/planning/state` | `std_msgs/msg/String` | Idle, Ready, Run.Phase or Fault |
+| `/planning/diagnostics` | `diagnostic_msgs/msg/DiagnosticArray` | Current task ID, queue size, path revision and fault reason |
+
+Planning consumes no controller-specific completion Booleans. ControlMaster distributes
+commands internally and publishes one aggregate result per task on `/control/task_result`.
+Controller diagnostics can still be inspected independently.
 
 Joint order is `slide_joint`, `shoulder_joint`, `elbow_joint`, `wrist_pitch_joint`,
 `tool_roll_joint`. Seeds require these measured joints within URDF limits;
-RViz's interpolated `/joint_states` is not hardware feedback. An independent
-encoder source can override `joint_state_topic` to `/arm/odom`; the current arm
-encoder sensor stub does not publish measurements.
+RViz's interpolated `/joint_states` is not hardware feedback. Arm encoder
+feedback comes from the control side; point `joint_state_topic` at its topic.
 
 ## Configuration, maps and coordinates
 
@@ -130,45 +127,71 @@ missions:
 Step IDs must be unique per mission. Unknown keys/types, invalid slots, frames,
 poses and non-finite values fail parsing. Pose is `[x,y,z,qx,qy,qz,qw]` with a
 nonzero quaternion. `source` defaults to `fixed`; alternatives are `d435_knob`,
-`d435_puck`, `object_pose`, `object_detection`. The highest-confidence fresh
+`d435_puck`, `object_pose`, `object_detection`. For `d435_puck`, `class_id` is the
+AprilTag ID printed on the puck underside. The highest-confidence fresh
 matching target is transformed into the step frame. Configured XYZ is an offset
 in that frame; the configured quaternion supplies orientation. Target selection
 is frozen when calculation begins. `class_id: -1` accepts any class.
 
-Send the configured name on `/planning/mission` to start it; repeated names are
-deduplicated. `INIT` clears the remembered name without cancelling active motion.
-`STOP`/`CANCEL` cancel work, clear the queue and hold every axis; an existing
-fault stays latched. `RESET` clears the planning fault into `CANCELLED`, discards
-work and holds; it never resumes a command. Hardware faults and missing inputs
-must still be resolved before a new goal.
+After `Ready`, send `START` on `/planning/command`, then show a configured floor/wall
+mission tag or submit a goal/mission name manually. `tag_registry_file` points at the
+shared `craft_perception/config/tag_registry.yaml`. Each tag ID has exactly one value:
+`{mission: NAME}` or `{puck: NUMBER}`. Both nodes load that table into a hash map;
+Planning uses mission entries and Perception uses puck entries. The table is empty until
+the official allocation is available. Requests while Idle/Ready/Fault/Stopping are rejected without faulting.
+New valid work is appended to a bounded FIFO (64 pending steps), not preempted.
+Mission step labels are distinct from runtime task IDs. IDs are allocated on enqueue
+from a system-clock epoch seed and increase across RESET; never reuse an ID in a run.
+Repeated mission names are deduplicated until fault reset; direct pose requests
+are deduplicated by type, frame, stamp and payload (last 1024 requests). Give an intentional
+repeat a new acquisition/request stamp. Rejected requests are logged and not queued.
 
-## Execution and limits
+## Lifecycle and ownership
 
-States are `IDLE`, `WAITING`, `COMPUTING`, `EXECUTING`, `SUCCEEDED`, `FAULT`,
-`CANCELLED`. Each step requests hold=true and waits for its fresh true
-acknowledgement, then requests hold=false and waits for a fresh released
-acknowledgement before sending a target. Missing/true/stale heartbeat clears
-control targets, commands zero wheel speed and holds measured actuator positions.
-Release cannot revive old targets; stop does not open the gripper. Explicit
-readiness/computation/execution deadlines, acquisition ages and steady-clock
-reception watchdogs fail closed.
-Control's `serial_feedback_timeout_s` also holds all axes before valid OpenCR
-feedback or when either board stream expires; stale board feedback reports fault.
+- `Idle`: map/IK/FSM configuration has loaded; wait for ControlMaster ready + stopped,
+  fresh measured joints/odometry and required LiDAR. Initialization timeout enters Fault.
+- `Ready`: configured and available; wait for explicit `START`.
+- `Run.AwaitRequest`: hold and wait for queued work.
+- `Run.PrepareTask`: release control and wait for current task inputs/observation.
+- `Run.Compute`: path/IK calculation or validation of simple tasks. Bounded computation retries only.
+- `Run.Execute`: await ControlMaster's result for the dispatched task ID.
+- `Run.Complete`: record success through published state, clear current task, return to AwaitRequest.
+- `Run.Stopping`: request stop; wait for fresh ControlStatus stopped and (if dispatched)
+  matching TaskResult STOPPED. CANCEL returns to AwaitRequest, STOP returns to Ready.
+- `Fault`: hold, discard pending tasks/calculation results, retain the original phase and reason.
+  RESET waits for measured stop, reconfigures the planners, returns through Idle to Ready.
+  It never automatically starts Run or resumes an old task.
 
-Completion requires post-command false then fresh true feedback, stable for the
-debounce interval. Navigation also checks actual goal distance and optional yaw;
-clock checks measured slot and idle state. Bool feedback lacks goal IDs, so
-arbitrarily delayed old false/true pairs cannot be fully correlated. Gripper
-position completion does not prove that an object was grasped.
+All phases live under Run; there is no phase outside Run. Timeouts use monotonic time.
+Completion and physical-stop criteria live in Control/controllers. Planning only verifies
+IDs, message freshness and response deadlines. Faults clear the queue. Both cancel and
+operation stop clear pending work. Lifecycle commands are accepted only on `/planning/command`.
 
-Pure Pursuit has no in-place-turn input. Excessive initial heading error is
-rejected; `goal_heading_required=true` also rejects incompatible final approach
-headings and checks arrival yaw. Default arrival is position-only. Arm IK checks
-URDF limits and pose tolerances, with no self/environment collision checking or
-motor trajectory profiling. OpenCR/DYNAMIXEL owns motor profiles. Calibrate the
-footprint, wheel geometry, motor directions/offsets, LM pulley/gearing/travel and
-gripper limits/current thresholds. Default arm/LM/gripper mappings remain
-unconfirmed in control; these are not hardware-ready calibration values.
+During navigation, PathPlanner regenerates a path from the current pose/obstacle snapshot
+every `replan_period_s` (default 0.2 s, at most one calculation in flight). Valid updates
+preserve task ID and increase revision while staying in Run.Execute. Failed/expired replans
+caused by a temporarily blocked route pause wheel speed and retry without dropping the task
+or queue. Invalid input, resource-limit and expired computations still fault. Control follows
+the planner's segments without spline overshoot.
+PathPlanner owns collision checking; Planning does not implement another collision algorithm.
+The previous valid path remains active while each calculation is running. A no-route result
+pauses it until a later calculation succeeds. The period and compute timeout bound update
+latency and must be tuned to actual robot speed and sensing latency.
+
+Control turns the differential drive in place when the path direction differs by more than
+`wheel_heading_tolerance`, then resumes Pure Pursuit. Optional `goal_heading_required` also
+uses this mode for final alignment. Rotation speed is `wheel_rotate_angular_speed`. Default
+arrival is position-only. Arm IK validates limits/pose, not self/environment collisions. Calibrate
+motor mappings before operation: default arm/LM/gripper confirmations remain false.
+Invalid startup configuration files fail node construction; runtime initialization and
+operation timeouts are reported through Fault.
+
+```bash
+ros2 topic pub --once /planning/command std_msgs/msg/String '{data: START}'
+ros2 topic pub --once /planning/command std_msgs/msg/String '{data: CANCEL}'
+ros2 topic pub --once /planning/command std_msgs/msg/String '{data: STOP}'
+ros2 topic pub --once /planning/command std_msgs/msg/String '{data: RESET}'
+```
 
 ## Build and verification
 

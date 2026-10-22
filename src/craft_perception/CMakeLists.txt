@@ -18,6 +18,7 @@ find_package(diagnostic_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(OpenCV 4 REQUIRED COMPONENTS core imgproc aruco)
 find_package(ncnn REQUIRED CONFIG)
+find_package(yaml-cpp REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/Detection.msg" "msg/DetectionArray.msg"
@@ -27,6 +28,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 rosidl_get_typesupport_target(perception_typesupport ${PROJECT_NAME} rosidl_typesupport_cpp)
 
 add_library(perception_modules
+  src/tag_registry.cpp
   src/yolo_detector.cpp src/apriltag_reader.cpp src/knob_depth.cpp src/knob_lever.cpp
   src/object_detector.cpp src/obstacle_detector.cpp src/puck_axis.cpp
   src/d435_perception.cpp src/c310_perception.cpp src/shared_frame.cpp
@@ -36,7 +38,7 @@ target_include_directories(perception_modules PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
   ${OpenCV_INCLUDE_DIRS})
-target_link_libraries(perception_modules PUBLIC lidar_processor::scan_merger ncnn ${OpenCV_LIBS}
+target_link_libraries(perception_modules PUBLIC lidar_processor::scan_merger ncnn yaml-cpp ${OpenCV_LIBS}
   ${sensor_msgs_TARGETS} ${nav_msgs_TARGETS} ${geometry_msgs_TARGETS})
 
 # TensorRT YOLO backend for the Jetson. auto: build it when TensorRT + CUDA are found.
@@ -85,5 +87,5 @@ if(BUILD_TESTING)
 endif()
 
 ament_export_targets(perception_modules_export HAS_LIBRARY_TARGET)
-ament_export_dependencies(lidar_processor tf2_ros ncnn OpenCV sensor_msgs nav_msgs geometry_msgs rosidl_default_runtime)
+ament_export_dependencies(lidar_processor tf2_ros ncnn yaml-cpp OpenCV sensor_msgs nav_msgs geometry_msgs rosidl_default_runtime)
 ament_package()

@@ -1,22 +1,5 @@
-// control_master: planning targets -> 2x OpenCR (serial)
-// sub: /planning/target_path, /planning/odom, /planning/target_arm_joints
-//      /planning/target_v (Float64, m/s), /planning/target_clock_slot (Int32, 1..12)
-//      target_arm_joints: JointState from URDF IK, positions [rad] or [m]
-//      /planning/hold (Bool heartbeat: true or stale input holds every axis)
-// pub: /control/arm_lm_state, /control/wheel_state, /control/clock_state (Int32: 0 idle, 1 using, 2 fault, every tick)
-//      /control/clock_slot (Int32: 1..12, 0 between slots), /control/clock_target_reached (Bool)
-//      /control/arm_target_reached, /control/lm_target_reached, /control/gripper_target_reached, /control/wheel_target_reached (Bool)
-//      reached topics publish false immediately when a new target is stored
-//      /control/planning_held (Bool every tick: planning targets are blocked/cleared)
-//      /control/arm_joints (measured five-joint JointState, only with confirmed calibration)
-// param: config/control.yaml (OpenCR ports, arm motor limits)
-// serial (ASCII CSV, '\n' terminated, OpenCR must stream rx on its own):
-//   shared channels first (same order as tx), board-specific state/current last
-//   arm+LM OpenCR      tx: slide,shoulder,elbow,wrist_pitch,tool_roll,gripper
-//                      rx: slide,shoulder,elbow,wrist_pitch,tool_roll,gripper,arm_lm_state,gripper_current_a
-//   clock+wheel OpenCR tx: wheel_l,wheel_r,clock
-//                      rx: wheel_l,wheel_r,clock,wheel_state,clock_state
-
+// ControlMaster distributes ID-bearing tasks and aggregates controller completion.
+// /planning/hold remains a watchdog heartbeat; /control/status reports actual settling.
 #include <fcntl.h>
 #include <termios.h>
 #include <unistd.h>
@@ -31,6 +14,9 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <deque>
+#include "craft_control/task_tracker.hpp"
+#include <craft_interfaces/msg/control_status.hpp>
 
 #include "rclcpp/rclcpp.hpp"
 #include "nav_msgs/msg/odometry.hpp"
@@ -39,6 +25,8 @@
 #include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/float64.hpp"
 #include "std_msgs/msg/int32.hpp"
+#include "geometry_msgs/msg/transform_stamped.hpp"
+#include "tf2_ros/transform_broadcaster.h"
 
 #include "craft_control/arm_controller.hpp"
 #include "craft_control/clock_controller.hpp"
@@ -47,6 +35,11 @@
 #include "craft_control/lm_controller.hpp"
 #include "craft_control/longitudinal_controller.hpp"
 #include "craft_control/planning_watchdog.hpp"
+#include "craft_control/wheel_odometry.hpp"
+
+using TaskCommand = craft_interfaces::msg::TaskCommand;
+using TaskResult = craft_interfaces::msg::TaskResult;
+using ControlStatus = craft_interfaces::msg::ControlStatus;
 
 constexpr double kDt = 0.02;  // control period [s], TODO: check computing time and OpenCR serial latency
 
@@ -213,7 +206,8 @@ public:
     // Validate parameters: wheel, clock
     longitudinal_.configure(wheel_radius_, max_v);
     lateral_.configure(
-      wheel_radius_, wheel_separation, lookahead_distance, wheel_goal_tolerance, path_spacing);
+      wheel_radius_, wheel_separation, lookahead_distance, wheel_goal_tolerance, path_spacing,
+      positive_param("wheel_heading_tolerance"), positive_param("wheel_rotate_angular_speed"));
     if (!clock_controller_.configure(
       clock_slot_count_, clock_slot_angle, clock_zero_angle, clock_direction, clock_angle_tolerance))
     {
@@ -225,7 +219,11 @@ public:
     {
       throw std::runtime_error("planning_watchdog_timeout_s must be finite and positive");
     }
+    wheel_odometry_.configure(wheel_radius_, wheel_separation);
+    odom_frame_ = declare_parameter<std::string>("odom_frame");
+    base_frame_ = declare_parameter<std::string>("base_frame");
     const double serial_timeout = declare_parameter("serial_feedback_timeout_s", 0.5);
+    serial_timeout_s_ = serial_timeout;
     if (!arm_feedback_watchdog_.configure(serial_timeout) ||
       !clock_wheel_feedback_watchdog_.configure(serial_timeout))
     {
@@ -250,38 +248,33 @@ public:
     tracking_path_pub_ = create_publisher<nav_msgs::msg::Path>("/control/tracking_path", 10);
     planning_held_pub_ = create_publisher<std_msgs::msg::Bool>("/control/planning_held", 10);
     arm_joint_feedback_pub_ = create_publisher<sensor_msgs::msg::JointState>("/control/arm_joints", 10);
+    wheel_odom_pub_ = create_publisher<nav_msgs::msg::Odometry>("/wheel/odom", rclcpp::SensorDataQoS());
+    tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
     planning_hold_sub_ = create_subscription<std_msgs::msg::Bool>(
       "/planning/hold", 10,
       [this](const std_msgs::msg::Bool & msg) {
         planning_watchdog_.observe(msg.data, craft_control::PlanningWatchdog::Clock::now());
         planning_hold_pending_ = planning_hold_pending_ || msg.data;
       });
-    target_path_sub_ = create_subscription<nav_msgs::msg::Path>(
-      "/planning/target_path", 10,
-      [this](const nav_msgs::msg::Path & msg) {if (!planning_held_) {pending_path_ = msg;}});
-    odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
-      "/planning/odom", 10,
-      [this](const nav_msgs::msg::Odometry & msg) {if (!planning_held_) {pending_odom_ = msg;}});
-    wheel_target_sub_ = create_subscription<std_msgs::msg::Float64>(
-      "/planning/target_v", 10,
-      [this](const std_msgs::msg::Float64 & msg) {
-        if (!planning_held_) {pending_wheel_target_velocity_ = msg.data;}
+    task_result_pub_ = create_publisher<TaskResult>("/control/task_result", 10);
+    control_status_pub_ = create_publisher<ControlStatus>("/control/status", 10);
+    task_sub_ = create_subscription<TaskCommand>("/planning/task_command", 10,
+      [this](const TaskCommand &msg) {
+        if (pending_tasks_.size() >= 32) {reject(msg, "control command queue full"); return;}
+        pending_tasks_.push_back(msg);
       });
-    clock_target_sub_ = create_subscription<std_msgs::msg::Int32>(
-      "/planning/target_clock_slot", 10,
-      [this](const std_msgs::msg::Int32 & msg) {
-        if (!planning_held_) {pending_clock_slot_ = msg.data;}
+    odom_sub_ = create_subscription<nav_msgs::msg::Odometry>("/planning/odom", 10,
+      [this](const nav_msgs::msg::Odometry &msg) {
+        const double age = (now() - rclcpp::Time(msg.header.stamp, get_clock()->get_clock_type())).seconds();
+        if (validate_odom(msg) && age >= -0.01 && age <= odom_timeout_s_) {
+          pending_odom_ = msg; odom_at_ = steady_seconds();
+        } else {lateral_.clear_odom(); odom_at_.reset();}
       });
-    arm_target_sub_ = create_subscription<sensor_msgs::msg::JointState>(
-      "/planning/target_arm_joints", 10,
-      [this](const sensor_msgs::msg::JointState & msg) {
-        if (!planning_held_) {pending_manipulator_target_ = msg;}
-      });
-    gripper_target_sub_ = create_subscription<std_msgs::msg::Bool>(
-      "/planning/gripper_command", 10,
-      [this](const std_msgs::msg::Bool & msg) {
-        if (!planning_held_) {pending_gripper_target_ = msg.data;}
-      });
+    settle_s_ = positive_param("settle_time_s");
+    stop_tolerance_ = positive_param("stop_position_tolerance_rad");
+    wheel_stop_tolerance_ = positive_param("wheel_stop_tolerance_rad_s");
+    task_timeout_s_ = positive_param("task_timeout_s");
+    odom_timeout_s_ = positive_param("odom_timeout_s");
 
     // Control loop timer
     timer_ = create_wall_timer(std::chrono::duration<double>(kDt), [this]() {control_loop();});
@@ -493,11 +486,10 @@ private:
     return true;
   }
 
-  void set_path_target(const nav_msgs::msg::Path & path)
+  void set_path_target(const nav_msgs::msg::Path & path, bool require_heading)
   {
-    // Store the validated path. Planning republishes the same path every tick; only a changed
-    // path resets arrival.
-    lateral_.set_target(path);
+    // Store the validated path revision and publish its tracking geometry.
+    lateral_.set_target(path, require_heading);
     tracking_path_pub_->publish(lateral_.target_path());
     if (path.poses != last_path_poses_) {
       last_path_poses_ = path.poses;
@@ -514,6 +506,34 @@ private:
       last_path_poses_.clear();
       publish_bool(wheel_target_reached_pub_, false);
     }
+  }
+
+  // Dead-reckon odom->base_link from wheel feedback; gaps longer than the feedback timeout
+  // are not integrated (the robot state across the gap is unknown).
+  void publish_wheel_odometry(double now_s, double max_gap_s)
+  {
+    if (wheel_odom_at_ && now_s - *wheel_odom_at_ <= max_gap_s) {
+      wheel_odometry_.update(wheel_left_feedback_, wheel_right_feedback_, now_s - *wheel_odom_at_);
+    }
+    wheel_odom_at_ = now_s;
+    nav_msgs::msg::Odometry odom;
+    odom.header.stamp = now();
+    odom.header.frame_id = odom_frame_;
+    odom.child_frame_id = base_frame_;
+    odom.pose.pose.position.x = wheel_odometry_.x();
+    odom.pose.pose.position.y = wheel_odometry_.y();
+    odom.pose.pose.orientation.z = std::sin(wheel_odometry_.yaw() / 2.0);
+    odom.pose.pose.orientation.w = std::cos(wheel_odometry_.yaw() / 2.0);
+    odom.twist.twist.linear.x = wheel_odometry_.linear();
+    odom.twist.twist.angular.z = wheel_odometry_.angular();
+    wheel_odom_pub_->publish(odom);
+    geometry_msgs::msg::TransformStamped tf;
+    tf.header = odom.header;
+    tf.child_frame_id = base_frame_;
+    tf.transform.translation.x = odom.pose.pose.position.x;
+    tf.transform.translation.y = odom.pose.pose.position.y;
+    tf.transform.rotation = odom.pose.pose.orientation;
+    tf_broadcaster_->sendTransform(tf);
   }
 
   bool validate_odom(const nav_msgs::msg::Odometry & odom)
@@ -566,12 +586,7 @@ private:
 
   void discard_pending_targets()
   {
-    pending_manipulator_target_.reset();
-    pending_wheel_target_velocity_.reset();
-    pending_gripper_target_.reset();
-    pending_path_.reset();
     pending_odom_.reset();
-    pending_clock_slot_.reset();
   }
 
   void publish_arm_joint_feedback()
@@ -593,6 +608,89 @@ private:
     msg.position.push_back(*lm_position);
     msg.position.insert(msg.position.end(), positions->begin(), positions->end());
     arm_joint_feedback_pub_->publish(msg);
+  }
+
+  static double steady_seconds() {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+  }
+  void update_settle(std::vector<double> &anchor, const std::vector<double> &sample,
+                     double &since, double at) {
+    bool moved = anchor.size() != sample.size();
+    if (!moved) for (size_t i = 0; i < sample.size(); ++i)
+      moved = moved || std::abs(sample[i] - anchor[i]) > stop_tolerance_;
+    if (moved) {anchor = sample; since = at;}
+  }
+  void reject(const TaskCommand &msg, const std::string &reason) {
+    TaskResult r; r.header.stamp = now(); r.task_id = msg.task_id; r.revision = msg.revision;
+    r.status = TaskResult::REJECTED; r.reason = reason; task_result_pub_->publish(r);
+  }
+  void receive_task(const TaskCommand &c, double at, bool hardware_fault) {
+    if (c.operation == TaskCommand::STOP) {
+      // ID zero is an all-axis stop when no task was dispatched yet.
+      if (c.task_id && c.task_id != task_.result.task_id) {reject(c, "unknown stop task"); return;}
+      task_.stop(); task_hold_ = true;
+      clear_planning_targets(); return;
+    }
+    if (!c.task_id || !c.revision) {reject(c, "task ID/revision must be nonzero"); return;}
+    if (c.operation == TaskCommand::EXECUTE && c.task_id == task_.result.task_id) {
+      task_result_pub_->publish(task_.result); return; // no re-execution, including terminal tasks
+    }
+    const bool update = c.operation == TaskCommand::UPDATE_PATH;
+    if (update && (!task_.running() || c.task_id != task_.result.task_id ||
+        task_.kind != TaskCommand::NAVIGATE || c.kind != TaskCommand::NAVIGATE)) {
+      // Late updates after completion cannot revive an old path.
+      if (c.task_id == task_.result.task_id) task_result_pub_->publish(task_.result);
+      else reject(c, "no matching navigation task");
+      return;
+    }
+    if (update && c.revision <= task_.result.revision) return;
+    if (!update && (c.operation != TaskCommand::EXECUTE || task_.running() || task_.stopping() ||
+                    c.task_id <= last_task_id_)) {reject(c, "busy, invalid operation or retired task ID"); return;}
+    if (planning_held_ || hardware_fault || planning_watchdog_.held(craft_control::PlanningWatchdog::Clock::now())) {
+      reject(c, "control is held or unavailable"); return;
+    }
+    sensor_msgs::msg::JointState arm;
+    bool valid = false;
+    std::array<bool, 5> participants{};
+    switch (c.kind) {
+      case TaskCommand::NAVIGATE:
+        valid = validate_path_target(c.path) && validate_wheel_target(c.speed) &&
+          (update ? c.speed >= 0 : c.speed > 0);
+        participants[2] = true; break;
+      case TaskCommand::MANIPULATOR:
+        if (c.joints.name.size() == 5 && c.joints.position.size() == 5) {
+          arm.name.assign(c.joints.name.begin()+1, c.joints.name.end());
+          arm.position.assign(c.joints.position.begin()+1, c.joints.position.end());
+          valid = validate_arm_target(arm) && validate_lm_target(c.joints.name[0], c.joints.position[0]);
+        }
+        participants[0] = participants[1] = true; break;
+      case TaskCommand::GRIPPER: valid = validate_gripper_target(); participants[4] = true; break;
+      case TaskCommand::CLOCK: valid = validate_clock_target(c.clock_slot); participants[3] = true; break;
+      case TaskCommand::WAIT: valid = std::isfinite(c.duration_s) && c.duration_s >= 0; break;
+    }
+    if (update && valid) {
+      const auto &old = lateral_.target_path();
+      valid = !old.poses.empty() && c.path.header.frame_id == old.header.frame_id &&
+        std::hypot(c.path.poses.back().pose.position.x - old.poses.back().pose.position.x,
+                   c.path.poses.back().pose.position.y - old.poses.back().pose.position.y) < 1e-6;
+    }
+    if (!valid) {
+      if (update) {task_.fail("invalid path update"); task_hold_ = true;}
+      else reject(c, "invalid task target/calibration");
+      return;
+    }
+    if (!update) {
+      clear_planning_targets();
+      task_.begin(c, participants); last_task_id_ = c.task_id; task_at_ = at;
+      arm_stable_at_ = clock_stable_at_ = at;
+    } else task_.result.revision = c.revision;
+    switch (c.kind) {
+      case TaskCommand::NAVIGATE: set_path_target(c.path, c.require_goal_heading); set_wheel_target(c.speed); break;
+      case TaskCommand::MANIPULATOR: set_arm_target(arm); set_lm_target(c.joints.position[0]); break;
+      case TaskCommand::GRIPPER: set_gripper_target(c.close); break;
+      case TaskCommand::CLOCK: set_clock_target(c.clock_slot); break;
+      case TaskCommand::WAIT: wait_duration_ = c.duration_s; break;
+    }
   }
 
   void control_loop()
@@ -617,7 +715,34 @@ private:
     const int clock_reported_state = clock_wheel_feedback_fresh ? clock_state_ : 2;
     const bool hardware_fault = arm_reported_state == 2 ||
       wheel_reported_state == 2 || clock_reported_state == 2;
-    const bool held = planning_watchdog_.held(t) || hardware_fault || planning_hold_pending_;
+    const double now_s = steady_seconds();
+    if (arm_lm_feedback_updated) {
+      arm_received_at_ = now_s;
+      update_settle(arm_anchor_, {lm_angle_, arm_joints_[0], arm_joints_[1], arm_joints_[2],
+                                arm_joints_[3], gripper_angle_}, arm_stable_at_, now_s);
+    }
+    if (clock_wheel_feedback_updated) {
+      publish_wheel_odometry(now_s, serial_timeout_s_);
+      drive_received_at_ = now_s;
+      update_settle(clock_anchor_, {clock_angle_}, clock_stable_at_, now_s);
+    }
+    if (clock_wheel_feedback_updated &&
+        (std::abs(wheel_left_feedback_) > wheel_stop_tolerance_ ||
+         std::abs(wheel_right_feedback_) > wheel_stop_tolerance_)) clock_stable_at_ = now_s;
+    const bool odom_stale = task_.running() && task_.kind == TaskCommand::NAVIGATE &&
+      (!odom_at_ || now_s - *odom_at_ > odom_timeout_s_);
+    if (task_.running() && (hardware_fault || odom_stale || now_s - task_at_ > task_timeout_s_)) {
+      task_.fail(hardware_fault ? "serial feedback or board fault" : odom_stale ? "odometry timeout" : "task timeout");
+      task_hold_ = true;
+    }
+    while (!pending_tasks_.empty()) {
+      auto msg = std::move(pending_tasks_.front()); pending_tasks_.pop_front();
+      receive_task(msg, now_s, hardware_fault);
+    }
+    if (task_.running() && (planning_watchdog_.held(t) || planning_hold_pending_)) {
+      task_.stop(); task_hold_ = true;
+    }
+    const bool held = planning_watchdog_.held(t) || hardware_fault || planning_hold_pending_ || task_hold_;
     planning_hold_pending_ = false;
     if (held) {
       discard_pending_targets();
@@ -626,89 +751,14 @@ private:
         clear_planning_targets();
       }
     }
+    if (held && !planning_held_) {arm_stable_at_ = clock_stable_at_ = now_s;}
     planning_held_ = held;
+    arm_tx_ok_ = drive_tx_ok_ = false;
     publish_bool(planning_held_pub_, planning_held_);
 
-    // Planning callbacks keep only the newest message; validate and store targets here.
-    if (pending_manipulator_target_) {
-      const auto & msg = *pending_manipulator_target_;
-      // Existing planning JointState: LM [m], then four rotational joints [rad].
-      if (msg.name.size() == 1 + craft_control::kArmIkJoints &&
-        msg.name.size() == msg.position.size() && msg.name[0] == lm_linear_joint_name_)
-      {
-        sensor_msgs::msg::JointState arm_target;
-        arm_target.name.assign(msg.name.begin() + 1, msg.name.end());
-        arm_target.position.assign(msg.position.begin() + 1, msg.position.end());
-
-        // Validate arm target pose, then store it.
-        if (validate_arm_target(arm_target)) {
-          set_arm_target(arm_target);
-        } else if (arm_ik_mapping_confirmed_) {
-          clear_arm_target();
-        }
-
-        // Validate LM target pose, then store it independently.
-        if (validate_lm_target(msg.name[0], msg.position[0])) {
-          set_lm_target(msg.position[0]);
-        } else if (lm_mapping_confirmed_) {
-          clear_lm_target();
-        }
-      } else {
-        RCLCPP_WARN(get_logger(), "invalid manipulator JointState (expected LM then four arm joints): holding position");
-        if (arm_ik_mapping_confirmed_) {
-          clear_arm_target();
-        }
-        if (lm_mapping_confirmed_) {
-          clear_lm_target();
-        }
-      }
-      pending_manipulator_target_.reset();
-    }
-
-    // Validate gripper target, then store it. An unconfirmed mapping ignores gripper commands.
-    if (pending_gripper_target_) {
-      if (validate_gripper_target()) {
-        set_gripper_target(*pending_gripper_target_);
-      }
-      pending_gripper_target_.reset();
-    }
-
-    // Validate wheel target velocity, then store it. Invalid input stops the wheels.
-    if (pending_wheel_target_velocity_) {
-      if (validate_wheel_target(*pending_wheel_target_velocity_)) {
-        set_wheel_target(*pending_wheel_target_velocity_);
-      } else {
-        clear_wheel_target();
-      }
-      pending_wheel_target_velocity_.reset();
-    }
-
-    // Validate path and odometry, then store them. Invalid input stops path tracking.
-    if (pending_path_) {
-      if (validate_path_target(*pending_path_)) {
-        set_path_target(*pending_path_);
-      } else {
-        clear_path_target();
-      }
-      pending_path_.reset();
-    }
     if (pending_odom_) {
-      if (validate_odom(*pending_odom_)) {
-        lateral_.set_odom(*pending_odom_);
-      } else {
-        lateral_.clear_odom();
-      }
+      lateral_.set_odom(*pending_odom_);
       pending_odom_.reset();
-    }
-
-    // Validate clock slot, then store it once fresh feedback fixes the shortest turn.
-    if (clock_wheel_feedback_updated && pending_clock_slot_) {
-      if (validate_clock_target(*pending_clock_slot_)) {
-        set_clock_target(*pending_clock_slot_);
-      } else {
-        clear_clock_target();
-      }
-      pending_clock_slot_.reset();
     }
     if (have_arm_lm_feedback_) {
       if (arm_lm_feedback_updated && arm_lm_state_ != 2) {
@@ -727,10 +777,11 @@ private:
       const bool command_sent = arm_feedback_fresh && arm_lm_serial_->write_values({
           lm_motor_command, arm_motor_commands[0], arm_motor_commands[1],
           arm_motor_commands[2], arm_motor_commands[3], gripper_motor_command});
+      arm_tx_ok_ = command_sent;
       if (arm_feedback_fresh && !command_sent) {
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "arm+LM OpenCR write failed");
       } else if (command_sent && arm_lm_feedback_updated) {
-        // Fresh feedback against the targets just sent; planning sequences the axes.
+        // Diagnostic feedback; task completion is aggregated by ControlMaster below.
         publish_bool(arm_target_reached_pub_,
           arm_lm_state_ != 2 && arm_controller_.is_target_reached(arm_joints_));
         publish_bool(lm_target_reached_pub_,
@@ -759,7 +810,7 @@ private:
       // DYNAMIXEL Profile Acceleration and owns velocity PID/feedforward and motor-level tracking.
       const auto v = longitudinal_.compute_command();
       const double linear_speed = wheel_radius_ * (v[0] + v[1]) / 2.0;
-      const auto w = lateral_.compute_command(linear_speed);
+      const auto w = lateral_.compute_command(linear_speed, wheel_target_v_);
       const double wl = v[0] + w[0];  // [rad/s]
       const double wr = v[1] + w[1];
       // over wheel limit: scale both by the same ratio to keep curvature
@@ -767,10 +818,11 @@ private:
       const double clock_motor_command = clock_controller_.compute_command(clock_angle_);
       const bool command_sent = clock_wheel_feedback_fresh &&
         clock_wheel_serial_->write_values({wl / k, wr / k, clock_motor_command});
+      drive_tx_ok_ = command_sent;
       if (clock_wheel_feedback_fresh && !command_sent) {
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "clock+wheel OpenCR write failed");
       }
-      if (command_sent && !planning_held_ && !pending_clock_slot_) {
+      if (command_sent && !planning_held_) {
         clock_target_sent_ = true;
       }
       const bool board_faulted = wheel_reported_state == 2 || clock_reported_state == 2;
@@ -790,7 +842,7 @@ private:
           clock_controller_.get_current_slot(clock_angle_) : 0;
         clock_slot_pub_->publish(slot_msg);
         std_msgs::msg::Bool reached_msg;
-        reached_msg.data = clock_target_sent_ && !pending_clock_slot_ && command_sent &&
+        reached_msg.data = clock_target_sent_ && command_sent &&
           clock_state_ == 0 && clock_controller_.is_target_reached(clock_angle_);
         clock_target_reached_pub_->publish(reached_msg);
       }
@@ -802,18 +854,60 @@ private:
         clock_slot_pub_->publish(slot_msg);
       }
     }
+    const bool arm_settled = arm_feedback_fresh && arm_tx_ok_ && arm_lm_state_ == 0 &&
+      arm_received_at_ - arm_stable_at_ >= settle_s_;
+    const bool drive_settled = clock_wheel_feedback_fresh && drive_tx_ok_ &&
+      wheel_state_ == 0 && clock_state_ == 0 && drive_received_at_ - clock_stable_at_ >= settle_s_ &&
+      std::abs(wheel_left_feedback_) <= wheel_stop_tolerance_ &&
+      std::abs(wheel_right_feedback_) <= wheel_stop_tolerance_;
+    const bool stopped = arm_settled && drive_settled;
+    if (task_.running()) {
+      if ((!arm_tx_ok_ && arm_feedback_fresh) || (!drive_tx_ok_ && clock_wheel_feedback_fresh)) {
+        task_.fail("serial command write failed"); task_hold_ = true;
+      } else if (now_s - task_at_ >= settle_s_) {
+        task_.observe({arm_settled && arm_controller_.is_target_reached(arm_joints_),
+                       arm_settled && lm_controller_.is_target_reached(lm_angle_),
+                       drive_settled && lateral_.is_target_reached(),
+                       drive_settled && clock_target_sent_ && clock_controller_.is_target_reached(clock_angle_),
+                       arm_settled && gripper_controller_.is_target_reached(gripper_angle_)},
+                      task_.kind != TaskCommand::WAIT || now_s - task_at_ >= wait_duration_);
+      }
+    }
+    if (task_.stopping() && stopped && planning_held_) task_.stopped();
+    // A released hold never restores targets. A fresh EXECUTE is required.
+    if (stopped && !task_.running() && !task_.stopping()) task_hold_ = false;
+    if (task_.result.task_id) {
+      task_.result.header.stamp = now();
+      task_result_pub_->publish(task_.result);
+    }
+    ControlStatus status;
+    status.header.stamp = now(); status.held = planning_held_; status.stopped = stopped;
+    status.fault = hardware_fault || (arm_feedback_fresh && !arm_tx_ok_) ||
+      (clock_wheel_feedback_fresh && !drive_tx_ok_);
+    status.ready = !status.fault && arm_ik_mapping_confirmed_ && lm_mapping_confirmed_ &&
+      gripper_mapping_confirmed_;
+    status.reason = status.fault ? "board/serial fault" : status.ready ? "" : "unconfirmed calibration";
+    control_status_pub_->publish(status);
   }
 
+  craft_control::TaskTracker task_;
+  uint64_t last_task_id_ = 0;
+  double task_at_ = 0, wait_duration_ = 0, settle_s_ = 0, stop_tolerance_ = 0;
+  double wheel_stop_tolerance_ = 0, task_timeout_s_ = 0, odom_timeout_s_ = 0;
+  double arm_stable_at_ = 0, clock_stable_at_ = 0, arm_received_at_ = 0, drive_received_at_ = 0;
+  bool task_hold_ = false, arm_tx_ok_ = false, drive_tx_ok_ = false;
+  std::vector<double> arm_anchor_, clock_anchor_;
+  std::optional<double> odom_at_;
+  std::deque<TaskCommand> pending_tasks_;
+  rclcpp::Subscription<TaskCommand>::SharedPtr task_sub_;
+  rclcpp::Publisher<TaskResult>::SharedPtr task_result_pub_;
+  rclcpp::Publisher<ControlStatus>::SharedPtr control_status_pub_;
   craft_control::LongitudinalController longitudinal_;
   craft_control::LateralController lateral_;
   double max_wheel_ = 0.0;
   double wheel_radius_ = 0.0;
   double wheel_target_v_ = 0.0;
   std::vector<geometry_msgs::msg::PoseStamped> last_path_poses_;
-  std::optional<sensor_msgs::msg::JointState> pending_manipulator_target_;
-  std::optional<double> pending_wheel_target_velocity_;
-  std::optional<bool> pending_gripper_target_;
-  std::optional<nav_msgs::msg::Path> pending_path_;
   std::optional<nav_msgs::msg::Odometry> pending_odom_;
   std::optional<craft_control::PlanningWatchdog::Clock::time_point> last_t_;
   craft_control::PlanningWatchdog planning_watchdog_;
@@ -838,13 +932,18 @@ private:
   double gripper_current_a_ = 0.0;
   int arm_lm_state_ = 0;
   bool have_arm_lm_feedback_ = false;
+  craft_control::WheelOdometry wheel_odometry_;
+  std::optional<double> wheel_odom_at_;
+  std::string odom_frame_, base_frame_;
+  double serial_timeout_s_ = 0.5;
+  rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr wheel_odom_pub_;
+  std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
   double wheel_left_feedback_ = 0.0;
   double wheel_right_feedback_ = 0.0;
   double clock_angle_ = 0.0;
   int wheel_state_ = 0;
   int clock_state_ = 0;
   bool have_clock_wheel_feedback_ = false;
-  std::optional<int> pending_clock_slot_;
   int clock_slot_count_ = 0;
   bool clock_target_sent_ = false;
 
@@ -862,12 +961,7 @@ private:
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr planning_held_pub_;
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr arm_joint_feedback_pub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr planning_hold_sub_;
-  rclcpp::Subscription<nav_msgs::msg::Path>::SharedPtr target_path_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
-  rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr arm_target_sub_;
-  rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr wheel_target_sub_;
-  rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr clock_target_sub_;
-  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr gripper_target_sub_;
   rclcpp::TimerBase::SharedPtr timer_;
 };
 

@@ -100,14 +100,15 @@ private:
   LidarPerception lidar_;
   lidar_processing::MergerConfig lidar_config_;
   std::string lidar_input_mode_;
-  std::shared_ptr<tf2_ros::Buffer> lidar_tf_buffer_;
-  std::shared_ptr<tf2_ros::TransformListener> lidar_tf_listener_;
+  std::shared_ptr<tf2_ros::Buffer> tf_buffer_;  // LiDAR mounts and map->odom
+  std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
   StateEstimator state_estimator_;
   std::map<std::string, ModuleSchedule> schedules_;
-  std::vector<std::string> d435_labels_, c310_labels_, puck_labels_;
+  std::vector<std::string> d435_labels_, c310_labels_;
   int executor_threads_ = 0;
   double max_age_ = 0;
   std::string odometry_topic_;
+  std::string map_frame_;
 
   // One mutex per input, held only to swap pointers; computation runs unlocked.
   // Lock order: cameras_[i].mutex before info_mutex_ (latest_frame); no other nesting.

@@ -1,4 +1,6 @@
 Detection detection
+int32 puck_id
+bool tag_valid
 # false: puck box found but no shelf plane / too few puck points in depth.
 bool axis_valid
 # Camera optical frame [m]. axis is a unit vector; lying pucks point toward image right

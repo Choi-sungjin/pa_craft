@@ -11,6 +11,7 @@
 #include "craft_control/lm_controller.hpp"
 #include "craft_control/longitudinal_controller.hpp"
 #include "craft_control/planning_watchdog.hpp"
+#include "craft_control/wheel_odometry.hpp"
 
 namespace
 {
@@ -516,6 +517,44 @@ TEST(WheelControl, GoalReachedNeedsSameFramePathEndpointWithinTolerance)
   EXPECT_FALSE(controller.is_target_reached());
 }
 
+TEST(WheelControl, RequiredHeadingGatesArrivalAndWrapsAcrossPi)
+{
+  auto controller = lateral();
+  auto target = path({{0.0, 0.0}, {1.0, 0.0}, {1.0, 0.0}});
+  target.poses.back().pose.orientation = odom(0, 0, kPi - 0.1).pose.pose.orientation;
+  controller.set_target(target, true);
+  controller.set_odom(odom(1.0, 0.0, 0.0));
+  EXPECT_FALSE(controller.is_target_reached());
+  controller.set_odom(odom(1.0, 0.0, -kPi + 0.1));
+  EXPECT_TRUE(controller.is_target_reached());
+  controller.set_target(target, false);
+  controller.set_odom(odom(1.0, 0.0, 0.0));
+  EXPECT_TRUE(controller.is_target_reached());
+}
+
+TEST(WheelControl, TurnsInPlaceBeforeTrackingAndForFinalHeading)
+{
+  auto controller = lateral();
+  controller.set_target(path({{0.0, 0.0}, {0.0, 1.0}}));
+  EXPECT_FALSE(controller.can_track(0.2));
+  const auto turn = controller.compute_command(0.0, 0.2);
+  EXPECT_LT(turn[0], 0.0);
+  EXPECT_GT(turn[1], 0.0);
+  const auto paused = controller.compute_command(0.0, 0.0);
+  EXPECT_DOUBLE_EQ(paused[0], 0.0);
+  EXPECT_DOUBLE_EQ(paused[1], 0.0);
+  controller.set_odom(odom(0.0, 0.0, kPi / 2.0));
+  EXPECT_TRUE(controller.can_track(0.2));
+
+  auto target = path({{0.0, 0.0}, {1.0, 0.0}});
+  target.poses.back().pose.orientation = odom(0, 0, kPi / 2.0).pose.pose.orientation;
+  controller.set_target(target, true);
+  controller.set_odom(odom(1.0, 0.0, 0.0));
+  const auto final_turn = controller.compute_command(0.0, 0.2);
+  EXPECT_LT(final_turn[0], 0.0);
+  EXPECT_GT(final_turn[1], 0.0);
+}
+
 TEST(WheelControl, MissingPathMismatchedFramesAndGoalArrivalDisableTracking)
 {
   auto controller = lateral();
@@ -544,45 +583,20 @@ TEST(WheelControl, ClearingPathOrOdometryStopsTracking)
   EXPECT_TRUE(controller.can_track(0.2));
 }
 
-TEST(WheelControl, ResamplesPathAlongCubicSplineAtFixedSpacing)
+TEST(WheelControl, PreservesPlannerSegmentsWithoutSplineOvershoot)
 {
   auto controller = lateral();
-  // Uneven input spacing on a straight line: output is evenly spaced and stays on the line.
-  controller.set_target(path({{0, 0}, {0.05, 0}, {0.9, 0}, {1.0, 0}}));
-  const auto & straight = controller.target_path();
-  ASSERT_EQ(straight.poses.size(), 51u);
-  EXPECT_EQ(straight.header.frame_id, "odom");
-  for (std::size_t i = 0; i < straight.poses.size(); ++i) {
-    EXPECT_NEAR(straight.poses[i].pose.position.x, 0.02 * static_cast<double>(i), 1e-9);
-    EXPECT_NEAR(straight.poses[i].pose.position.y, 0.0, 1e-9);
+  controller.set_target(path({{0,0},{1,0},{1,1}}));
+  const auto &p = controller.target_path();
+  ASSERT_FALSE(p.poses.empty());
+  for (const auto &pose : p.poses) {
+    const auto &v = pose.pose.position;
+    EXPECT_TRUE(std::abs(v.y) < 1e-9 || std::abs(v.x-1) < 1e-9);
   }
-
-  // Curved input: spline passes through every input point and keeps the exact endpoints.
-  controller.set_target(path({{0, 0}, {1, 0.5}, {2, 0}, {2, 0}, {3, -0.5}}));
-  const auto & curve = controller.target_path();
-  EXPECT_DOUBLE_EQ(curve.poses.front().pose.position.x, 0.0);
-  EXPECT_DOUBLE_EQ(curve.poses.back().pose.position.x, 3.0);
-  EXPECT_DOUBLE_EQ(curve.poses.back().pose.position.y, -0.5);
-  // Equal arc-length spacing (chord ~= arc at 2 cm); only the final gap may be shorter.
-  for (std::size_t i = 1; i + 1 < curve.poses.size(); ++i) {
-    const auto & a = curve.poses[i - 1].pose.position;
-    const auto & b = curve.poses[i].pose.position;
-    EXPECT_NEAR(std::hypot(b.x - a.x, b.y - a.y), 0.02, 1e-4);
-  }
-  for (const auto & point : {std::pair{1.0, 0.5}, std::pair{2.0, 0.0}}) {
-    double nearest = std::numeric_limits<double>::infinity();
-    for (const auto & pose : curve.poses) {
-      nearest = std::min(nearest, std::hypot(
-        pose.pose.position.x - point.first, pose.pose.position.y - point.second));
-    }
-    EXPECT_LT(nearest, 0.02);
-  }
-
-  // A single distinct point is kept as is; clearing empties the tracked path.
-  controller.set_target(path({{1, 0}, {1, 0}}));
-  ASSERT_EQ(controller.target_path().poses.size(), 1u);
-  controller.clear_target();
-  EXPECT_TRUE(controller.target_path().poses.empty());
+  EXPECT_DOUBLE_EQ(p.poses.back().pose.position.x,1);
+  EXPECT_DOUBLE_EQ(p.poses.back().pose.position.y,1);
+  controller.set_target(path({{1,0},{1,0}}));
+  EXPECT_EQ(controller.target_path().poses.size(),1u);
 }
 
 TEST(WheelControl, ValidatesVelocityPathAndOdometry)
@@ -613,4 +627,44 @@ TEST(WheelControl, ValidatesVelocityPathAndOdometry)
   invalid_odom = odom();
   invalid_odom.header.frame_id.clear();
   EXPECT_FALSE(controller.is_valid_odom(invalid_odom));
+}
+
+#include "craft_control/task_tracker.hpp"
+TEST(TaskTracker, AggregatesOnlyParticipantsAndPreservesIdentity) {
+  craft_control::TaskTracker t;
+  craft_interfaces::msg::TaskCommand c; c.task_id = 102; c.revision = 1;
+  t.begin(c,{true,true,false,false,false});
+  t.observe({true,false,false,false,false}); EXPECT_TRUE(t.running());
+  t.observe({true,true,false,false,false});
+  EXPECT_EQ(t.result.status,craft_interfaces::msg::TaskResult::SUCCEEDED);
+  EXPECT_EQ(t.result.task_id,102u);
+  t.stop(); EXPECT_TRUE(t.stopping()); t.stopped();
+  EXPECT_EQ(t.result.status,craft_interfaces::msg::TaskResult::STOPPED);
+  EXPECT_EQ(t.result.controllers[2],craft_interfaces::msg::TaskResult::UNUSED);
+}
+TEST(TaskTracker, FailureDoesNotBecomeSuccess) {
+  craft_control::TaskTracker t; craft_interfaces::msg::TaskCommand c; c.task_id = 1;
+  t.begin(c,{true,true,false,false,false}); t.fail("serial timeout");
+  t.observe({true,true,true,true,true}); t.stopped();
+  EXPECT_EQ(t.result.status,craft_interfaces::msg::TaskResult::FAILED);
+}
+
+TEST(WheelOdometry, IntegratesStraightAndTurn)
+{
+  craft_control::WheelOdometry odom;
+  odom.configure(kRadius, kSeparation);
+  odom.update(1.0, 1.0, 1.0);  // straight: v = r
+  EXPECT_NEAR(odom.x(), kRadius, 1e-9);
+  EXPECT_NEAR(odom.y(), 0.0, 1e-9);
+  EXPECT_NEAR(odom.linear(), kRadius, 1e-9);
+  const double turn = kPi / 2.0 * kSeparation / (2.0 * kRadius);
+  odom.update(-turn, turn, 1.0);  // in place, wr > wl turns left by pi/2
+  EXPECT_NEAR(odom.yaw(), kPi / 2.0, 1e-9);
+  EXPECT_NEAR(odom.x(), kRadius, 1e-9);
+  odom.update(1.0, 1.0, 1.0);
+  EXPECT_NEAR(odom.x(), kRadius, 1e-9);
+  EXPECT_NEAR(odom.y(), kRadius, 1e-9);
+  odom.update(1.0, 1.0, 0.0);  // ignored
+  odom.update(std::nan(""), 1.0, 1.0);
+  EXPECT_NEAR(odom.y(), kRadius, 1e-9);
 }

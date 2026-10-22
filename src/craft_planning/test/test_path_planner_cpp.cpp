@@ -159,6 +159,7 @@ TEST_F(NativePathPlanner, RoutesAroundInflatedWallAndRejectsBlockedRoute)
   planner.configure(config);
   route = planner.plan(odom(0.35, 0.35), pose(1.65, 0.35));
   EXPECT_FALSE(route.ok);
+  EXPECT_TRUE(route.retryable);
   EXPECT_TRUE(route.path.poses.empty());
   EXPECT_FALSE(route.error.empty());
 }
@@ -170,9 +171,9 @@ TEST_F(NativePathPlanner, FootprintAndMapBoundaryBlockUnsafeEndpoints)
   config.margin = 0.03;
   PathPlanner planner;
   planner.configure(config);
-  EXPECT_FALSE(planner.plan(odom(0.2, 0.5), pose(1.5, 1.5)).ok);
-  EXPECT_FALSE(planner.plan(odom(-0.1, 0.5), pose(1.5, 1.5)).ok);
-  EXPECT_FALSE(planner.plan(odom(0.5, 0.5), pose(1.95, 1.5)).ok);
+  EXPECT_TRUE(planner.plan(odom(0.2, 0.5), pose(1.5, 1.5)).retryable);
+  EXPECT_FALSE(planner.plan(odom(-0.1, 0.5), pose(1.5, 1.5)).retryable);
+  EXPECT_TRUE(planner.plan(odom(0.5, 0.5), pose(1.95, 1.5)).retryable);
 }
 
 TEST_F(NativePathPlanner, FrameAndFiniteValidationNeverReturnsOldRoute)
