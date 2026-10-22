@@ -2,6 +2,8 @@
 /build/
 /install/
 log/
+src/craft_planning/v75_ws/build/
+src/craft_planning/v75_ws/install/
 
 # Local Python environments and generated files
 /venv-craft/
