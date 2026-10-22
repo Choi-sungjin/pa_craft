@@ -17,3 +17,10 @@ __pycache__/
 # Local environment settings
 .env
 .env.*
+
+# Local-only: large model workspace, editor, Claude outputs, nested build outputs
+/custom_yolo26/
+/.vscode/
+/Claude outputs/
+/src/craft_planning/v75_ws/build/
+/src/craft_planning/v75_ws/install/
