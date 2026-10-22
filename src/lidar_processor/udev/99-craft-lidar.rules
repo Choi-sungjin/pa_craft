@@ -1,0 +1,12 @@
+# /etc/udev/rules.d/99-craft-lidar.rules
+# LDS 두 개는 VID/PID 가 같고 시리얼 번호도 구분이 안 될 수 있으므로 "꽂힌 USB 구멍(KERNELS)"으로 구분
+# KERNELS 값은 scripts/find_lidar_ports.sh 로 확인. Pi 나 USB 허브를 바꾸면 다시 확인할 것. (LiDAR 를 항상 같은 구멍에 꽂을 것)
+#
+# 적용:
+#   sudo cp 99-craft-lidar.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+#   ls -l /dev/lidar_*
+
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", KERNELS=="1-1.2.1", SYMLINK+="lidar_front", MODE="0666"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", KERNELS=="1-1.2.3", SYMLINK+="lidar_rear",  MODE="0666"
+# PA18 Pi 실측(2026-10-16): 1-1.2.1=front, 1-1.2.3=rear, LDS-03 은 CP2102(10c4:ea60)

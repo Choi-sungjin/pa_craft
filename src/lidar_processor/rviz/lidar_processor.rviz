@@ -1,0 +1,71 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Reference Frame: <Fixed Frame>
+      Cell Size: 1
+      Plane Cell Count: 20
+      Color: 160; 160; 164
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: false
+      Show Names: true
+      Marker Scale: 0.3
+    - Class: rviz_default_plugins/LaserScan
+      Name: Front raw
+      Enabled: false
+      Topic:
+        Value: /lidar/front/scan
+        Reliability Policy: Best Effort
+      Size (m): 0.02
+      Style: Flat Squares
+      Color Transformer: FlatColor
+      Color: 255; 170; 170
+    - Class: rviz_default_plugins/LaserScan
+      Name: Rear raw
+      Enabled: false
+      Topic:
+        Value: /lidar/rear/scan
+        Reliability Policy: Best Effort
+      Size (m): 0.02
+      Style: Flat Squares
+      Color Transformer: FlatColor
+      Color: 170; 190; 255
+    - Class: rviz_default_plugins/LaserScan
+      Name: Merged
+      Enabled: true
+      Topic:
+        Value: /lidar/merged
+        Reliability Policy: Best Effort
+      Size (m): 0.03
+      Style: Flat Squares
+      Color Transformer: FlatColor
+      Color: 40; 180; 60
+  Global Options:
+    Fixed Frame: base_link
+    Background Color: 48; 48; 48
+    Frame Rate: 30
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/PublishPoint
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Name: Current View
+      Scale: 80
+      X: 0
+      Y: 0
+      Target Frame: <Fixed Frame>
+    Saved: ~
+Window Geometry:
+  Width: 1400
+  Height: 900
