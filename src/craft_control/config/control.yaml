@@ -6,7 +6,7 @@
 control_master:
   ros__parameters:
     # TODO: update port names
-    arm_port: /dev/ttyACM0    # LM + four rotational arm motors + gripper OpenCR
+    arm_lm_port: /dev/ttyACM0    # LM + four rotational arm motors + gripper OpenCR
     clock_wheel_port: /dev/ttyACM1  # clock + wheel x2 OpenCR
 
     # TurtleBot3 Waffle Pi drive parameters.
@@ -21,6 +21,9 @@ control_master:
     # Pure Pursuit tuning: path and odometry must use the same frame, at the axle center.
     lookahead_distance: 0.3  # [m] starting value; tune on the robot
     wheel_goal_tolerance: 0.03  # [m] stop when the path endpoint is within this distance
+    # Incoming paths are resampled every path_spacing along a natural cubic spline through
+    # their points and republished on /control/tracking_path. Keep it well below lookahead.
+    path_spacing: 0.02  # [m]
 
     # 12-slot puck storage: 0 motor rad = slot 12; positive CCW increases slot numbers.
     # Adjacent slots are 30 motor degrees (pi/6 rad); shortest rotation is chosen.
@@ -32,7 +35,7 @@ control_master:
     clock_angle_tolerance: 0.03490658503988659  # [rad] 2 degrees; tune alignment tolerance
 
     # Rotational arm motors only: shoulder, elbow, wrist_pitch, tool_roll [motor rad].
-    # TODO: update the firmware receiver and replace these placeholder limits with measured limits.
+    # TODO: replace these placeholder limits with measured limits in both host and firmware config.
     arm_min_angle: [-3.14, -1.57, -1.57, -1.57]
     arm_max_angle: [3.14, 1.57, 1.57, 1.57]
 
@@ -42,7 +45,7 @@ control_master:
     # TODO: calibrate direction and zero offset in IK output order against the URDF's q=0 pose.
     arm_joint_directions: [1.0, 1.0, 1.0, 1.0]
     arm_joint_offsets: [0.0, 0.0, 0.0, 0.0]
-    arm_angle_tolerance: 0.03490658503988659  # [motor rad] 2 degrees per joint; tune on hardware
+    arm_angle_tolerance: 0.03490658503988659  # [motor rad] 2 degrees per joint, same as every motor
 
     # Independent LM controller: target displacement [m] -> motor angle [rad].
     lm_linear_joint_name: slide_joint
@@ -54,7 +57,7 @@ control_master:
     # TODO: measure pulley radius [m] and motor-radians per pulley-radian ratio.
     lm_pulley_radius: 0.0
     lm_gear_ratio: 0.0
-    lm_angle_tolerance: 0.03490658503988659  # [motor rad] TODO: set from required linear accuracy
+    lm_angle_tolerance: 0.03490658503988659  # [motor rad] 2 degrees, same as every motor
 
     # Gripper uses a separate Bool command: true=close/grasp, false=open/release.
     # Gripper follows the five IK joints as the final OpenCR channel.
@@ -64,8 +67,8 @@ control_master:
     gripper_open_angle: 0.0
     gripper_close_angle: 0.0
     gripper_mapping_confirmed: false
-    gripper_angle_tolerance: 0.05  # [motor rad] open/close arrival; tune on hardware
-    # TODO: append gripper_current_a [A] to arm OpenCR feedback and calibrate these thresholds.
+    gripper_angle_tolerance: 0.03490658503988659  # [motor rad] 2 degrees, same as every motor
+    # Firmware appends gripper_current_a [A]; calibrate its model-specific scale and these thresholds.
     # All-zero values disable current-based grasp estimation.
     grasp_current_threshold_a: 0.0
     grasp_current_debounce: 0.0

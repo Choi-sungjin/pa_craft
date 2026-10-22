@@ -1,20 +1,72 @@
 #include "craft_control/lateral_controller.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
+#include <vector>
 
 namespace craft_control
 {
 
-// ControlMaster가 YAML에서 읽은 바퀴 반지름, 좌우 바퀴 중심 간 거리, lookahead, 도착 허용 거리를 저장한다.
-// 모두 ControlMaster가 유한한 양수로 검증하며 거리 단위는 m이다.
+namespace
+{
+
+// 누적 현 길이 s에 대한 natural cubic spline의 각 점 2차 미분값 M을 구한다 (양 끝 M = 0).
+// 삼중대각 연립방정식을 Thomas 알고리즘으로 푼다. s는 엄격히 증가해야 한다.
+std::vector<double> natural_spline_second_derivatives(
+  const std::vector<double> & s, const std::vector<double> & v)
+{
+  const std::size_t n = s.size();
+  std::vector<double> m(n, 0.0);
+  if (n < 3) {
+    return m;
+  }
+  std::vector<double> c(n, 0.0);
+  std::vector<double> d(n, 0.0);
+  for (std::size_t i = 1; i + 1 < n; ++i) {
+    const double h0 = s[i] - s[i - 1];
+    const double h1 = s[i + 1] - s[i];
+    const double a = h0;
+    const double b = 2.0 * (h0 + h1);
+    const double rhs = 6.0 * ((v[i + 1] - v[i]) / h1 - (v[i] - v[i - 1]) / h0);
+    const double denom = b - a * c[i - 1];
+    c[i] = h1 / denom;
+    d[i] = (rhs - a * d[i - 1]) / denom;
+  }
+  for (std::size_t i = n - 2; i >= 1; --i) {
+    m[i] = d[i] - c[i] * m[i + 1];
+  }
+  return m;
+}
+
+// 구간 [s[i], s[i+1]]에서 spline 값과 1차 미분을 계산한다.
+std::pair<double, double> eval_spline(
+  const std::vector<double> & s, const std::vector<double> & v, const std::vector<double> & m,
+  std::size_t i, double t)
+{
+  const double h = s[i + 1] - s[i];
+  const double a = (s[i + 1] - t) / h;
+  const double b = (t - s[i]) / h;
+  const double value = a * v[i] + b * v[i + 1] +
+    ((a * a * a - a) * m[i] + (b * b * b - b) * m[i + 1]) * h * h / 6.0;
+  const double slope = (v[i + 1] - v[i]) / h +
+    ((1.0 - 3.0 * a * a) * m[i] + (3.0 * b * b - 1.0) * m[i + 1]) * h / 6.0;
+  return {value, slope};
+}
+
+}  // namespace
+
+// ControlMaster가 YAML에서 읽은 바퀴 반지름, 좌우 바퀴 중심 간 거리, lookahead, 도착 허용 거리,
+// 경로 재샘플 간격을 저장한다. 모두 ControlMaster가 유한한 양수로 검증하며 거리 단위는 m이다.
 void LateralController::configure(
-  double wheel_radius, double wheel_separation, double lookahead, double goal_tolerance)
+  double wheel_radius, double wheel_separation, double lookahead, double goal_tolerance,
+  double path_spacing)
 {
   wheel_radius_ = wheel_radius;
   wheel_separation_ = wheel_separation;
   lookahead_ = lookahead;
   goal_tolerance_ = goal_tolerance;
+  path_spacing_ = path_spacing;
 }
 
 // odom: frame_id가 있고 위치가 유한하며 quaternion 크기가 0이 아니어야 한다.
@@ -62,16 +114,101 @@ void LateralController::clear_odom()
   have_odom_ = false;
 }
 
-// 검증된 planning 경로점(x, y)과 frame_id를 저장한다.
-// 경로점의 자세나 trajectory 기준 곡률은 사용하지 않고, 현재 odom과 경로점으로 추종 곡률을 계산한다.
+// 검증된 planning 경로점(x, y)을 지나는 natural cubic spline을 누적 현 길이로 매개화한 뒤,
+// spline의 실제 호 길이 기준 path_spacing 간격으로 재샘플해 저장한다 (마지막 간격만 더 짧을 수 있다).
+// 호 길이는 각 구간을 path_spacing/10 이하로 잘게 나눈 표에서 선형 보간으로 구한다.
+// 첫 점과 마지막 점은 원래 경로점을 그대로 유지한다.
+// 연속으로 겹친 점은 하나로 합치고, 서로 다른 점이 하나뿐이면 그 점만 저장한다.
+// 재샘플한 점의 자세는 spline 접선 방향 yaw이며 시각화용이다 (추종 곡률 계산에는 쓰지 않는다).
 void LateralController::set_target(const nav_msgs::msg::Path & path)
 {
-  path_ = path;
+  std::vector<double> s;
+  std::vector<double> xs;
+  std::vector<double> ys;
+  for (const auto & pose : path.poses) {
+    const double x = pose.pose.position.x;
+    const double y = pose.pose.position.y;
+    if (!xs.empty()) {
+      const double ds = std::hypot(x - xs.back(), y - ys.back());
+      if (ds <= 1e-9) {
+        continue;
+      }
+      s.push_back(s.back() + ds);
+    } else {
+      s.push_back(0.0);
+    }
+    xs.push_back(x);
+    ys.push_back(y);
+  }
+
+  path_ = nav_msgs::msg::Path{};
+  path_.header = path.header;
+  if (xs.size() < 2) {
+    path_.poses.push_back(path.poses.front());
+    path_.poses.back().header = path.header;
+    return;
+  }
+
+  const auto mx = natural_spline_second_derivatives(s, xs);
+  const auto my = natural_spline_second_derivatives(s, ys);
+
+  // (spline 매개변수, 누적 호 길이) 표.
+  std::vector<double> table_t = {0.0};
+  std::vector<double> table_arc = {0.0};
+  double prev_x = xs.front();
+  double prev_y = ys.front();
+  for (std::size_t i = 0; i + 1 < s.size(); ++i) {
+    const double h = s[i + 1] - s[i];
+    const auto steps = static_cast<std::size_t>(std::ceil(h / (path_spacing_ / 10.0)));
+    for (std::size_t j = 1; j <= steps; ++j) {
+      const double t = s[i] + h * static_cast<double>(j) / static_cast<double>(steps);
+      const double x = eval_spline(s, xs, mx, i, t).first;
+      const double y = eval_spline(s, ys, my, i, t).first;
+      table_t.push_back(t);
+      table_arc.push_back(table_arc.back() + std::hypot(x - prev_x, y - prev_y));
+      prev_x = x;
+      prev_y = y;
+    }
+  }
+
+  const double length = table_arc.back();
+  const auto count = static_cast<std::size_t>(std::ceil(length / path_spacing_ - 1e-9));
+  std::size_t row = 0;
+  std::size_t segment = 0;
+  for (std::size_t k = 0; k <= count; ++k) {
+    const bool last = k == count;
+    const double arc = last ? length : static_cast<double>(k) * path_spacing_;
+    while (row + 2 < table_arc.size() && arc > table_arc[row + 1]) {
+      ++row;
+    }
+    const double span = table_arc[row + 1] - table_arc[row];
+    const double ratio = span > 0.0 ? (arc - table_arc[row]) / span : 0.0;
+    const double t = last ? s.back() :
+      table_t[row] + std::clamp(ratio, 0.0, 1.0) * (table_t[row + 1] - table_t[row]);
+    while (segment + 2 < s.size() && t > s[segment + 1]) {
+      ++segment;
+    }
+    const auto [x, dx] = eval_spline(s, xs, mx, segment, t);
+    const auto [y, dy] = eval_spline(s, ys, my, segment, t);
+    const double yaw = std::atan2(dy, dx);
+    geometry_msgs::msg::PoseStamped pose;
+    pose.header = path.header;
+    pose.pose.position.x = last ? xs.back() : x;
+    pose.pose.position.y = last ? ys.back() : y;
+    pose.pose.orientation.z = std::sin(yaw / 2.0);
+    pose.pose.orientation.w = std::cos(yaw / 2.0);
+    path_.poses.push_back(pose);
+  }
 }
 
 void LateralController::clear_target()
 {
   path_ = nav_msgs::msg::Path{};
+}
+
+const nav_msgs::msg::Path & LateralController::target_path() const
+{
+  return path_;
 }
 
 // 경로가 있고 odom과 좌표계가 같으며, 경로 종점이 도착 허용 거리 이내면 완료.

@@ -1,0 +1,11 @@
+{
+  "source_weights": "custom_yolo26/weights/puck_blue/perception_test/yolo/runs/target_blue_v3/weights/best.pt",
+  "source_sha256": "0a59b89a1e58664ea45ddf44023bf44c1c07fc7864705b86a213f9d4c74747fb",
+  "source_export": "target_blue_v3/weights/best_ncnn_model (copied as-is, same export puck_axis_live.py used)",
+  "ultralytics": "8.4.170",
+  "input": [1, 3, 640, 640],
+  "input_blob": "in0",
+  "output_blob": "out0",
+  "class_names": ["target_blue"],
+  "output_contract": "decoded cxcywh + probabilities; class-aware NMS"
+}

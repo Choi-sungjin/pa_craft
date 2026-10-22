@@ -11,6 +11,7 @@
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>craft_sensors</exec_depend>
+  <exec_depend>lidar_processor</exec_depend>
   <exec_depend>craft_perception</exec_depend>
   <exec_depend>craft_mission</exec_depend>
   <exec_depend>craft_planning</exec_depend>

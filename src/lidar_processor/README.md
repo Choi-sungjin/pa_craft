@@ -199,4 +199,20 @@ python3 scripts/check_dir.py
 
 ## 팀 노드와의 관계
 
-팀 패키지 `craft_sensors` 의 `lidar_processor` 와 이름·토픽이 같습니다. 둘 중 하나만 실행해야 합니다.
+`ScanMerger`는 ROS 노드 입출력과 분리된 C++ 라이브러리입니다.
+standalone `lidar_processor` 노드와 `craft_perception::LidarPerception`이 같은 라이브러리를 사용합니다.
+
+`craft_bringup`의 기본 실행에서는 이 패키지의 **드라이버·static TF만** 실행하고,
+`perception_master`가 `LidarPerception`을 직접 호출해 병합과 장애물 계산을 수행합니다.
+master가 `/lidar/merged`(SLAM/RViz 입력)와 `/perception/lidar/obstacle`을 발행합니다.
+FOV·몸체 필터 등 이 모드의 처리 설정은 `craft_perception/config/perception.yaml`의 `lidar` 항목입니다.
+
+Pi에서 드라이버·TF만 실행하려면:
+
+```bash
+ros2 launch lidar_processor lidar_processor.launch.py start_processor:=false
+# PC: ros2 launch craft_bringup craft.launch.py start_lidar:=false
+```
+
+이 문서의 기본 standalone 실행을 그대로 쓰려면 PC의 전체 실행에
+`start_lidar:=false lidar_input_mode:=merged`를 지정합니다. 두 병합기를 동시에 실행하지 않습니다.

@@ -8,6 +8,7 @@
 // 2) 남은 점을 base_link(로봇 중앙) 좌표로 옮겨 한 점 집합으로 합침
 // 3) 로봇 중앙에서 본 각도 칸(bin)마다 가장 가까운 거리만 남김
 //    → ranges[k] = 로봇 중앙에서 장애물까지 거리
+#include "lidar_processor/scan_merger.hpp"
 #include <cmath>
 #include <limits>
 #include <memory>
@@ -74,68 +75,39 @@ private:
     return p.ok;
   }
 
-  // 한 LiDAR 의 점을 FOV 로 거른 뒤 base_link 기준 bin 에 넣음
-  void add_scan(const LaserScan & s, const Pose2D & p, double fov_deg, LaserScan & out)
-  {
-    const double half_fov = fov_deg * M_PI / 360.0;
-    // FOV 중심 = 로봇 중앙 → LiDAR 방향(바깥쪽)을 LiDAR 자기 좌표 각도로 바꾼 값
-    const double fov_center = std::atan2(p.y, p.x) - p.yaw;
-    const double range_max = out.range_max;
-    const double fov_near = get_parameter("fov_near_m").as_double();
-    const double body_r = get_parameter("body_radius_m").as_double();
-    const double c = std::cos(p.yaw), sn = std::sin(p.yaw);
-    for (size_t i = 0; i < s.ranges.size(); ++i) {
-      const float r = s.ranges[i];
-      if (!std::isfinite(r) || r < s.range_min || r > s.range_max) {continue;}
-      const double a = s.angle_min + i * s.angle_increment;           // LiDAR 기준 각도
-      const double lx = r * std::cos(a), ly = r * std::sin(a);
-      const double x = p.x + c * lx - sn * ly;                           // base_link 좌표
-      const double y = p.y + sn * lx + c * ly;
-      const double d = std::hypot(x, y);                                 // 로봇 중앙에서 거리
-      if (d > range_max || d < body_r) {continue;}                      // 너무 멀거나 몸체(기둥) 안쪽
-      // FOV 밖이면서 로봇 가까이(기둥·몸체 거리)인 점만 버림 → 옆쪽 먼 장애물은 남김
-      const bool out_of_fov = std::fabs(std::remainder(a - fov_center, 2.0 * M_PI)) > half_fov;
-      if (out_of_fov && d < fov_near) {continue;}
-      int k = static_cast<int>(std::floor((std::atan2(y, x) - out.angle_min) / out.angle_increment));
-      if (k < 0) {k = 0;}
-      if (k >= bins_) {k = bins_ - 1;}
-      if (!(out.ranges[k] <= d)) {out.ranges[k] = static_cast<float>(d);}  // 비었거나 더 멀면 교체
-    }
-  }
-
   void on_lidar_front_scan(const LaserScan::SharedPtr front)
   {
     if (!get_pose(front->header.frame_id, front_pose_)) {return;}
 
-    LaserScan out;
-    out.header.stamp = front->header.stamp;
-    out.header.frame_id = target_frame_;
-    out.angle_min = -M_PI;
-    out.angle_increment = 2.0 * M_PI / bins_;
-    out.angle_max = out.angle_min + out.angle_increment * (bins_ - 1);
-    out.scan_time = front->scan_time;
-    out.time_increment = 0.0;   // 합친 스캔이라 점별 시간 보정 없음
-    out.range_min = 0.0;
-    out.range_max = static_cast<float>(get_parameter("range_max").as_double());
-    out.ranges.assign(bins_, std::numeric_limits<float>::quiet_NaN());
-
-    add_scan(*front, front_pose_, get_parameter("front_fov_deg").as_double(), out);
-
-    if (rear_ && get_pose(rear_->header.frame_id, rear_pose_)) {
-      const double age = std::fabs(
-        (rclcpp::Time(front->header.stamp) - rclcpp::Time(rear_->header.stamp)).seconds());
-      if (age <= get_parameter("max_age").as_double()) {
-        add_scan(*rear_, rear_pose_, get_parameter("rear_fov_deg").as_double(), out);
-      } else {
-        RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
-          "후방 스캔이 오래됨 (%.2fs) → 전방만 발행", age);
-      }
-    } else if (!rear_) {
-      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "후방 스캔 아직 없음 → 전방만 발행");
+    lidar_processing::MergerConfig config;
+    config.target_frame = target_frame_;
+    config.bins = bins_;
+    config.range_max = get_parameter("range_max").as_double();
+    config.max_age = get_parameter("max_age").as_double();
+    config.front_fov_deg = get_parameter("front_fov_deg").as_double();
+    config.rear_fov_deg = get_parameter("rear_fov_deg").as_double();
+    config.fov_near_m = get_parameter("fov_near_m").as_double();
+    config.body_radius_m = get_parameter("body_radius_m").as_double();
+    if (!merger_.configure(config)) {
+      RCLCPP_ERROR(get_logger(), "Invalid lidar merger parameters");
+      return;
     }
-    lidar_processord_pub_->publish(out);
+    lidar_processing::Pose2D fp{front_pose_.x, front_pose_.y, front_pose_.yaw};
+    lidar_processing::Pose2D rp;
+    const LaserScan *rear = nullptr;
+    if (rear_ && get_pose(rear_->header.frame_id, rear_pose_)) {
+      rp = {rear_pose_.x, rear_pose_.y, rear_pose_.yaw};
+      const double age = std::fabs((rclcpp::Time(front->header.stamp) -
+                                    rclcpp::Time(rear_->header.stamp)).seconds());
+      if (age <= config.max_age) rear = rear_.get();
+    }
+    if (!rear) RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+      "No usable rear scan; publishing front only");
+    const auto out = merger_.merge(*front, fp, rear, rear ? &rp : nullptr);
+    if (out) lidar_processord_pub_->publish(*out);
   }
 
+  lidar_processing::ScanMerger merger_;
   std::string target_frame_;
   int bins_;
   Pose2D front_pose_, rear_pose_;

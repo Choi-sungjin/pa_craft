@@ -13,13 +13,6 @@ find_package(std_msgs REQUIRED)
 find_package(OpenCV REQUIRED COMPONENTS core videoio)
 find_package(realsense2 REQUIRED)
 
-add_executable(lidar_processor src/lidar_processor.cpp)
-target_link_libraries(lidar_processor
-  rclcpp::rclcpp
-  ${sensor_msgs_TARGETS}
-  ${nav_msgs_TARGETS}
-)
-
 add_executable(realsense_processor src/realsense_processor.cpp)
 target_link_libraries(realsense_processor
   rclcpp::rclcpp
@@ -59,7 +52,6 @@ target_link_libraries(arm_encoder_processor
 )
 
 install(TARGETS
-  lidar_processor
   realsense_processor
   c310_processor
   imu_processor

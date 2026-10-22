@@ -1,37 +1,30 @@
-// object_detector: RealSense image -> detected objects (pucks)
-// sub: /vision/image
-// pub: /vision/object_detection
+#include "craft_perception/object_detector.hpp"
+#include "geometry_utils.hpp"
+#include <cmath>
 
-#include "rclcpp/rclcpp.hpp"
-#include "geometry_msgs/msg/pose_array.hpp"
-#include "sensor_msgs/msg/image.hpp"
+namespace craft_perception {
+using namespace detail;
+bool ObjectDetector::configure(double inner_fraction) {
+  if (!std::isfinite(inner_fraction) || inner_fraction <= 0 || inner_fraction > 1) return false;
+  inner_fraction_ = inner_fraction;
+  return true;
+}
 
-class ObjectDetector : public rclcpp::Node
-{
-public:
-  ObjectDetector()
-  : Node("object_detector")
-  {
-    vision_object_detection_pub_ = create_publisher<geometry_msgs::msg::PoseArray>("/vision/object_detection", 10);
-    vision_image_sub_ = create_subscription<sensor_msgs::msg::Image>(
-      "/vision/image", 10, [this](const sensor_msgs::msg::Image & msg) {on_vision_image(msg);});
+bool ObjectDetector::is_valid_input(const DepthImage &depth, const Intrinsics &intrinsics) const {
+  return depth.is_valid() && is_valid_intrinsics(intrinsics);
+}
+
+std::vector<ObjectPoint> ObjectDetector::compute_result(const DepthImage &depth,
+  const std::vector<Detection> &boxes, const Intrinsics &intrinsics) const {
+  std::vector<ObjectPoint> output;
+  for (const auto &box : boxes) {
+    const auto roi = clipped(scaled(box.box, inner_fraction_), depth.raw.size());
+    if (roi.empty()) continue;
+    const auto z = depth_quantile(depth, roi, 0.5);
+    if (!z) continue;
+    output.push_back({box, deproject(box.box.x + box.box.width / 2,
+                                     box.box.y + box.box.height / 2, *z, intrinsics)});
   }
-
-private:
-  void on_vision_image(const sensor_msgs::msg::Image & msg)
-  {
-    (void)msg;
-    // TODO
-  }
-
-  rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr vision_object_detection_pub_;
-  rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr vision_image_sub_;
-};
-
-int main(int argc, char ** argv)
-{
-  rclcpp::init(argc, argv);
-  rclcpp::spin(std::make_shared<ObjectDetector>());
-  rclcpp::shutdown();
-  return 0;
+  return output;
+}
 }

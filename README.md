@@ -10,8 +10,9 @@ pa_craft/
 ├── README.md
 ├── requirements.txt
 ├── firmware/
-│   └── motor_controller/
-│       └── motor_controller.ino
+│   ├── wheel_clock/            # wheel x2 + clock OpenCR
+│   ├── lm_arm/                 # LM + arm x4 + gripper OpenCR
+│   └── libraries/CraftMotorFirmware/  # 공통 통신·모터 제어
 └── src/
     ├── craft_bringup/
     │   ├── CMakeLists.txt
@@ -44,16 +45,25 @@ pa_craft/
     │   ├── CMakeLists.txt
     │   ├── package.xml
     │   ├── config/
+    │   │   ├── perception.yaml   # 모든 perception 설정 (master configure()가 읽음)
     │   │   └── slam.yaml
-    │   ├── scripts/
-    │   │   ├── aruco_reader.py
-    │   │   ├── depth_heatmap.py
-    │   │   ├── knob_depth.py
-    │   │   └── knob_lever.py
+    │   ├── include/craft_perception/ # 일반 C++ 모듈 인터페이스
+    │   ├── msg/                  # 검출·손잡이·puck 관측 메시지
+    │   ├── models/               # knob_sign(v3.pt), puck_blue(target_blue_v3) ncnn 모델
     │   └── src/
-    │       ├── object_detector.cpp
-    │       ├── object_pose_estimator.cpp
-    │       ├── obstacle_detector.cpp
+    │       ├── perception_master.cpp # 연결·configure·타이머 (control_master 형식)
+    │       ├── d435_perception.cpp   # D435 클래스: yolo → knob_depth/object/obstacle, apriltag, puck_axis
+    │       ├── c310_perception.cpp   # C310 클래스: knob_lever (자체 YOLO)
+    │       ├── lidar_perception.cpp  # LiDAR 클래스: 전·후방 스캔 병합 → 장애물
+    │       ├── yolo_detector.cpp     # ncnn YOLO
+    │       ├── apriltag_reader.cpp
+    │       ├── knob_depth.cpp
+    │       ├── knob_lever.cpp
+    │       ├── object_detector.cpp   # YOLO 박스 + depth → 3D 위치
+    │       ├── obstacle_detector.cpp # YOLO 박스 + depth → 가까운 장애물 면
+    │       ├── puck_axis.cpp         # puck 축 (puck_axis_live.py 이식)
+    │       ├── shared_frame.cpp
+    │       ├── lidar_obstacle_detector.cpp
     │       └── state_estimator.cpp
     ├── craft_planning/
     │   ├── CMakeLists.txt
@@ -70,6 +80,7 @@ pa_craft/
     │   ├── maps/kant/             # 원본 예제 맵
     │   ├── test/
     │   └── third_party/           # 원본 저장소 및 커밋 기록
+    ├── lidar_processor/          # 전·후방 LDS-03 드라이버 launch, TF, 360도 병합
     └── craft_sensors/
         ├── CMakeLists.txt
         ├── package.xml
@@ -77,7 +88,6 @@ pa_craft/
             ├── arm_encoder_processor.cpp
             ├── c310_processor.cpp
             ├── imu_processor.cpp
-            ├── lidar_processor.cpp
             ├── realsense_processor.cpp
             └── wheel_encoder_processor.cpp
 ```
@@ -87,11 +97,12 @@ pa_craft/
 | 경로 | 역할 |
 | --- | --- |
 | `src/craft_bringup` | ROS 2 노드를 함께 실행하는 launch 파일 |
-| `src/craft_sensors` | LiDAR, 카메라, IMU, 엔코더 입력 처리 |
-| `src/craft_perception` | 객체·장애물 인지와 로봇 상태 추정 |
+| `src/craft_sensors` | 카메라, IMU, 엔코더 입력 처리 |
+| `src/lidar_processor` | 전·후방 LiDAR 구동·TF·병합 → `/lidar/merged` ([실행 안내](src/lidar_processor/README.md)) |
+| `src/craft_perception` | C++ PerceptionMaster + D435/C310 클래스 (ncnn·AprilTag·깊이·레버·puck 인지) ([실행·주기 설정](src/craft_perception/README.md)) |
 | `src/craft_mission` | 미션 상태와 진행 순서 관리 |
 | `src/craft_planning` | 주행 경로 계획 |
 | `src/craft_control` | 로봇 팔·시계 조작 계획, 주행 및 조작 목표를 제어 입력으로 연결 |
-| `firmware/motor_controller` | 모터 컨트롤러 펌웨어 |
+| `firmware/wheel_clock`, `firmware/lm_arm` | OpenCR 두 대의 모터 펌웨어 ([설정·빌드 안내](firmware/README.md)) |
 
 `requirements.txt`는 Python 의존성 목록입니다. `build/`, `install/`, `log/`, `venv-craft/` 같은 로컬 생성물은 `.gitignore`로 제외합니다.

@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <utility>
@@ -40,10 +41,24 @@ nav_msgs::msg::Path path(std::initializer_list<std::pair<double, double>> points
   return msg;
 }
 
+// Pure Pursuit wheel delta for a target at chassis-frame (x, y): first resampled point >= lookahead.
+double expected_wheel_delta(const craft_control::LateralController & controller, double v)
+{
+  for (const auto & pose : controller.target_path().poses) {
+    const double x = pose.pose.position.x;
+    const double y = pose.pose.position.y;
+    const double d = std::hypot(x, y);
+    if (x > 0.0 && d >= 0.31) {
+      return v * (2.0 * y / (d * d)) * kSeparation / (2.0 * kRadius);
+    }
+  }
+  return std::numeric_limits<double>::quiet_NaN();
+}
+
 craft_control::LateralController lateral()
 {
   craft_control::LateralController controller;
-  controller.configure(kRadius, kSeparation, 0.3, 0.03);
+  controller.configure(kRadius, kSeparation, 0.31, 0.03, 0.02);  // lookahead off the 2 cm grid
   controller.set_odom(odom());
   return controller;
 }
@@ -322,7 +337,8 @@ TEST(WheelControl, LeftAndRightPathsProduceOppositeDifferentialSpeeds)
   auto controller = lateral();
   controller.set_target(path({{0, 0}, {1, 1}, {2, 2}}));
   const auto left = controller.compute_command(0.2);
-  EXPECT_NEAR(left[0], -0.2 * kSeparation / (2.0 * kRadius), 1e-12);
+  EXPECT_NEAR(left[0], -expected_wheel_delta(controller, 0.2), 1e-9);
+  EXPECT_LT(left[0], 0.0);
   EXPECT_NEAR(left[1], -left[0], 1e-12);
   controller.set_target(path({{0, 0}, {1, -1}, {2, -2}}));
   const auto right = controller.compute_command(0.2);
@@ -336,7 +352,11 @@ TEST(WheelControl, TransformsWorldPathUsingOdometryYaw)
   controller.set_odom(odom(3.0, 4.0, kPi / 2.0));
   controller.set_target(path({{3, 4}, {2, 5}, {1, 6}}));
   const auto speeds = controller.compute_command(0.2);
-  EXPECT_NEAR(speeds[0], -0.2 * kSeparation / (2.0 * kRadius), 1e-12);
+  // Same 45-degree-left geometry as LeftAndRightPaths, seen from the rotated chassis.
+  auto reference = lateral();
+  reference.set_target(path({{0, 0}, {1, 1}, {2, 2}}));
+  EXPECT_NEAR(speeds[0], reference.compute_command(0.2)[0], 1e-9);
+  EXPECT_LT(speeds[0], 0.0);
   EXPECT_GT(speeds[1], 0.0);
 }
 
@@ -395,6 +415,47 @@ TEST(WheelControl, ClearingPathOrOdometryStopsTracking)
   EXPECT_FALSE(controller.can_track(0.2));
   controller.set_odom(odom());
   EXPECT_TRUE(controller.can_track(0.2));
+}
+
+TEST(WheelControl, ResamplesPathAlongCubicSplineAtFixedSpacing)
+{
+  auto controller = lateral();
+  // Uneven input spacing on a straight line: output is evenly spaced and stays on the line.
+  controller.set_target(path({{0, 0}, {0.05, 0}, {0.9, 0}, {1.0, 0}}));
+  const auto & straight = controller.target_path();
+  ASSERT_EQ(straight.poses.size(), 51u);
+  EXPECT_EQ(straight.header.frame_id, "odom");
+  for (std::size_t i = 0; i < straight.poses.size(); ++i) {
+    EXPECT_NEAR(straight.poses[i].pose.position.x, 0.02 * static_cast<double>(i), 1e-9);
+    EXPECT_NEAR(straight.poses[i].pose.position.y, 0.0, 1e-9);
+  }
+
+  // Curved input: spline passes through every input point and keeps the exact endpoints.
+  controller.set_target(path({{0, 0}, {1, 0.5}, {2, 0}, {2, 0}, {3, -0.5}}));
+  const auto & curve = controller.target_path();
+  EXPECT_DOUBLE_EQ(curve.poses.front().pose.position.x, 0.0);
+  EXPECT_DOUBLE_EQ(curve.poses.back().pose.position.x, 3.0);
+  EXPECT_DOUBLE_EQ(curve.poses.back().pose.position.y, -0.5);
+  // Equal arc-length spacing (chord ~= arc at 2 cm); only the final gap may be shorter.
+  for (std::size_t i = 1; i + 1 < curve.poses.size(); ++i) {
+    const auto & a = curve.poses[i - 1].pose.position;
+    const auto & b = curve.poses[i].pose.position;
+    EXPECT_NEAR(std::hypot(b.x - a.x, b.y - a.y), 0.02, 1e-4);
+  }
+  for (const auto & point : {std::pair{1.0, 0.5}, std::pair{2.0, 0.0}}) {
+    double nearest = std::numeric_limits<double>::infinity();
+    for (const auto & pose : curve.poses) {
+      nearest = std::min(nearest, std::hypot(
+        pose.pose.position.x - point.first, pose.pose.position.y - point.second));
+    }
+    EXPECT_LT(nearest, 0.02);
+  }
+
+  // A single distinct point is kept as is; clearing empties the tracked path.
+  controller.set_target(path({{1, 0}, {1, 0}}));
+  ASSERT_EQ(controller.target_path().poses.size(), 1u);
+  controller.clear_target();
+  EXPECT_TRUE(controller.target_path().poses.empty());
 }
 
 TEST(WheelControl, ValidatesVelocityPathAndOdometry)

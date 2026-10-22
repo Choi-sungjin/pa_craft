@@ -1,0 +1,12 @@
+{
+  "source_weights": "custom_yolo26/weights/v3.pt",
+  "source_sha256": "1688e0fdf79de3cd1811df3782191b9cb5d537e91e5bcddf6fa33838df49415b",
+  "ultralytics": "8.4.160",
+  "pnnx": "20260526",
+  "input": [1, 3, 640, 640],
+  "output": [9, 8400],
+  "input_blob": "in0",
+  "output_blob": "out0",
+  "class_names": ["knob", "sign_red", "sign_yellow", "sign_green", "sign_off"],
+  "output_contract": "decoded cxcywh + probabilities; class-aware NMS"
+}
