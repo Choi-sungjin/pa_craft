@@ -77,6 +77,19 @@ perception_master:
         lever_source: hsv
         lever_class_id: 5  # yolo_seg only: index of the lever class in c310.yolo.class_names
 
+    lidar:
+      input_mode: raw  # raw: master calls merger; merged: external /lidar/merged input
+      target_frame: base_link
+      bins: 720
+      range_max: 8.0
+      max_age: 0.2  # maximum front/rear timestamp difference [s]
+      front_fov_deg: 200.0
+      rear_fov_deg: 200.0
+      fov_near_m: 0.30
+      body_radius_m: 0.25
+
+    # LidarPerception -> /lidar/merged + /perception/lidar/obstacle (PoseArray).
+    # Preserve the scan timestamp/frame; skip NaN/Inf bins and points beyond 3 m.
     lidar_obstacle: {max_range_m: 3.0, stride: 1}
 
     # Master validates these and creates one timer per enabled task. Hz is an upper bound:

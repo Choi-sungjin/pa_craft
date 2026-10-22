@@ -1,7 +1,7 @@
 #pragma once
 #include "craft_perception/c310_perception.hpp"
 #include "craft_perception/d435_perception.hpp"
-#include "craft_perception/lidar_obstacle_detector.hpp"
+#include "craft_perception/lidar_perception.hpp"
 #include "craft_perception/shared_frame.hpp"
 #include "craft_perception/state_estimator.hpp"
 #include "craft_perception/msg/detection_array.hpp"
@@ -10,6 +10,8 @@
 #include <diagnostic_msgs/msg/diagnostic_array.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_listener.h>
 #include <std_msgs/msg/int32_multi_array.hpp>
 #include <std_msgs/msg/u_int64_multi_array.hpp>
 #include <chrono>
@@ -55,14 +57,14 @@ struct Task {
   rclcpp::TimerBase::SharedPtr timer;
 };
 
-// Owns ROS I/O, parameters and scheduling, like control_master. D435Perception and
-// C310Perception own the camera algorithms and are called through their member functions.
+// Owns ROS I/O, parameters and scheduling, like control_master. D435Perception,
+// C310Perception and LidarPerception own algorithms called through member functions.
 class PerceptionMaster : public rclcpp::Node {
 public:
   PerceptionMaster();
   int executor_threads() const { return executor_threads_; }
 private:
-  // Reads perception.yaml (--params-file) and configures the camera classes.
+  // Reads perception.yaml (--params-file) and configures the sensor modules.
   void configure();
   // Shared-memory readers, publishers, subscriptions and one timer per enabled task.
   void connect();
@@ -89,12 +91,17 @@ private:
   bool d435_puck_axis(Task &task);
   bool c310_knob_lever(Task &task);
   bool lidar_obstacle(Task &task);
+  std::optional<lidar_processing::Pose2D> lidar_pose(const std::string &frame);
   bool state_estimator(Task &task);
   void diagnostics();
 
   D435Perception d435_;
   C310Perception c310_;
-  LidarObstacleDetector lidar_obstacle_;
+  LidarPerception lidar_;
+  lidar_processing::MergerConfig lidar_config_;
+  std::string lidar_input_mode_;
+  std::shared_ptr<tf2_ros::Buffer> lidar_tf_buffer_;
+  std::shared_ptr<tf2_ros::TransformListener> lidar_tf_listener_;
   StateEstimator state_estimator_;
   std::map<std::string, ModuleSchedule> schedules_;
   std::vector<std::string> d435_labels_, c310_labels_, puck_labels_;
@@ -114,6 +121,7 @@ private:
   uint64_t odom_id_ = 0;
   std::mutex scan_mutex_;
   sensor_msgs::msg::LaserScan::ConstSharedPtr scan_;
+  sensor_msgs::msg::LaserScan::ConstSharedPtr rear_scan_;
   uint64_t scan_id_ = 0;
 
   std::vector<std::shared_ptr<Task>> tasks_;
@@ -121,6 +129,8 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr info_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
   rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub_;
+  rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr rear_scan_sub_;
+  rclcpp::Publisher<sensor_msgs::msg::LaserScan>::SharedPtr merged_scan_pub_;
   rclcpp::Publisher<msg::DetectionArray>::SharedPtr detection_pubs_[2];
   rclcpp::Publisher<msg::KnobObservationArray>::SharedPtr knob_pubs_[2];
   rclcpp::Publisher<msg::PuckObservationArray>::SharedPtr puck_pub_;

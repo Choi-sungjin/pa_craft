@@ -235,9 +235,21 @@ void PerceptionMaster::configure() {
     throw std::invalid_argument("invalid c310 configuration in perception.yaml, or cannot load the "
       + c310.yolo.backend + " model for c310.yolo (see stderr)");
   }
-  if (!lidar_obstacle_.configure(positive_param("lidar_obstacle.max_range_m"),
-                                 param<int64_t>("lidar_obstacle.stride"))) {
-    throw std::invalid_argument("invalid lidar_obstacle configuration");
+  lidar_input_mode_ = param<std::string>("lidar.input_mode");
+  if (lidar_input_mode_ != "raw" && lidar_input_mode_ != "merged") {
+    throw std::invalid_argument("lidar.input_mode must be raw or merged");
+  }
+  lidar_config_.target_frame = param<std::string>("lidar.target_frame");
+  lidar_config_.bins = param<int64_t>("lidar.bins");
+  lidar_config_.range_max = param<double>("lidar.range_max");
+  lidar_config_.max_age = param<double>("lidar.max_age");
+  lidar_config_.front_fov_deg = param<double>("lidar.front_fov_deg");
+  lidar_config_.rear_fov_deg = param<double>("lidar.rear_fov_deg");
+  lidar_config_.fov_near_m = param<double>("lidar.fov_near_m");
+  lidar_config_.body_radius_m = param<double>("lidar.body_radius_m");
+  if (!lidar_.configure(lidar_config_, positive_param("lidar_obstacle.max_range_m"),
+                        param<int64_t>("lidar_obstacle.stride"))) {
+    throw std::invalid_argument("invalid lidar / lidar_obstacle configuration");
   }
   odometry_topic_ = param<std::string>("odometry_source_topic");
 }
@@ -274,7 +286,19 @@ void PerceptionMaster::connect() {
     [this](nav_msgs::msg::Odometry::ConstSharedPtr input) {
       std::lock_guard<std::mutex> lock(odom_mutex_); odom_ = std::move(input); ++odom_id_;
     });
-  scan_sub_ = create_subscription<sensor_msgs::msg::LaserScan>("/lidar/merged", rclcpp::SensorDataQoS(),
+  // Raw mode calls LidarPerception directly, just like the camera modules.
+  // Merged mode supports a merger already running on a separate sensor computer.
+  if (lidar_input_mode_ == "raw" && enabled("lidar_obstacle")) {
+    lidar_tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
+    lidar_tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*lidar_tf_buffer_);
+    merged_scan_pub_ = create_publisher<sensor_msgs::msg::LaserScan>("/lidar/merged", 10);
+    rear_scan_sub_ = create_subscription<sensor_msgs::msg::LaserScan>("/lidar/rear/scan",
+      rclcpp::SensorDataQoS(), [this](sensor_msgs::msg::LaserScan::ConstSharedPtr input) {
+        std::lock_guard<std::mutex> lock(scan_mutex_); rear_scan_ = std::move(input);
+      });
+  }
+  scan_sub_ = create_subscription<sensor_msgs::msg::LaserScan>(
+    lidar_input_mode_ == "raw" ? "/lidar/front/scan" : "/lidar/merged", rclcpp::SensorDataQoS(),
     [this](sensor_msgs::msg::LaserScan::ConstSharedPtr input) {
       std::lock_guard<std::mutex> lock(scan_mutex_); scan_ = std::move(input); ++scan_id_;
     });
@@ -483,14 +507,47 @@ bool PerceptionMaster::c310_knob_lever(Task &task) {
     });
 }
 
+std::optional<lidar_processing::Pose2D> PerceptionMaster::lidar_pose(const std::string &frame) {
+  try {
+    const auto tf = lidar_tf_buffer_->lookupTransform(lidar_config_.target_frame, frame, tf2::TimePointZero);
+    const auto &q = tf.transform.rotation;
+    return lidar_processing::Pose2D{tf.transform.translation.x, tf.transform.translation.y,
+      std::atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))};
+  } catch (const std::exception &e) {
+    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "LiDAR TF %s: %s", frame.c_str(), e.what());
+    return std::nullopt;
+  }
+}
+
 bool PerceptionMaster::lidar_obstacle(Task &task) {
-  sensor_msgs::msg::LaserScan::ConstSharedPtr input;
+  sensor_msgs::msg::LaserScan::ConstSharedPtr input, rear;
   uint64_t id;
-  { std::lock_guard<std::mutex> lock(scan_mutex_); input = scan_; id = scan_id_; }
+  { std::lock_guard<std::mutex> lock(scan_mutex_); input = scan_; rear = rear_scan_; id = scan_id_; }
   if (!input || task.seen == id || !is_fresh_input(input->header.stamp)) return false;
+  std::optional<sensor_msgs::msg::LaserScan> merged;
+  if (lidar_input_mode_ == "raw") {
+    if (!lidar_processing::ScanMerger::is_valid_input(*input)) { task.seen = id; return false; }
+    const auto front_pose = lidar_pose(input->header.frame_id);
+    if (!front_pose) return false;  // Retry this scan when static TF arrives.
+    std::optional<lidar_processing::Pose2D> rear_pose;
+    if (rear && is_fresh_input(rear->header.stamp)) {
+      const double age = std::fabs((rclcpp::Time(input->header.stamp) - rclcpp::Time(rear->header.stamp)).seconds());
+      if (age <= lidar_config_.max_age && lidar_processing::ScanMerger::is_valid_input(*rear)) {
+        rear_pose = lidar_pose(rear->header.frame_id);
+      }
+    }
+    if (!rear_pose) RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+      "No usable rear LiDAR scan/TF; processing front only");
+    merged = lidar_.merge(*input, *front_pose, rear_pose ? rear.get() : nullptr,
+                          rear_pose ? &*rear_pose : nullptr);
+    if (!merged) { task.seen = id; return false; }
+    merged_scan_pub_->publish(*merged);  // Preserve SLAM/RViz input without a merger node.
+  }
   task.seen = id;
-  if (!lidar_obstacle_.is_valid_input(*input)) return false;
-  lidar_obstacle_pub_->publish(lidar_obstacle_.compute_result(*input)); return true;
+  const auto obstacles = lidar_.detect_obstacles(merged ? *merged : *input);
+  if (!obstacles) return false;
+  lidar_obstacle_pub_->publish(*obstacles);
+  return true;
 }
 
 bool PerceptionMaster::state_estimator(Task &task) {

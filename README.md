@@ -54,6 +54,7 @@ pa_craft/
     │       ├── perception_master.cpp # 연결·configure·타이머 (control_master 형식)
     │       ├── d435_perception.cpp   # D435 클래스: yolo → knob_depth/object/obstacle, apriltag, puck_axis
     │       ├── c310_perception.cpp   # C310 클래스: knob_lever (자체 YOLO)
+    │       ├── lidar_perception.cpp  # LiDAR 클래스: 전·후방 스캔 병합 → 장애물
     │       ├── yolo_detector.cpp     # ncnn YOLO
     │       ├── apriltag_reader.cpp
     │       ├── knob_depth.cpp
@@ -79,6 +80,7 @@ pa_craft/
     │   ├── maps/kant/             # 원본 예제 맵
     │   ├── test/
     │   └── third_party/           # 원본 저장소 및 커밋 기록
+    ├── lidar_processor/          # 전·후방 LDS-03 드라이버 launch, TF, 360도 병합
     └── craft_sensors/
         ├── CMakeLists.txt
         ├── package.xml
@@ -86,7 +88,6 @@ pa_craft/
             ├── arm_encoder_processor.cpp
             ├── c310_processor.cpp
             ├── imu_processor.cpp
-            ├── lidar_processor.cpp
             ├── realsense_processor.cpp
             └── wheel_encoder_processor.cpp
 ```
@@ -96,7 +97,8 @@ pa_craft/
 | 경로 | 역할 |
 | --- | --- |
 | `src/craft_bringup` | ROS 2 노드를 함께 실행하는 launch 파일 |
-| `src/craft_sensors` | LiDAR, 카메라, IMU, 엔코더 입력 처리 |
+| `src/craft_sensors` | 카메라, IMU, 엔코더 입력 처리 |
+| `src/lidar_processor` | 전·후방 LiDAR 구동·TF·병합 → `/lidar/merged` ([실행 안내](src/lidar_processor/README.md)) |
 | `src/craft_perception` | C++ PerceptionMaster + D435/C310 클래스 (ncnn·AprilTag·깊이·레버·puck 인지) ([실행·주기 설정](src/craft_perception/README.md)) |
 | `src/craft_mission` | 미션 상태와 진행 순서 관리 |
 | `src/craft_planning` | 주행 경로 계획 |

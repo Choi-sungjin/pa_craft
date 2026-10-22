@@ -10,6 +10,7 @@
 #include "craft_perception/state_estimator.hpp"
 #include "craft_perception/obstacle_detector.hpp"
 #include "craft_perception/lidar_obstacle_detector.hpp"
+#include "craft_perception/lidar_perception.hpp"
 #include <fcntl.h>
 #include <sys/file.h>
 #include <sys/mman.h>
@@ -204,6 +205,73 @@ TEST(Feedback, KeepsFramesAndRejectsInvalidOdom) {
   EXPECT_EQ(points.header.frame_id, "laser");
   EXPECT_NEAR(points.poses[0].position.x, 1, 1e-6);
   EXPECT_NEAR(points.poses[1].position.y, 2, 1e-6);
+}
+
+TEST(LidarPerception, MergesNearestBinsAndRejectsStaleRear) {
+  LidarPerception module;
+  lidar_processing::MergerConfig config;
+  ASSERT_TRUE(module.configure(config, 3.0, 1));
+  sensor_msgs::msg::LaserScan front;
+  front.header.frame_id = "laser_front";
+  front.header.stamp.sec = 10;
+  front.angle_increment = 1e-6;
+  front.range_min = 0.1;
+  front.range_max = 8;
+  front.ranges = {2, 1, std::numeric_limits<float>::quiet_NaN()};
+  auto rear = front;
+  rear.header.frame_id = "laser_rear";
+  rear.ranges = {1};
+  const lidar_processing::Pose2D fp{0.15, 0, 0}, rp{-0.15, 0, CV_PI};
+  auto merged = module.merge(front, fp, &rear, &rp);
+  ASSERT_TRUE(merged);
+  EXPECT_EQ(merged->ranges.size(), 720u);
+  EXPECT_EQ(merged->header.frame_id, "base_link");
+  EXPECT_EQ(merged->header.stamp, front.header.stamp);
+  const auto points = module.detect_obstacles(*merged);
+  ASSERT_TRUE(points);
+  ASSERT_EQ(points->poses.size(), 2u);
+  for (const auto &pose : points->poses) {
+    EXPECT_NEAR(std::hypot(pose.position.x, pose.position.y), 1.15, 1e-5);
+  }
+  rear.header.stamp.sec = 9;
+  merged = module.merge(front, fp, &rear, &rp);
+  ASSERT_TRUE(merged);
+  EXPECT_EQ(module.detect_obstacles(*merged)->poses.size(), 1u);
+  front.header.frame_id.clear();
+  EXPECT_FALSE(module.merge(front, fp, nullptr, nullptr));
+}
+
+TEST(LidarPerception, FiltersBodyAndNearPointsOutsideFovButKeepsFarPoints) {
+  LidarPerception module;
+  lidar_processing::MergerConfig config;
+  config.body_radius_m = 0.05;
+  ASSERT_TRUE(module.configure(config, 3.0, 1));
+  sensor_msgs::msg::LaserScan scan;
+  scan.header.frame_id = "laser_front";
+  scan.angle_min = CV_PI;
+  scan.angle_increment = 1e-6;
+  scan.range_min = 0.1;
+  scan.range_max = 8;
+  scan.ranges = {0.15, 0.35, 1.0};
+  const auto merged = module.merge(scan, {0.15, 0, 0}, nullptr, nullptr);
+  ASSERT_TRUE(merged);
+  const auto points = module.detect_obstacles(*merged);
+  ASSERT_TRUE(points);
+  ASSERT_EQ(points->poses.size(), 1u);
+  EXPECT_NEAR(points->poses[0].position.x, -0.85, 1e-4);
+}
+
+TEST(LidarPerception, RejectsInvalidMergerConfiguration) {
+  LidarPerception module;
+  lidar_processing::MergerConfig config;
+  config.bins = 0;
+  EXPECT_FALSE(module.configure(config, 3.0, 1));
+  config.bins = 720;
+  config.front_fov_deg = std::numeric_limits<double>::quiet_NaN();
+  EXPECT_FALSE(module.configure(config, 3.0, 1));
+  config.front_fov_deg = 200;
+  config.max_age = -1;
+  EXPECT_FALSE(module.configure(config, 3.0, 1));
 }
 
 TEST(Depth, RawZ16UsesScaleWithoutAFullFrameConversion) {

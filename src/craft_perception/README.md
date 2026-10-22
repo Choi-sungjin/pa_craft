@@ -37,7 +37,7 @@ PerceptionMaster  (rclcpp::Node, perception_master.cpp)
 │   │   └── InferenceBackend
 │   └── KnobLever       lever_               → hsv | yolo_seg 마스크 → 각도
 │
-├── LidarObstacleDetector lidar_obstacle_    → lidar_obstacle 작업 (/lidar/merged)
+├── LidarPerception lidar_                   → lidar_obstacle 작업 (병합 + 장애물)
 ├── StateEstimator        state_estimator_   → state_estimator 작업 (대기, odom 전달만)
 │
 └── CameraInput cameras_[2]   [kD435], [kC310]
@@ -77,7 +77,7 @@ craft_perception/
 | D435 | `apriltag` | 15 | BGR → 왼쪽부터 정렬한 AprilTag ID (YOLO와 별개, 기본 tag36h11) |
 | D435 | `puck_axis` | 10 | 자체 puck YOLO(`puck_blue`) + depth → 선반 평면 RANSAC, standing/lying, 축 |
 | C310 | `knob_lever` | 10 | 자체 YOLO + 영상 평면 레버 방향. 레버 픽셀은 `c310.knob_lever.lever_source`로 선택 (`hsv` / `yolo_seg`) |
-| - | `lidar_obstacle` | 20 | LaserScan 유효 점 투영 (기존 그대로) |
+| - | `lidar_obstacle` | 20 | 전·후방 스캔 병합 + 장애물 점 투영 |
 | - | `state_estimator` | 100 | 지정 odometry 검증·전달 (대기, 기존 그대로) |
 
 `knob_depth`/`object_detector`/`obstacle_detector`는 `d435_yolo`가 꺼져 있으면 결과가 없습니다
@@ -187,6 +187,45 @@ YOLO_CONFIG_DIR=/tmp/craft-yolo-config custom_yolo26/.venv/bin/python \
 | `/perception/lidar/obstacle` | `geometry_msgs/PoseArray` | LaserScan 원래 frame의 유효 점 |
 | `/perception/state/odom` | `nav_msgs/Odometry` | 지정한 입력 odometry 전달 |
 | `/perception/diagnostics` | `diagnostic_msgs/DiagnosticArray` | 실제 처리 Hz, 실행 시간, skip/error/overrun, 카메라별 복사 횟수·바이트 |
+
+### LiDAR 연결
+
+`perception_master`가 카메라 클래스와 같은 방식으로 `LidarPerception lidar_`를 소유합니다.
+ROS 구독·TF 조회·타이머·발행은 master가 담당하고, `lidar_.merge(...)`로 병합한 뒤
+`lidar_.detect_obstacles(...)`를 호출합니다. 병합 알고리즘은 `lidar_processor` 패키지의
+`ScanMerger` 라이브러리로 분리해 standalone 노드와 공유합니다.
+
+```text
+/lidar/front/scan ─┐
+                  ├─ master → lidar_.merge() ─┬─ /lidar/merged (SLAM/RViz)
+/lidar/rear/scan ──┘                          └─ lidar_.detect_obstacles()
+                                                   → /perception/lidar/obstacle
+```
+
+기본 `lidar.input_mode: raw`에서는 원본 스캔을 SensorDataQoS로 받습니다. `lidar_obstacle`
+작업이 새 전방 스캔마다 최대 20 Hz로 실행되며, 전·후방 시각 차이가 `lidar.max_age`(0.2 s)를
+넘거나 후방 TF/스캔이 없으면 전방만 처리합니다. `max_input_age_s`(0.5 s)가 지난 입력은
+처리하지 않습니다. 전방 TF를 기다리는 동안에는 같은 스캔을 다시 시도합니다.
+`perception.yaml`의 `lidar` 항목에서 bins·FOV·몸체 필터·병합 최대 거리를 설정합니다.
+
+병합 출력은 `LaserScan`, `base_link`, Reliable이며 전방 측정 시각을 유지합니다.
+장애물 출력은 기본 3 m 이내 점의 `PoseArray`입니다. NaN/Inf는 제외하고 z=0,
+orientation은 단위 쿼터니언입니다. 개체별 군집이 아닌 스캔 점 집합이며 빈 결과도 발행합니다.
+
+전체 실행 `ros2 launch craft_bringup craft.launch.py`는 드라이버·static TF만 별도로 띄웁니다.
+별도 병합 노드는 실행하지 않습니다. Pi에서 센서를 실행하려면
+`ros2 launch lidar_processor lidar_processor.launch.py start_processor:=false`를 사용하고,
+PC에서는 `ros2 launch craft_bringup craft.launch.py start_lidar:=false`로 실행합니다.
+Pi/PC의 ROS domain과 시각을 맞춰야 합니다.
+
+Pi의 기존 병합 노드를 계속 쓰려면 전체 실행에
+`start_lidar:=false lidar_input_mode:=merged`를 지정합니다. 이때 master는 `/lidar/merged`를
+구독해 장애물만 계산하며 병합 토픽을 재발행하지 않습니다.
+
+두 패키지를 빌드하고 워크스페이스를 source한 후
+`python3 src/craft_perception/test/test_lidar_integration.py`로 master 내부 모듈을 검증합니다.
+`--input-mode merged`를 추가하면 standalone 병합 노드 경로도 검증합니다.
+별도 ROS domain에서 전·후방 가상 스캔을 발행해 좌표·header·거리 필터·빈 출력을 검사합니다.
 
 knob 위치는 카메라 optical frame에서 m 단위입니다. 레버 각도는 **영상 평면의
 rad, 위쪽=0, 시계방향 양수**이며 로봇 관절각이 아닙니다. 관측 배열의 유효성

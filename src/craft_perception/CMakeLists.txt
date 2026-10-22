@@ -8,6 +8,8 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(ament_index_cpp REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(lidar_processor REQUIRED)
+find_package(tf2_ros REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
@@ -28,13 +30,13 @@ add_library(perception_modules
   src/yolo_detector.cpp src/apriltag_reader.cpp src/knob_depth.cpp src/knob_lever.cpp
   src/object_detector.cpp src/obstacle_detector.cpp src/puck_axis.cpp
   src/d435_perception.cpp src/c310_perception.cpp src/shared_frame.cpp
-  src/state_estimator.cpp src/lidar_obstacle_detector.cpp)
+  src/state_estimator.cpp src/lidar_obstacle_detector.cpp src/lidar_perception.cpp)
 target_compile_features(perception_modules PUBLIC cxx_std_17)
 target_include_directories(perception_modules PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
   ${OpenCV_INCLUDE_DIRS})
-target_link_libraries(perception_modules PUBLIC ncnn ${OpenCV_LIBS}
+target_link_libraries(perception_modules PUBLIC lidar_processor::scan_merger ncnn ${OpenCV_LIBS}
   ${sensor_msgs_TARGETS} ${nav_msgs_TARGETS} ${geometry_msgs_TARGETS})
 
 # TensorRT YOLO backend for the Jetson. auto: build it when TensorRT + CUDA are found.
@@ -61,7 +63,7 @@ endif()
 
 add_executable(perception_master src/perception_master.cpp)
 target_link_libraries(perception_master PRIVATE perception_modules
-  rclcpp::rclcpp ament_index_cpp::ament_index_cpp ${perception_typesupport}
+  rclcpp::rclcpp tf2_ros::tf2_ros ament_index_cpp::ament_index_cpp ${perception_typesupport}
   ${std_msgs_TARGETS} ${diagnostic_msgs_TARGETS})
 
 install(TARGETS perception_master perception_modules
@@ -83,5 +85,5 @@ if(BUILD_TESTING)
 endif()
 
 ament_export_targets(perception_modules_export HAS_LIBRARY_TARGET)
-ament_export_dependencies(ncnn OpenCV sensor_msgs nav_msgs geometry_msgs rosidl_default_runtime)
+ament_export_dependencies(lidar_processor tf2_ros ncnn OpenCV sensor_msgs nav_msgs geometry_msgs rosidl_default_runtime)
 ament_package()

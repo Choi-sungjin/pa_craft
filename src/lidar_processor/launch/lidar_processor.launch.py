@@ -14,6 +14,8 @@ import math
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.conditions import IfCondition
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 
@@ -49,6 +51,7 @@ def _setup(context, *args, **kwargs):
     # 3) FOV 필터 + 로봇 중앙 기준 병합
     actions.append(Node(
         package='lidar_processor', executable='lidar_processor', name='lidar_processor',
+        condition=IfCondition(LaunchConfiguration('start_processor')),
         output='screen',
         parameters=[{'front_fov_deg': float(a['front_fov_deg']),
                      'rear_fov_deg': float(a['rear_fov_deg']),
@@ -60,6 +63,8 @@ def _setup(context, *args, **kwargs):
 
 def generate_launch_description():
     return LaunchDescription([
+        DeclareLaunchArgument('start_processor', default_value='true',
+                              description='false: drivers and TF only; perception_master merges scans'),
         DeclareLaunchArgument('front_port', default_value='/dev/lidar_front'),
         DeclareLaunchArgument('rear_port', default_value='/dev/lidar_rear'),
         # ---- base_link(로봇 중앙) 기준 [m]. 퍽 보정(lidar_calibrator) 결과 2026-10-16 ----

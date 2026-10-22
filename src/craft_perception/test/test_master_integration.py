@@ -72,6 +72,7 @@ def main():
     overrides = tempfile.NamedTemporaryFile(mode='w+', suffix='.yaml')
     detector_hz, apriltag_hz = (2.0, 2.0) if args.low_copy else (100.0, 7.0)
     overrides.write('perception_master:\n  ros__parameters:\n'
+                    '    lidar.input_mode: merged\n'
                     f'    schedule.d435_yolo.hz: {detector_hz}\n'
                     f'    schedule.knob_lever.hz: {detector_hz}\n'
                     f'    schedule.apriltag.hz: {apriltag_hz}\n')
