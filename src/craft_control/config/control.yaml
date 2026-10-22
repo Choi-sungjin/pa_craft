@@ -9,6 +9,14 @@ control_master:
     arm_lm_port: /dev/ttyACM0    # LM + four rotational arm motors + gripper OpenCR
     clock_wheel_port: /dev/ttyACM1  # clock + wheel x2 OpenCR
 
+    # /planning/hold is a live heartbeat: true or missing/stale input holds every axis.
+    # Resume requires fresh false, /control/planning_held=false, then new targets.
+    planning_watchdog_timeout_s: 0.5
+    require_planning_heartbeat: true
+    # Each OpenCR must supply a valid sample within this steady-clock interval.
+    # A previously seen board that times out reports state=2 until fresh feedback returns.
+    serial_feedback_timeout_s: 0.5
+
     # TurtleBot3 Waffle Pi drive parameters.
     wheel_radius: 0.033  # [m] nominal Waffle Pi wheel radius
     wheel_separation: 0.288  # [m] left/right wheel center-to-center distance

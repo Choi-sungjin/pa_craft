@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Planning master and Cartesian-arm IK bridge.
+"""Legacy reference; the installed planning_master is now the C++ executable.
+
+Historical planning master and Cartesian-arm IK bridge.
 
 Arm input: /planning/target_tcp_pose (PoseStamped, base_link frame)
 IK input/output: /ik_target, /ik_solution (provided by v75_arm_ik)

@@ -89,6 +89,19 @@ ArmIkJointValues ArmController::compute_command(const ArmJoints & current_pose) 
   return out;
 }
 
+std::optional<ArmIkJointValues> ArmController::get_joint_positions(
+  const ArmJoints & current_pose) const
+{
+  ArmIkJointValues positions{};
+  for (std::size_t joint = 0; joint < kArmIkJoints; ++joint) {
+    positions[joint] = (current_pose[joint] - motor_offsets_[joint]) / motor_directions_[joint];
+    if (!std::isfinite(positions[joint])) {
+      return std::nullopt;
+    }
+  }
+  return positions;
+}
+
 // 목표가 있고, 회전 관절 4개의 모터 피드백이 모두 목표 모터각에서 허용 오차 이내면 완료.
 bool ArmController::is_target_reached(const ArmJoints & current_pose) const
 {

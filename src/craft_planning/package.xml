@@ -2,24 +2,35 @@
 <package format="3">
   <name>craft_planning</name>
   <version>0.0.0</version>
-  <description>Planning: planning_master + path/clock/arm planners</description>
+  <description>C++ planning master: state machine, static-grid paths and headless URDF IK</description>
   <maintainer email="sssgggjjj4895@gmail.com">pa29</maintainer>
   <license>TODO</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
   <buildtool_depend>ament_cmake_python</buildtool_depend>
 
+  <depend>rclcpp</depend>
+  <depend>ament_index_cpp</depend>
+  <depend>craft_perception</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_geometry_msgs</depend>
+  <depend>diagnostic_msgs</depend>
+  <depend>pinocchio</depend>
+  <depend>yaml-cpp</depend>
+  <depend>libpng-dev</depend>
+
   <exec_depend>rclpy</exec_depend>
   <exec_depend>ament_index_python</exec_depend>
-  <exec_depend>std_msgs</exec_depend>
-  <exec_depend>geometry_msgs</exec_depend>
-  <exec_depend>nav_msgs</exec_depend>
-  <exec_depend>sensor_msgs</exec_depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>sensor_msgs</depend>
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-scipy</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
   <exec_depend>python3-pil</exec_depend>
   <test_depend>ament_cmake_pytest</test_depend>
+  <test_depend>ament_cmake_gtest</test_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

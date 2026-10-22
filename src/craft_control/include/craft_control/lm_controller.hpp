@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <string>
 
 namespace craft_control
@@ -16,6 +17,9 @@ public:
   void set_target(double position);  // store a validated linear position [m]
   void clear_target();
   double compute_command(double current_angle) const;  // motor rad
+  // Invert measured motor radians into slide metres; unavailable without calibration.
+  std::optional<double> get_joint_position(double current_angle) const;
+  const std::string & get_joint_name() const {return joint_name_;}
   bool is_target_reached(double current_angle) const;  // within tolerance [motor rad]
 
 private:

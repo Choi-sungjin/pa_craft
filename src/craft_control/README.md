@@ -8,6 +8,30 @@ The control node consumes these planning inputs:
 | `/planning/target_path` | `nav_msgs/Path` | Ordered points from the current position toward the goal |
 | `/planning/odom` | `nav_msgs/Odometry` | Chassis pose at the wheel axle center |
 | `/planning/target_clock_slot` | `std_msgs/Int32` | Target storage slot, 1 through 12 |
+| `/planning/hold` | `std_msgs/Bool` | Periodic hold/release heartbeat for every axis |
+
+The C++ planning master publishes `/planning/hold` every scheduling tick. Control
+starts held, acknowledges `/control/planning_held`, and accepts targets only after
+the acknowledgement is false. `true`, a heartbeat gap longer than
+`planning_watchdog_timeout_s` (default 0.5 s), or a board fault clears all stored
+and pending targets. Release needs new targets; it never resumes an old one.
+These deadlines use a steady clock, including when ROS simulation time pauses.
+Standalone control clients must supply this heartbeat too. The explicit
+`require_planning_heartbeat=false` compatibility setting permits operation before
+the first heartbeat; after one is received the watchdog remains enforced.
+
+Each board also has a `serial_feedback_timeout_s` receive deadline (default
+0.5 s). No first sample keeps control held. Once a board has reported feedback,
+stale feedback is reported as state 2 with completion false. Stale-board command
+transmission stops so the existing firmware watchdog can hold using its own live
+motor measurements. Healthy boards continue receiving hold commands.
+
+`/control/arm_joints` (`sensor_msgs/JointState`) supplies the planning IK seed:
+`[slide_joint, shoulder_joint, elbow_joint, wrist_pitch_joint, tool_roll_joint]`,
+with units `[m, rad, rad, rad, rad]`, `frame_id=base_link`. It is emitted only for
+fresh healthy arm feedback with both arm and LM mappings confirmed and valid
+calibration. Values invert the configured motor offsets, directions and gearing;
+they are measured feedback, not the previous command or RViz interpolation.
 
 Physical dimensions, limits, tracking tolerances, and clock geometry are defined
 in `config/control.yaml`. `ControlMaster` reads and validates the ROS parameters,

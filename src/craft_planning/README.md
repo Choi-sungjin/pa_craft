@@ -1,143 +1,201 @@
-# Path planning integration
+# craft_planning
 
-The planning core comes from [JunmyeongPark/KANT_path_planner](https://github.com/JunmyeongPark/KANT_path_planner),
-revision `9af403b68bc4378516132201e9f215cea4518ea1`.
-The STL/world-origin input changes are adapted from the user-supplied
-`KANT_path_planner.zip`. Source provenance and both READMEs are installed under
-`third_party/`.
+`planning_master` is a C++17 ROS 2 node that sequences base navigation, Cartesian
+arm goals, gripper commands, carousel slots and waits. Startup is `IDLE` with all
+axes held. The supplied `config/missions.yaml` contains `missions: {}`: loading
+the package never starts an example mission or invents physical target positions.
 
-```text
-scripts/planning_master.py     ROS subscriptions, parameters and publishers
-src/path_planner.py            ROS map/pose <-> KANT grid/path adapter
-src/kant_astar_arc.py          imported A*, ESDF, obstacle inflation, corner fillets
-config/planning.yaml          planner geometry and cost settings
-maps/maze.stl                  default Gazebo maze mesh
-maps/kant/*.txt                upstream example block maps
-```
+## Architecture
 
-The adapter preserves `set_goal()`, `set_odom()` and `get_target_path()` calls.
-It caches the path while odometry advances. A new goal or map invalidates it;
-a failed plan is retried when the starting cell/heading changes. Planning runs
-in the planning node, separately from the control timer process.
+| File/module | Responsibility |
+| --- | --- |
+| `src/planning_master.cpp` | ROS I/O, TF, input snapshots, asynchronous work, commands and diagnostics |
+| `StateMachine` | Readiness, deadlines, bounded calculation retries, completion and cancellation |
+| `PathPlanner` | Static maps, footprint inflation, native A*, dynamic obstacles and collision checks |
+| `ArmPlanner` | Headless URDF FK/IK with Pinocchio and a measured joint seed |
+| `planning_config.cpp` | Required typed ROS parameters and strict mission YAML parsing |
 
-## ROS interfaces
+`configure()` validates parameters, loads the fixed map, URDF and mission file,
+and configures the modules. `connect()` creates ROS interfaces, TF and the timer.
+`planning_loop()` checks readiness, collects calculations, advances one step,
+issues commands and reports state. Path/IK calculations run outside ROS callbacks;
+only one is in flight. Cancellation/replacement changes a generation so old
+results are discarded. Only calculations may retry, never physical actions.
 
-| Topic | Type | Direction |
+The installed executable is C++. `scripts/planning_master.py` remains legacy
+source and is not installed as the executable. Python `src/path_planner.py` and
+`src/kant_astar_arc.py` remain importable references with regression tests. Native
+C++ planning does not execute KANT `PASS`/`STOP_TURN`/`ALIGN` metadata or its
+corner-fillet/speed-profile algorithm. Provenance remains in `third_party/`.
+The bundled `v75_ws` IK header and URDF are reused directly; no external
+`/ik_target`/`/ik_solution` bridge or RViz demo is needed at runtime.
+
+## ROS inputs
+
+Types use the ROS `package/msg/Type` convention.
+
+| Topic | Type | Meaning |
 | --- | --- | --- |
-| `/perception/state/odom` | `nav_msgs/Odometry` | Current robot pose input |
-| `/planning/target_base_pose` | `geometry_msgs/PoseStamped` | New mobile-base goal input |
-| `/planning/target_path` | `nav_msgs/Path` | Collision-checked sampled path output |
-| `/planning/odom` | `nav_msgs/Odometry` | Forwarded odometry for control |
+| `/planning/mission` | `std_msgs/msg/String` | Configured mission name or control command below |
+| `/planning/target_base_pose` | `geometry_msgs/msg/PoseStamped` | Replace work with one navigation step |
+| `/planning/target_tcp_pose` | `geometry_msgs/msg/PoseStamped` | Replace work with one TCP step |
+| `/perception/state/odom` | `nav_msgs/msg/Odometry` | Fresh base pose in `map_frame` |
+| `/control/arm_joints` | `sensor_msgs/msg/JointState` | Default measured, inverse-calibrated URDF joints; configurable with `joint_state_topic` |
+| `/perception/lidar/obstacle` | `geometry_msgs/msg/PoseArray` | LiDAR points; required for navigation by default |
+| `/perception/vision/d435/obstacle` | `geometry_msgs/msg/PoseArray` | Additional vision obstacle points |
+| `/perception/vision/d435/knob_observations` | `craft_perception/msg/KnobObservationArray` | Depth-valid knob targets |
+| `/perception/vision/d435/puck_observations` | `craft_perception/msg/PuckObservationArray` | Axis-valid puck targets |
+| `/perception/vision/object_pose` | `geometry_msgs/msg/PoseStamped` | Optional generic observation source |
+| `/perception/vision/d435/object_detection` | `geometry_msgs/msg/PoseArray` | Generic object positions |
+| `/control/arm_lm_state`, `/control/wheel_state`, `/control/clock_state` | `std_msgs/msg/Int32` | 0 idle, 1 using, 2 fault |
+| `/control/{arm,lm,wheel,clock,gripper}_target_reached` | `std_msgs/msg/Bool` | Target acknowledgements/completion |
+| `/control/clock_slot` | `std_msgs/msg/Int32` | Measured slot; 0 means unavailable |
+| `/control/planning_held` | `std_msgs/msg/Bool` | Hold/release acknowledgement |
+| `/control/tracking_path` | `nav_msgs/msg/Path` | Control's resampled path for collision validation |
 
-The existing TCP goal and IK bridge are unchanged. Dynamic lidar obstacle
-updates are still a TODO; this integration uses static occupancy maps.
+## ROS outputs
 
-Map, goal and odometry **must use the same frame**. The adapter applies the map
-origin's translation and yaw when converting cells to world coordinates, but
-does not silently relabel frames or run TF transformations. If the estimator
-publishes in `odom` while the map is in `map`, transform the pose upstream first.
+| Topic | Type | Meaning |
+| --- | --- | --- |
+| `/planning/target_path` | `nav_msgs/msg/Path` | Navigation path; empty on stop/failure |
+| `/planning/odom` | `nav_msgs/msg/Odometry` | Fresh validated odometry forwarded to control |
+| `/planning/target_v` | `std_msgs/msg/Float64` | Base speed [m/s]; nonzero only after tracking-path validation |
+| `/planning/target_arm_joints` | `sensor_msgs/msg/JointState` | Slide [m], shoulder/elbow/wrist pitch/tool roll [rad] |
+| `/planning/gripper_command` | `std_msgs/msg/Bool` | true closes, false opens |
+| `/planning/target_clock_slot` | `std_msgs/msg/Int32` | Slot 1..12 |
+| `/planning/hold` | `std_msgs/msg/Bool` | Periodic all-axis hold level and heartbeat |
+| `/planning/state` | `std_msgs/msg/String` | Transient-local FSM state |
+| `/planning/diagnostics` | `diagnostic_msgs/msg/DiagnosticArray` | State, step, generation and readiness/fault reason |
 
-## Maps and settings
+Joint order is `slide_joint`, `shoulder_joint`, `elbow_joint`, `wrist_pitch_joint`,
+`tool_roll_joint`. Seeds require these measured joints within URDF limits;
+RViz's interpolated `/joint_states` is not hardware feedback. An independent
+encoder source can override `joint_state_topic` to `/arm/odom`; the current arm
+encoder sensor stub does not publish measurements.
 
-The supplied ZIP's main map input is a **binary STL in metres, Z-up**, whose XY
-vertices already use Gazebo world coordinates. Set `map_file` to that `.stl`.
-`stl_slice_heights: [0.10, 0.20, 0.30]` selects horizontal wall intersections;
-their union is sampled at resolution/4 and rasterized at `path_planner.res`
-(default 0.05 m). ESDF and robot-footprint inflation are applied afterwards.
+## Configuration, maps and coordinates
 
-The mesh's minimum intersected XY coordinates define the grid origin. Negative
-world coordinates are preserved: planning uses local grid coordinates internally
-and converts the output back to the same world frame exactly once. The core
-`load_stl_map(path, params, start=(x,y), goal=(x,y), targets=[(x,y,'d')])` and
-`run(grid)` APIs also preserve world coordinates, matching the supplied code.
-`map_frame` must match the estimator/goal frame. STL carries no ROS frame ID,
-resolution, SDF model pose or scale; apply any mesh-to-world transform before
-supplying the file. ASCII STL is rejected explicitly.
+Supply the complete [config/planning.yaml](config/planning.yaml). All application
+parameters are required; types/ranges and unknown overrides are checked at
+startup. Relative `map_file`, `ik.urdf` and `mission_file` paths resolve against
+the installed package share. Maps, URDF and missions are loaded at startup.
 
-The default map is `maps/maze.stl` ("Twin Closed Maze B", 580k triangles,
-XY extent about 4.46 x 6.36 m, walls 0.39 m high). It rasterizes to an 89 x 127
-grid with origin `(-2.217, -3.167)` m, i.e. two closed mazes separated by a wall;
-a goal in the other maze fails as disconnected. Relative `map_file` paths resolve
-against the installed `craft_planning` share directory. Use another mesh with:
+Base goals and odometry must use `map_frame` at the chassis axle center. The node
+does not relabel `odom` as `map` or subscribe to SLAM `/map`. Fixed-map geometry
+and localization must share a world origin. TCP goals use `ik.base_frame`
+(`base_link`), with `tool_tcp` as the default tip. Lengths are metres, rotations
+are radians/quaternions and timeouts are seconds. Perception targets/obstacles
+use TF at acquisition timestamps. Missing camera/base/map transforms prevent
+readiness; TF is not guessed.
 
-```bash
-ros2 run craft_planning planning_master --ros-args \
-  --params-file install/craft_planning/share/craft_planning/config/planning.yaml \
-  -p map_file:=/absolute/path/to/other.stl
+Maps support binary STL (metres, Z-up), text blocks, or trinary ROS YAML with PGM
+or PNG. STL unions horizontal slices and preserves XY world origin. Text uses
+an integer `block_size/res` ratio; its first row is the top. ROS YAML supplies
+resolution and origin translation/yaw. Unknown pixels, transparency and outside
+map positions are blocked; raw images and ASCII STL are rejected. Inflation uses
+`r_robot + margin`, conservatively including occupied cell area. Dynamic points
+are inflated in a private snapshot without modifying the static map.
+
+Native eight-direction A* includes heading-change/proximity costs, forbids
+diagonal corner cutting, and shortens routes only with collision-free lines of
+sight. Requested start/goal XY is preserved. `max_cells`, `max_expansions` and
+sampling checks bound work. Control resamples paths into a spline; its matching
+`/control/tracking_path` must also pass collision checks before driving, and new
+obstacle inputs trigger another check.
+
+## Missions and commands
+
+This is a complete **format example** for a separate mission file. Replace its
+positions/orientations with calibrated, reachable field goals before selecting
+it through `mission_file`. The supplied defaults do not enable this example.
+
+```yaml
+missions:
+  MAIN_MISSION:
+    - id: approach
+      type: navigate
+      frame: map
+      pose: [1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+    - id: grasp_pose
+      type: tcp
+      source: d435_knob
+      class_id: 0
+      frame: base_link
+      pose: [0.0, 0.0, 0.02, 0.0, 0.0, 0.0, 1.0]
+    - {id: close, type: gripper, close: true}
+    - {id: store, type: clock, slot: 1}
+    - {id: settle, type: wait, duration_s: 1.0}
 ```
 
-The planning map is fixed to `map_file` and is required; the node does not
-subscribe to `/map`. SLAM is used for localization only. The STL is in Gazebo
-world coordinates, so odometry and goals must be expressed in that frame
-(labelled `map_frame`); SLAM's own map origin is the robot start pose.
+Step IDs must be unique per mission. Unknown keys/types, invalid slots, frames,
+poses and non-finite values fail parsing. Pose is `[x,y,z,qx,qy,qz,qw]` with a
+nonzero quaternion. `source` defaults to `fixed`; alternatives are `d435_knob`,
+`d435_puck`, `object_pose`, `object_detection`. The highest-confidence fresh
+matching target is transformed into the step frame. Configured XYZ is an offset
+in that frame; the configured quaternion supplies orientation. Target selection
+is frozen when calculation begins. `class_id: -1` accepts any class.
 
-`map_file` may also be an upstream `.txt` block map, or a ROS
-trinary `.yaml` map referencing an image. A raw image alone lacks resolution and
-origin metadata and is rejected. YAML images use the configured thresholds and
-negate flag. Unknown occupancy, unknown gray pixels and transparent pixels are
-blocked. Outside the map is also blocked.
+Send the configured name on `/planning/mission` to start it; repeated names are
+deduplicated. `INIT` clears the remembered name without cancelling active motion.
+`STOP`/`CANCEL` cancel work, clear the queue and hold every axis; an existing
+fault stays latched. `RESET` clears the planning fault into `CANCELLED`, discards
+work and holds; it never resumes a command. Hardware faults and missing inputs
+must still be resolved before a new goal.
 
-ROS YAML maps supply their actual resolution; STL uses
-`path_planner.res` and `.txt` maps additionally use `path_planner.block_size`.
-Targets and starts are snapped
-to grid cell centers. Footprint inflation uses `r_robot + margin`; measure the
-circumscribed radius for the actual robot and carried load before operation.
+## Execution and limits
 
-All upstream `Params` fields are declared as `path_planner.*` ROS parameters in
-`config/planning.yaml`. `a_lon_max` is only an estimated stop-time cost, not a
-host motor acceleration ramp; DYNAMIXEL profiles remain firmware-owned.
+States are `IDLE`, `WAITING`, `COMPUTING`, `EXECUTING`, `SUCCEEDED`, `FAULT`,
+`CANCELLED`. Each step requests hold=true and waits for its fresh true
+acknowledgement, then requests hold=false and waits for a fresh released
+acknowledgement before sending a target. Missing/true/stale heartbeat clears
+control targets, commands zero wheel speed and holds measured actuator positions.
+Release cannot revive old targets; stop does not open the gripper. Explicit
+readiness/computation/execution deadlines, acquisition ages and steady-clock
+reception watchdogs fail closed.
+Control's `serial_feedback_timeout_s` also holds all axes before valid OpenCR
+feedback or when either board stream expires; stale board feedback reports fault.
+
+Completion requires post-command false then fresh true feedback, stable for the
+debounce interval. Navigation also checks actual goal distance and optional yaw;
+clock checks measured slot and idle state. Bool feedback lacks goal IDs, so
+arbitrarily delayed old false/true pairs cannot be fully correlated. Gripper
+position completion does not prove that an object was grasped.
+
+Pure Pursuit has no in-place-turn input. Excessive initial heading error is
+rejected; `goal_heading_required=true` also rejects incompatible final approach
+headings and checks arrival yaw. Default arrival is position-only. Arm IK checks
+URDF limits and pose tolerances, with no self/environment collision checking or
+motor trajectory profiling. OpenCR/DYNAMIXEL owns motor profiles. Calibrate the
+footprint, wheel geometry, motor directions/offsets, LM pulley/gearing/travel and
+gripper limits/current thresholds. Default arm/LM/gripper mappings remain
+unconfirmed in control; these are not hardware-ready calibration values.
+
+## Build and verification
+
+Provide ROS 2, Pinocchio's CMake package (ROS package `pinocchio`), yaml-cpp,
+libpng and declared dependencies. Planning uses `craft_perception` message types,
+so its existing OpenCV/ncnn dependencies also apply; see its
+[build instructions](../craft_perception/README.md#빌드와-검증). From the repository
+root, with `ROS_DISTRO` set for the installed distribution:
 
 ```bash
-colcon build --packages-select craft_planning
+source /opt/ros/$ROS_DISTRO/setup.bash
+rosdep install --from-paths src --ignore-src -r -y
+colcon build --packages-up-to craft_planning craft_control --cmake-args -DBUILD_TESTING=ON
 source install/setup.bash
-ros2 run craft_planning planning_master --ros-args \
-  --params-file install/craft_planning/share/craft_planning/config/planning.yaml
+ros2 run craft_planning planning_master --ros-args --params-file \
+  "$(ros2 pkg prefix craft_planning)/share/craft_planning/config/planning.yaml"
+colcon test --packages-select craft_planning craft_control --event-handlers console_direct+
+colcon test-result --verbose
+ROS_DOMAIN_ID=173 ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST \
+  CRAFT_CONTROL_BINARY="$(ros2 pkg prefix craft_control)/lib/craft_control/control_master" \
+  python3 src/craft_control/test/test_planning_watchdog_integration.py
 ```
 
-To try the original text map, pass `-p map_file:=/absolute/path/to/map20.txt`
-and `-p path_planner.block_size:=0.25` (the ZIP defaults to 0.05).
-In that 20x20 map, block `(2, 2)` has world center `(0.625, 4.375)` m and block
-`(17, 17)` has center `(4.375, 0.625)` m. File loading does not replace the live
-odometry start or invent a goal from the example. Publish a goal explicitly:
+Use the Pinocchio package built for the active ROS distribution. The verified
+Lyrical build uses `ros-lyrical-pinocchio` 4.1.0 and its matching native dependencies;
+the initial pip `pin` dependency combination crashed during ROS node construction.
 
-```bash
-ros2 topic pub --once /planning/target_base_pose geometry_msgs/msg/PoseStamped \
-  '{header: {frame_id: map}, pose: {position: {x: 4.375, y: 0.625}, orientation: {w: 1.0}}}'
-```
-
-Bringup loads `planning.yaml` with launch argument `map_file` (default
-`maps/maze.stl`).
-
-## Path versus execution
-
-The core retains `(x, y, yaw, curvature, v_limit)` samples and
-`PASS` / `STOP_TURN` / `ALIGN` waypoint modes in `PathPlanner.last_leg`.
-The original multi-target `run()` API remains available directly from
-`craft_planning.kant_astar_arc`; the ROS adapter plans one explicit goal at a time.
-
-`nav_msgs/Path` carries only poses. Current control uses the sampled positions
-with Pure Pursuit and does not consume the upstream curvature, speed limits, or
-waypoint modes. It cannot execute required in-place turns or ALIGN actions yet.
-The mission/motion FSM must handle those actions and issue a suitable
-`/planning/target_v` before complete automatic driving is available. This change
-does not publish a nonzero target speed or pretend these modes are executed.
-
-By default `goal_heading_required=false`. When enabled, goal yaw is quantized
-to the closest cardinal direction, and KANT preserves the straight approach
-segment and ALIGN metadata. It does not solve arbitrary final orientations.
-
-Failures (blocked/out-of-bounds endpoints, disconnected maps, frame mismatch)
-publish an empty path and report the reason; previous geometry is not reused as
-a successful result for a failed new goal.
-
-## Verification
-
-```bash
-colcon build --packages-select craft_planning --cmake-args -DBUILD_TESTING=ON
-colcon test --packages-select craft_planning --event-handlers console_direct+
-```
-
-STL tests follow the synthetic offset-origin box and partition-wall example in
-the supplied ZIP. They check wall placement, world-coordinate output, obstacle
-detours, slice settings, and malformed inputs. A separate test plans inside the
-packaged `maps/maze.stl` and checks that crossing between the twin mazes fails.
+Tests cover native map/FK/IK/FSM/configuration behavior, ROS scheduling with
+synthetic feedback, and control heartbeat/hold/recovery using disposable PTYs.
+They do not verify physical motor calibration or complete hardware bringup.
