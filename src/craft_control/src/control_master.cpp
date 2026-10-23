@@ -229,12 +229,9 @@ public:
     wheel_vyaw_variance_ = positive_param("wheel_vyaw_variance");
     imu_frame_ = declare_parameter<std::string>("imu_frame");
     imu_gyro_variance_ = positive_param("imu_gyro_variance");
-    imu_accel_variance_ = positive_param("imu_accel_variance");
-    imu_gyro_bias_ = declare_parameter<std::vector<double>>("imu_gyro_bias");
-    if (imu_gyro_bias_.size() != 3 || !std::all_of(imu_gyro_bias_.begin(), imu_gyro_bias_.end(),
-        [](double v) {return std::isfinite(v);}))
-    {
-      throw std::runtime_error("imu_gyro_bias must be 3 finite values [rad/s] (config/control.yaml)");
+    imu_gyro_z_bias_ = declare_parameter<double>("imu_gyro_z_bias");
+    if (!std::isfinite(imu_gyro_z_bias_)) {
+      throw std::runtime_error("imu_gyro_z_bias must be finite [rad/s] (config/control.yaml)");
     }
     const double serial_timeout = declare_parameter("serial_feedback_timeout_s", 0.5);
     serial_timeout_s_ = serial_timeout;
@@ -262,8 +259,8 @@ public:
     tracking_path_pub_ = create_publisher<nav_msgs::msg::Path>("/control/tracking_path", 10);
     planning_held_pub_ = create_publisher<std_msgs::msg::Bool>("/control/planning_held", 10);
     arm_joint_feedback_pub_ = create_publisher<sensor_msgs::msg::JointState>("/control/arm_joints", 10);
-    wheel_odom_pub_ = create_publisher<nav_msgs::msg::Odometry>("/wheel/odom", rclcpp::SensorDataQoS());
-    imu_pub_ = create_publisher<sensor_msgs::msg::Imu>("/imu/data", rclcpp::SensorDataQoS());
+    wheel_odom_pub_ = create_publisher<nav_msgs::msg::Odometry>("/control/wheel/odom", rclcpp::SensorDataQoS());
+    imu_pub_ = create_publisher<sensor_msgs::msg::Imu>("/control/imu/data", rclcpp::SensorDataQoS());
     tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
     planning_hold_sub_ = create_subscription<std_msgs::msg::Bool>(
       "/planning/hold", 10,
@@ -371,8 +368,8 @@ private:
       std::vector<double> v;
 
       // Validate the line: must be CSV, contain five values, and contain only finite numbers.
-      // 12: wheel_l, wheel_r, clock, wheel_state, clock_state, imu_ok, gx, gy, gz, ax, ay, az
-      if (!parse_csv(line, v) || v.size() != 12) {
+      // 7: wheel_l, wheel_r, clock, wheel_state, clock_state, imu_ok, gz
+      if (!parse_csv(line, v) || v.size() != 7) {
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "bad clock+wheel OpenCR line: %s", line.c_str());
         continue;
       }
@@ -393,7 +390,7 @@ private:
       wheel_state_ = static_cast<int>(v[3]);
       clock_state_ = static_cast<int>(v[4]);
       imu_ok_ = v[5] != 0.0;
-      std::copy(v.begin() + 6, v.begin() + 12, imu_sample_.begin());
+      imu_gz_ = v[6];
 
       have_clock_wheel_feedback_ = true; // 정상 clock & wheel 피드백을 한 번이라도 받은 적이 있는가
       return true;
@@ -559,27 +556,22 @@ private:
     tf_broadcaster_->sendTransform(tf);
   }
 
-  // Raw OpenCR board-frame sample in imu_frame; base_link->imu_link TF carries the mounting.
+  // OpenCR board-frame yaw rate in imu_frame; base_link->imu_link TF carries the mounting.
   void publish_imu()
   {
     if (!imu_ok_) {
-      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "OpenCR IMU not connected: /imu/data off");
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "OpenCR IMU not connected: /control/imu/data off");
       return;
     }
     sensor_msgs::msg::Imu imu;
     imu.header.stamp = now();
     imu.header.frame_id = imu_frame_;
-    imu.orientation_covariance[0] = -1.0;  // no orientation estimate
-    imu.angular_velocity.x = imu_sample_[0] - imu_gyro_bias_[0];
-    imu.angular_velocity.y = imu_sample_[1] - imu_gyro_bias_[1];
-    imu.angular_velocity.z = imu_sample_[2] - imu_gyro_bias_[2];
-    imu.linear_acceleration.x = imu_sample_[3];
-    imu.linear_acceleration.y = imu_sample_[4];
-    imu.linear_acceleration.z = imu_sample_[5];
-    for (int i : {0, 4, 8}) {
-      imu.angular_velocity_covariance[i] = imu_gyro_variance_;
-      imu.linear_acceleration_covariance[i] = imu_accel_variance_;
-    }
+    // Yaw rate only: orientation and acceleration are not provided (covariance[0] = -1).
+    imu.orientation_covariance[0] = -1.0;
+    imu.linear_acceleration_covariance[0] = -1.0;
+    imu.angular_velocity.z = imu_gz_ - imu_gyro_z_bias_;
+    imu.angular_velocity_covariance[0] = imu.angular_velocity_covariance[4] = 1e6;  // unmeasured x/y
+    imu.angular_velocity_covariance[8] = imu_gyro_variance_;
     imu_pub_->publish(imu);
   }
 
@@ -985,10 +977,9 @@ private:
   std::string odom_frame_, base_frame_, imu_frame_;
   bool publish_odom_tf_ = false;
   double wheel_vx_variance_ = 0.0, wheel_vyaw_variance_ = 0.0;
-  double imu_gyro_variance_ = 0.0, imu_accel_variance_ = 0.0;
-  std::vector<double> imu_gyro_bias_;
+  double imu_gyro_variance_ = 0.0, imu_gyro_z_bias_ = 0.0;
   bool imu_ok_ = false;
-  std::array<double, 6> imu_sample_{};  // gx, gy, gz [rad/s], ax, ay, az [m/s^2]
+  double imu_gz_ = 0.0;  // board-frame yaw rate [rad/s]
   rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_pub_;
   double serial_timeout_s_ = 0.5;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr wheel_odom_pub_;

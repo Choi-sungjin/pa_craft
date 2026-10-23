@@ -72,7 +72,7 @@ class FakeBoard:
 class Harness:
     def __init__(self, binary, calibrated=True):
         self.arm = FakeBoard([0.05, 0.1, 0.2, 0.3, 0.4, 0.6, 0, 0])
-        self.drive = FakeBoard([0, 0, 0.7, 0, 0, 1, 0, 0, 0, 0, 0, -9.8])  # + imu_ok, gyro, accel
+        self.drive = FakeBoard([0, 0, 0.7, 0, 0, 1, 0])  # + imu_ok, gz
         self.log = tempfile.TemporaryFile(mode='w+t')
         config = Path(__file__).resolve().parents[1] / 'config' / 'control.yaml'
         arguments = [str(binary), '--ros-args', '--params-file', str(config)]

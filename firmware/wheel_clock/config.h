@@ -19,7 +19,6 @@ const craft::AxisConfig kAxes[3] = {
    256 * craft::kTwoPi - kPositionTickRad, 10, 30, 0.03490658503988659},
 };
 
-// OpenCR on-board IMU (2018 boards: MPU9250, ±2000 dps / ±2 g as set by the OpenCR IMU library).
-// Same factors as the official TurtleBot3 firmware; cIMU::aRes assumes 8 g and is not used.
-constexpr double kGyroRadSPerLsb = 0.0010642;        // (2000/32768) deg/s * pi/180
-constexpr double kAccelMS2PerLsb = 0.000598550415;   // (2/32768) g * 9.80665
+// OpenCR on-board IMU (2018 boards: MPU9250, ±2000 dps as set by the OpenCR IMU library).
+// Same factor as the official TurtleBot3 firmware.
+constexpr double kGyroRadSPerLsb = 0.0010642;  // (2000/32768) deg/s * pi/180

@@ -172,12 +172,12 @@ command first, in the same order, then the board-specific state:
 ```text
 host -> OpenCR: wheel_l,wheel_r,clock_motor_angle
 OpenCR -> host: wheel_l_feedback,wheel_r_feedback,clock_motor_angle,wheel_state,clock_state,
-                imu_ok,gx,gy,gz,ax,ay,az
+                imu_ok,gz
 ```
 
-Each sample also publishes `/wheel/odom` (wheel dead reckoning with twist covariance) and,
-when `imu_ok=1`, `/imu/data` in `imu_link` (raw OpenCR board frame, gyro bias from
-`imu_gyro_bias` removed, no orientation). `odom->base_link` comes from robot_localization
+Each sample also publishes `/control/wheel/odom` (wheel dead reckoning with twist covariance) and,
+when `imu_ok=1`, `/control/imu/data` in `imu_link` (OpenCR board-frame yaw rate only, minus
+`imu_gyro_z_bias`; no orientation or acceleration). `odom->base_link` comes from robot_localization
 (`craft_perception/config/ekf.yaml`); set `publish_odom_tf: true` only when running without it.
 
 The control node reports on each new valid serial sample:

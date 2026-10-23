@@ -27,8 +27,8 @@ control_master:
     # TurtleBot3 Waffle Pi drive parameters.
     wheel_radius: 0.033  # [m] nominal Waffle Pi wheel radius
     wheel_separation: 0.288  # [m] left/right wheel center-to-center distance
-    # Wheel dead reckoning -> /wheel/odom. robot_localization (craft_perception/config/ekf.yaml)
-    # fuses it with /imu/data and owns odom->base_link, so publish_odom_tf stays false then.
+    # Wheel dead reckoning -> /control/wheel/odom. robot_localization (craft_perception/config/ekf.yaml)
+    # fuses it with /control/imu/data and owns odom->base_link, so publish_odom_tf stays false then.
     odom_frame: odom
     base_frame: base_link
     publish_odom_tf: false
@@ -38,10 +38,9 @@ control_master:
     # OpenCR on-board IMU (raw board frame). Mounting incl. upside-down is the bringup TF.
     imu_frame: imu_link
     imu_gyro_variance: 0.0001      # [(rad/s)^2] ~0.01 rad/s std; IMU yaw rate is the trusted source
-    imu_accel_variance: 0.04       # [(m/s^2)^2]
-    # Residual gyro offset left after the firmware's power-up zero calibration [rad/s], board frame.
-    # Measure: robot still, average /imu/data angular_velocity for ~30 s.
-    imu_gyro_bias: [0.0, 0.0, 0.0]
+    # Residual gz offset left after the firmware's power-up zero calibration [rad/s], board frame.
+    # Measure: robot still, average /control/imu/data angular_velocity.z for ~30 s.
+    imu_gyro_z_bias: 0.0
     max_v: 0.26           # [m/s] nominal Waffle Pi maximum linear speed
     # Host limits target speed. OpenCR firmware must configure DYNAMIXEL Profile Acceleration(108)
     # and owns the motor velocity PID, feedforward, acceleration profile, and motor-level tracking.
