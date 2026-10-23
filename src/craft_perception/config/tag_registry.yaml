@@ -1,0 +1,7 @@
+# One lookup table shared by PerceptionMaster and PlanningMaster.
+# Fill this after the official tag allocation is published.
+# Example:
+# tags:
+#   7: {mission: MAIN_MISSION}
+#   23: {puck: 1}
+tags: {}

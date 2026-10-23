@@ -1,27 +1,50 @@
 planning_master:
   ros__parameters:
-    # Gazebo binary .stl in metres, Z-up; relative paths resolve against the package share.
-    # Required: the planning map is fixed; SLAM only localizes, /map is not subscribed.
+    # All application parameters are required and validated by configure().
     map_file: maps/maze.stl
     map_frame: map
-    stl_slice_heights: [0.10, 0.20, 0.30]  # [m] union of horizontal wall intersections
+    stl_slice_heights: [0.10, 0.20, 0.30]
     occupancy_threshold: 65
-    # KANT supports cardinal goal headings and an approach straight; requires STOP_TURN/ALIGN FSM.
     goal_heading_required: false
+    mission_file: config/missions.yaml
+    # Shared with PerceptionMaster. Empty until the official allocation is published.
+    tag_registry_file: config/tag_registry.yaml
+    loop_hz: 20.0
+    replan_period_s: 0.2
+    # Acquisition age and steady-clock receive watchdogs are checked independently.
+    odom_timeout_s: 0.5
+    joint_timeout_s: 0.5
+    observation_timeout_s: 0.5
+    obstacle_timeout_s: 0.5
+    require_lidar: true
+    joint_state_topic: /control/arm_joints  # Measured URDF joints; requires calibrated control mappings.
+    observation_min_confidence: 0.5
+    cruise_speed: 0.12  # [m/s]; control also applies chassis/motor limits.
+    goal_tolerance: 0.03  # [m]
+    fsm:
+      initialization_timeout_s: 10.0
+      ready_timeout_s: 5.0
+      compute_timeout_s: 3.0
+      execution_timeout_s: 30.0
+      feedback_timeout_s: 0.5
+      stop_timeout_s: 3.0
+      max_compute_retries: 1  # Calculations only, never physical action retries.
+    ik:
+      urdf: urdf/v75_robot.urdf
+      base_frame: base_link
+      tip_frame: tool_tcp
+      position_tolerance: 0.0001  # [m]
+      orientation_tolerance: 0.001  # [rad]
+      max_iterations: 300
+      max_restarts: 30
     path_planner:
-      block_size: 0.05  # [m] supplied ZIP default; legacy map20 text examples require 0.25
-      res: 0.05  # [m] STL/block-map raster resolution; OccupancyGrid/YAML retain their resolution
-      r_robot: 0.21  # [m] circumscribed radius, including the carried load; measure on hardware
-      margin: 0.03  # [m] additional obstacle clearance
-      lam: 0.60  # [m equivalent] 90-degree turn cost
+      block_size: 0.05
+      res: 0.05
+      r_robot: 0.21
+      margin: 0.03
+      lam: 0.60
       w_prox: 1.0
-      prox_band: 0.15  # [m]
-      r_min: 0.08  # [m] smaller corners require STOP_TURN
-      r_hi_global: 0.40  # [m]
-      r_tol: 0.01  # [m]
-      arc_sample: 0.02  # [m]
-      v_ref: 0.26  # [m/s] planning speed limit, not a motor command
-      w_max: 1.82  # [rad/s]
-      a_lat_max: 0.50  # [m/s^2]
-      approach_len: 0.30  # [m]
-      a_lon_max: 0.50  # [m/s^2] time-cost estimate only; motor profiles remain firmware-owned
+      prox_band: 0.15
+      arc_sample: 0.02
+      max_cells: 2000000
+      max_expansions: 500000

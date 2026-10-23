@@ -5,6 +5,7 @@
 #include "craft_perception/obstacle_detector.hpp"
 #include "craft_perception/puck_axis.hpp"
 #include "craft_perception/shared_frame.hpp"
+#include "craft_perception/tag_registry.hpp"
 #include "craft_perception/yolo_detector.hpp"
 #include <optional>
 #include <string>
@@ -17,12 +18,13 @@ struct D435Config {
   DetectorConfig yolo;      // knob_sign model, shared by knob_depth/object/obstacle
   int knob_class_id = 0;
   std::string apriltag_family = "tag36h11";
+  TagRegistry tag_registry;
+  double puck_tag_box_scale = 1.0;
   double knob_grow = 2.0, knob_tolerance_m = 0.03;
   int knob_min_points = 50;
   double object_inner_fraction = 0.5;
   std::vector<int> obstacle_class_ids;
   double obstacle_max_range_m = 1.5, obstacle_near_quantile = 0.1;
-  DetectorConfig puck_yolo;  // separate puck model, run on its own by puck_axis
   PuckAxisConfig puck;
 };
 
@@ -36,8 +38,9 @@ struct PuckObservation {
 };
 
 // D435 color + aligned depth. One YOLO inference per frame (detect) feeds
-// knob_depth / detect_objects / detect_obstacles through the same boxes; AprilTag and
-// puck_axis read the frame directly. nullopt = invalid input (master skips, no publish),
+// knob_depth / detect_objects / detect_obstacles through the same boxes. AprilTag reads
+// mission and puck IDs; puck_axis expands configured puck-tag boxes and uses depth.
+// nullopt = invalid input (master skips, no publish),
 // empty vector = valid frame with nothing found.
 // Each function is called from one master task at a time; different functions may run
 // concurrently (each owns its own model/state).
@@ -45,7 +48,7 @@ class D435Perception {
 public:
   bool configure(const D435Config &config);
   std::optional<std::vector<Detection>> detect(const SharedFrame &frame);
-  std::optional<std::vector<int>> read_apriltag(const SharedFrame &frame) const;
+  std::optional<std::vector<AprilTagDetection>> read_apriltag(const SharedFrame &frame) const;
   std::optional<std::vector<KnobDepthObservation>> knob_depth(const SharedFrame &frame,
     const std::vector<Detection> &boxes, const Intrinsics &intrinsics) const;
   std::optional<std::vector<ObjectPoint>> detect_objects(const SharedFrame &frame,
@@ -56,11 +59,13 @@ public:
     const SharedFrame &frame, const Intrinsics &intrinsics);
 private:
   int knob_class_id_ = 0;
-  YoloDetector yolo_, puck_yolo_;
+  YoloDetector yolo_;
   AprilTagReader apriltag_;
   KnobDepth knob_depth_;
   ObjectDetector object_detector_;
   ObstacleDetector obstacle_detector_;
   PuckAxis puck_axis_;
+  TagRegistry tag_registry_;
+  double puck_tag_box_scale_ = 1.0;
 };
 }

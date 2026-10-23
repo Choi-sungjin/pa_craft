@@ -35,6 +35,9 @@ public:
       : bus_(bus), axes_(axes), confirmed_(hardware_confirmed), baud_(baud),
         current_scale_(current_a_per_tick) {}
 
+  // Optional: print ",v1,v2,..." after the state fields of every feedback line.
+  void setFeedbackExtension(void (*extension)()) { extension_ = extension; }
+
   void begin() {
     Serial.begin(115200);
     // USB must not gate feedback: ControlMaster waits for the first sample.
@@ -216,10 +219,12 @@ private:
       Serial.print(',');
     }
     if (N == 3) {
-      Serial.print(state(0, 2)); Serial.print(','); Serial.println(state(2, 3));
+      Serial.print(state(0, 2)); Serial.print(','); Serial.print(state(2, 3));
     } else {
-      Serial.print(state(0, N)); Serial.print(','); Serial.println(current_a_, 6);
+      Serial.print(state(0, N)); Serial.print(','); Serial.print(current_a_, 6);
     }
+    if (extension_) extension_();
+    Serial.println();
   }
 
   Dynamixel2Arduino &bus_;
@@ -228,6 +233,7 @@ private:
   const uint32_t baud_;
   const double current_scale_;
   CsvReceiver<N> receiver_;
+  void (*extension_)() = nullptr;
   double feedback_[N] = {};
   double target_[N] = {};
   bool moving_[N] = {};

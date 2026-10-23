@@ -20,21 +20,21 @@ bool AprilTagReader::is_valid_input(const cv::Mat &bgr) const {
   return !bgr.empty() && bgr.dims == 2 && bgr.type() == CV_8UC3;
 }
 
-std::vector<int> AprilTagReader::compute_result(const cv::Mat &bgr) const {
+std::vector<AprilTagDetection> AprilTagReader::compute_result(const cv::Mat &bgr) const {
   cv::Mat gray;
   cv::cvtColor(bgr, gray, cv::COLOR_BGR2GRAY);
   std::vector<int> ids;
   std::vector<std::vector<cv::Point2f>> corners;
   cv::aruco::detectMarkers(gray, dictionary_, corners, ids, parameters_);
-  std::vector<std::pair<float, int>> ordered;
+  std::vector<AprilTagDetection> output;
   for (size_t i = 0; i < ids.size(); ++i) {
-    float center_x = 0;
-    for (const auto &point : corners[i]) center_x += point.x / 4;
-    ordered.emplace_back(center_x, ids[i]);
+    cv::Point2f center;
+    for (const auto &point : corners[i]) center += point * 0.25f;
+    output.push_back({ids[i], center, cv::Rect2f(cv::boundingRect(corners[i]))});
   }
-  std::sort(ordered.begin(), ordered.end());
-  ids.clear();
-  for (const auto &item : ordered) ids.push_back(item.second);
-  return ids;
+  std::sort(output.begin(), output.end(), [](const auto &a, const auto &b) {
+    return a.center.x < b.center.x;
+  });
+  return output;
 }
 }  // namespace craft_perception

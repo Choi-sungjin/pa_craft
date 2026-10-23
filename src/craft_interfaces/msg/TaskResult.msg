@@ -1,0 +1,19 @@
+uint8 RUNNING=0
+uint8 SUCCEEDED=1
+uint8 FAILED=2
+uint8 STOPPING=3
+uint8 STOPPED=4
+uint8 REJECTED=5
+# Matrix columns: Arm, LM, Wheel, Clock, Gripper.
+uint8 UNUSED=0
+uint8 ACTIVE=1
+uint8 DONE=2
+uint8 ERROR=3
+uint8 HALTING=4
+uint8 HALTED=5
+std_msgs/Header header
+uint64 task_id
+uint64 revision
+uint8 status
+uint8[5] controllers
+string reason

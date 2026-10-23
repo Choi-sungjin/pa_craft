@@ -5,13 +5,42 @@
 
 control_master:
   ros__parameters:
+    wheel_heading_tolerance: 0.5
+    wheel_rotate_angular_speed: 0.6  # [rad/s] in-place turn before tracking/final alignment
+    settle_time_s: 0.1
+    stop_position_tolerance_rad: 0.002
+    wheel_stop_tolerance_rad_s: 0.02
+    task_timeout_s: 30.0
+    odom_timeout_s: 0.5
     # TODO: update port names
     arm_lm_port: /dev/ttyACM0    # LM + four rotational arm motors + gripper OpenCR
     clock_wheel_port: /dev/ttyACM1  # clock + wheel x2 OpenCR
 
+    # /planning/hold is a live heartbeat: true or missing/stale input holds every axis.
+    # Resume requires fresh false, /control/planning_held=false, then new targets.
+    planning_watchdog_timeout_s: 0.5
+    require_planning_heartbeat: true
+    # Each OpenCR must supply a valid sample within this steady-clock interval.
+    # A previously seen board that times out reports state=2 until fresh feedback returns.
+    serial_feedback_timeout_s: 0.5
+
     # TurtleBot3 Waffle Pi drive parameters.
     wheel_radius: 0.033  # [m] nominal Waffle Pi wheel radius
     wheel_separation: 0.288  # [m] left/right wheel center-to-center distance
+    # Wheel dead reckoning -> /control/wheel/odom. robot_localization (craft_perception/config/ekf.yaml)
+    # fuses it with /control/imu/data and owns odom->base_link, so publish_odom_tf stays false then.
+    odom_frame: odom
+    base_frame: base_link
+    publish_odom_tf: false
+    # Rough floor: wheels slip, so trust wheel speed loosely and wheel yaw rate barely (EKF ignores it).
+    wheel_vx_variance: 0.0025      # [(m/s)^2] ~0.05 m/s std
+    wheel_vyaw_variance: 0.25      # [(rad/s)^2]
+    # OpenCR on-board IMU (raw board frame). Mounting incl. upside-down is the bringup TF.
+    imu_frame: imu_link
+    imu_gyro_variance: 0.0001      # [(rad/s)^2] ~0.01 rad/s std; IMU yaw rate is the trusted source
+    # Residual gz offset left after the firmware's power-up zero calibration [rad/s], board frame.
+    # Measure: robot still, average /control/imu/data angular_velocity.z for ~30 s.
+    imu_gyro_z_bias: 0.0
     max_v: 0.26           # [m/s] nominal Waffle Pi maximum linear speed
     # Host limits target speed. OpenCR firmware must configure DYNAMIXEL Profile Acceleration(108)
     # and owns the motor velocity PID, feedforward, acceleration profile, and motor-level tracking.
@@ -21,8 +50,8 @@ control_master:
     # Pure Pursuit tuning: path and odometry must use the same frame, at the axle center.
     lookahead_distance: 0.3  # [m] starting value; tune on the robot
     wheel_goal_tolerance: 0.03  # [m] stop when the path endpoint is within this distance
-    # Incoming paths are resampled every path_spacing along a natural cubic spline through
-    # their points and republished on /control/tracking_path. Keep it well below lookahead.
+    # Incoming straight path segments are subdivided at path_spacing without changing geometry
+    # and republished on /control/tracking_path. Keep it well below lookahead.
     path_spacing: 0.02  # [m]
 
     # 12-slot puck storage: 0 motor rad = slot 12; positive CCW increases slot numbers.

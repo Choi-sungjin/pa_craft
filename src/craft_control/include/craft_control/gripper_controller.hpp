@@ -11,6 +11,8 @@ public:
     double grasp_current_threshold_a, double grasp_current_debounce, double tolerance);
   // Store open/close after ControlMaster validation; configure() must have succeeded.
   void set_target(bool close);
+  // Release the target and current-based grasp estimate; commands hold current feedback.
+  void clear_target();
   double compute_command(double current_angle) const;
   // Open: within tolerance of the open angle. Close: within tolerance of the close angle, or grasped.
   bool is_target_reached(double current_angle) const;

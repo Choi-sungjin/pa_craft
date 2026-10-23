@@ -60,6 +60,15 @@ double LmController::compute_command(double current_angle) const
   return std::clamp(requested, min_angle_, max_angle_);
 }
 
+std::optional<double> LmController::get_joint_position(double current_angle) const
+{
+  if (!conversion_ready_) {
+    return std::nullopt;
+  }
+  const double position = (current_angle - offset_) * pulley_radius_ / (direction_ * gear_ratio_);
+  return std::isfinite(position) ? std::optional<double>(position) : std::nullopt;
+}
+
 // 목표가 있고, LM 모터 피드백이 목표 모터각에서 허용 오차 이내면 완료.
 bool LmController::is_target_reached(double current_angle) const
 {

@@ -36,11 +36,6 @@ pa_craft/
     │       ├── control_master.cpp
     │       ├── lateral_controller.cpp
     │       └── longitudinal_controller.cpp
-    ├── craft_mission/
-    │   ├── CMakeLists.txt
-    │   ├── package.xml
-    │   └── src/
-    │       └── mission_fsm.cpp
     ├── craft_perception/
     │   ├── CMakeLists.txt
     │   ├── package.xml
@@ -49,7 +44,7 @@ pa_craft/
     │   │   └── slam.yaml
     │   ├── include/craft_perception/ # 일반 C++ 모듈 인터페이스
     │   ├── msg/                  # 검출·손잡이·puck 관측 메시지
-    │   ├── models/               # knob_sign(v3.pt), puck_blue(target_blue_v3) ncnn 모델
+    │   ├── models/               # knob_sign ncnn 모델 (puck는 AprilTag ID로 구분)
     │   └── src/
     │       ├── perception_master.cpp # 연결·configure·타이머 (control_master 형식)
     │       ├── d435_perception.cpp   # D435 클래스: yolo → knob_depth/object/obstacle, apriltag, puck_axis
@@ -85,11 +80,8 @@ pa_craft/
         ├── CMakeLists.txt
         ├── package.xml
         └── src/
-            ├── arm_encoder_processor.cpp
             ├── c310_processor.cpp
-            ├── imu_processor.cpp
-            ├── realsense_processor.cpp
-            └── wheel_encoder_processor.cpp
+            └── realsense_processor.cpp
 ```
 
 ## 주요 디렉터리
@@ -97,10 +89,9 @@ pa_craft/
 | 경로 | 역할 |
 | --- | --- |
 | `src/craft_bringup` | ROS 2 노드를 함께 실행하는 launch 파일 |
-| `src/craft_sensors` | 카메라, IMU, 엔코더 입력 처리 |
+| `src/craft_sensors` | D435·C310 카메라 입력 처리 (IMU·엔코더는 control 쪽에서 발행) |
 | `src/lidar_processor` | 전·후방 LiDAR 구동·TF·병합 → `/lidar/merged` ([실행 안내](src/lidar_processor/README.md)) |
 | `src/craft_perception` | C++ PerceptionMaster + D435/C310 클래스 (ncnn·AprilTag·깊이·레버·puck 인지) ([실행·주기 설정](src/craft_perception/README.md)) |
-| `src/craft_mission` | 미션 상태와 진행 순서 관리 |
 | `src/craft_planning` | 주행 경로 계획 |
 | `src/craft_control` | 로봇 팔·시계 조작 계획, 주행 및 조작 목표를 제어 입력으로 연결 |
 | `firmware/wheel_clock`, `firmware/lm_arm` | OpenCR 두 대의 모터 펌웨어 ([설정·빌드 안내](firmware/README.md)) |

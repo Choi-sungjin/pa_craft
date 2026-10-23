@@ -1,0 +1,14 @@
+# Calibrate real goals and offsets before adding a mission; no motion is configured by default.
+# Supported types: navigate, tcp, gripper, clock, wait.
+# Pose: [x, y, z, qx, qy, qz, qw], metres and a nonzero quaternion.
+# navigate uses map_frame; tcp uses ik.base_frame. The frame field is optional but must match.
+# Observed sources use xyz as an offset in the target frame and require an explicit quaternion.
+# Sources: fixed, d435_knob, d435_puck, object_pose, object_detection.
+# missions:
+#   MAIN_MISSION:
+#     - {id: approach, type: navigate, pose: [1, 1, 0, 0, 0, 0, 1], frame: map}
+#     - {id: grasp, type: tcp, source: d435_knob, class_id: 0, pose: [0, 0, 0.02, 0, 0, 0, 1]}
+#     - {id: close, type: gripper, close: true}
+#     - {id: carousel, type: clock, slot: 1}
+#     - {id: settle, type: wait, duration_s: 1.0}
+missions: {}

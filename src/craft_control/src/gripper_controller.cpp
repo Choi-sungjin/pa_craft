@@ -48,6 +48,14 @@ void GripperController::set_target(bool close)
   has_target_ = true;
 }
 
+void GripperController::clear_target()
+{
+  has_target_ = false;
+  closing_ = false;
+  overcurrent_time_ = 0.0;
+  grasped_ = false;
+}
+
 double GripperController::compute_command(double current_angle) const
 {
   const double requested = has_target_ ? target_angle_ : current_angle;

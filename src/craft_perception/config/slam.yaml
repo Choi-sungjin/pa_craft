@@ -1,5 +1,6 @@
 # 2D SLAM (slam_toolbox): sub /lidar/merged
-# NOTE: slam_toolbox publishes map->odom TF, not /lidar/odom (state_estimator expects /lidar/odom)
+# map->odom is owned by robot_localization ekf_global (ekf.yaml), which fuses SLAM's pose
+# with wheel + IMU. Outputs are remapped in craft.launch.py: /perception/lidar/{pose,map,map_metadata}.
 slam_toolbox:
   ros__parameters:
     scan_topic: /lidar/merged
@@ -7,3 +8,4 @@ slam_toolbox:
     map_frame: map
     base_frame: base_link
     mode: mapping
+    transform_publish_period: 0.0  # do not publish map->odom

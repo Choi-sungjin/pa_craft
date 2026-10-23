@@ -4,7 +4,9 @@ perception_master:
     # C++ keeps no duplicate defaults. Startup fails on a missing or mistyped key.
     executor_threads: 6
     max_input_age_s: 0.5
-    odometry_source_topic: /wheel/odom  # StateEstimator relays this source (fusion on hold)
+    odometry_source_topic: /odometry/global  # robot_localization ekf_global (wheel + IMU + SLAM)
+    map_frame: map  # source already in map is relayed; other frames are moved here via TF
+    tag_registry_file: config/tag_registry.yaml
 
     d435:
       frame: camera_color_optical_frame
@@ -30,19 +32,8 @@ perception_master:
         class_ids: [1, 2, 3, 4]  # YOLO classes treated as obstacles (traffic sign stands)
         max_range_m: 1.5
         near_quantile: 0.1       # nearest-surface depth of the box
-      puck_yolo:  # puck_axis runs this separate model itself (not d435.yolo)
-        model_dir: models/puck_blue
-        backend: ncnn  # ncnn (laptop/CPU) | tensorrt (Jetson; build with TensorRT)
-        engine: models/puck_blue/model.engine  # tensorrt only: built on the Jetson with trtexec
-        ncnn_blobs: [in0, out0]
-        tensorrt_blobs: [images, output0]  # Ultralytics ONNX names
-        input_size: 640
-        class_names: [target_blue]
-        confidence: 0.5
-        nms_iou: 0.45
-        max_detections: 10
-        ncnn_threads: 1
-      puck_axis:  # puck_axis_live.py constants
+      puck_axis:  # Registry puck-tag ROI + depth
+        tag_box_scale: 2.0  # puck diameter / printed tag side; calibrate on hardware
         grow: 2.0
         plane_threshold_m: 0.004
         min_height_m: 0.008

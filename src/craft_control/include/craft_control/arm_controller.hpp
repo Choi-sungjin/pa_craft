@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstddef>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -31,6 +32,9 @@ public:
   void clear_target();
   // Four rotational motor positions in; four rotational motor commands out. LM/gripper are separate.
   ArmIkJointValues compute_command(const ArmJoints & current_pose) const;
+  // Invert measured motor radians into model joint radians, independent of the target.
+  std::optional<ArmIkJointValues> get_joint_positions(const ArmJoints & current_pose) const;
+  const ArmIkJointNames & get_joint_names() const {return ik_joint_names_;}
   // All four motor feedback angles within tolerance of the stored target.
   bool is_target_reached(const ArmJoints & current_pose) const;
 
