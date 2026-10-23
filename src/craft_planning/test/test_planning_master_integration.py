@@ -159,7 +159,7 @@ def fake(tmp_path, monkeypatch, request):
             helper = Path(__file__).resolve().parents[2] / 'craft_control/test/test_planning_watchdog_integration.py'
             spec = importlib.util.spec_from_file_location('pty_helpers', helper)
             module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
-            boards = [module.FakeBoard([0.,0.,0.,0.,0.,.2,0,0]), module.FakeBoard([0.,0.,0.,0,0])]
+            boards = [module.FakeBoard([0.,0.,0.,0.,0.,.2,0,0]), module.FakeBoard([0.,0.,0.,0,0,1,0,0,0,0,0,-9.8])]
             control_binary = Path(get_package_prefix('craft_control'))/'lib/craft_control/control_master'
             control_config = Path(get_package_share_directory('craft_control'))/'config/control.yaml'
             args = [str(control_binary),'--ros-args','--params-file',str(control_config)]

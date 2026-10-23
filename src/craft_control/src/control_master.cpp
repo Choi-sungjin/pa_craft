@@ -5,6 +5,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -21,6 +22,7 @@
 #include "rclcpp/rclcpp.hpp"
 #include "nav_msgs/msg/odometry.hpp"
 #include "nav_msgs/msg/path.hpp"
+#include "sensor_msgs/msg/imu.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
 #include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/float64.hpp"
@@ -222,6 +224,18 @@ public:
     wheel_odometry_.configure(wheel_radius_, wheel_separation);
     odom_frame_ = declare_parameter<std::string>("odom_frame");
     base_frame_ = declare_parameter<std::string>("base_frame");
+    publish_odom_tf_ = declare_parameter<bool>("publish_odom_tf");
+    wheel_vx_variance_ = positive_param("wheel_vx_variance");
+    wheel_vyaw_variance_ = positive_param("wheel_vyaw_variance");
+    imu_frame_ = declare_parameter<std::string>("imu_frame");
+    imu_gyro_variance_ = positive_param("imu_gyro_variance");
+    imu_accel_variance_ = positive_param("imu_accel_variance");
+    imu_gyro_bias_ = declare_parameter<std::vector<double>>("imu_gyro_bias");
+    if (imu_gyro_bias_.size() != 3 || !std::all_of(imu_gyro_bias_.begin(), imu_gyro_bias_.end(),
+        [](double v) {return std::isfinite(v);}))
+    {
+      throw std::runtime_error("imu_gyro_bias must be 3 finite values [rad/s] (config/control.yaml)");
+    }
     const double serial_timeout = declare_parameter("serial_feedback_timeout_s", 0.5);
     serial_timeout_s_ = serial_timeout;
     if (!arm_feedback_watchdog_.configure(serial_timeout) ||
@@ -249,6 +263,7 @@ public:
     planning_held_pub_ = create_publisher<std_msgs::msg::Bool>("/control/planning_held", 10);
     arm_joint_feedback_pub_ = create_publisher<sensor_msgs::msg::JointState>("/control/arm_joints", 10);
     wheel_odom_pub_ = create_publisher<nav_msgs::msg::Odometry>("/wheel/odom", rclcpp::SensorDataQoS());
+    imu_pub_ = create_publisher<sensor_msgs::msg::Imu>("/imu/data", rclcpp::SensorDataQoS());
     tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
     planning_hold_sub_ = create_subscription<std_msgs::msg::Bool>(
       "/planning/hold", 10,
@@ -356,7 +371,8 @@ private:
       std::vector<double> v;
 
       // Validate the line: must be CSV, contain five values, and contain only finite numbers.
-      if (!parse_csv(line, v) || v.size() != 5) { // 5: wheel_l, wheel_r, clock, wheel_state, clock_state
+      // 12: wheel_l, wheel_r, clock, wheel_state, clock_state, imu_ok, gx, gy, gz, ax, ay, az
+      if (!parse_csv(line, v) || v.size() != 12) {
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "bad clock+wheel OpenCR line: %s", line.c_str());
         continue;
       }
@@ -376,6 +392,8 @@ private:
       clock_angle_ = v[2];
       wheel_state_ = static_cast<int>(v[3]);
       clock_state_ = static_cast<int>(v[4]);
+      imu_ok_ = v[5] != 0.0;
+      std::copy(v.begin() + 6, v.begin() + 12, imu_sample_.begin());
 
       have_clock_wheel_feedback_ = true; // 정상 clock & wheel 피드백을 한 번이라도 받은 적이 있는가
       return true;
@@ -526,7 +544,12 @@ private:
     odom.pose.pose.orientation.w = std::cos(wheel_odometry_.yaw() / 2.0);
     odom.twist.twist.linear.x = wheel_odometry_.linear();
     odom.twist.twist.angular.z = wheel_odometry_.angular();
+    odom.pose.covariance[0] = odom.pose.covariance[7] = odom.pose.covariance[35] = 1e3;  // dead reckoning
+    odom.twist.covariance[0] = wheel_vx_variance_;
+    odom.twist.covariance[7] = wheel_vx_variance_;  // nonholonomic vy = 0
+    odom.twist.covariance[35] = wheel_vyaw_variance_;
     wheel_odom_pub_->publish(odom);
+    if (!publish_odom_tf_) {return;}  // robot_localization owns odom->base_link
     geometry_msgs::msg::TransformStamped tf;
     tf.header = odom.header;
     tf.child_frame_id = base_frame_;
@@ -534,6 +557,30 @@ private:
     tf.transform.translation.y = odom.pose.pose.position.y;
     tf.transform.rotation = odom.pose.pose.orientation;
     tf_broadcaster_->sendTransform(tf);
+  }
+
+  // Raw OpenCR board-frame sample in imu_frame; base_link->imu_link TF carries the mounting.
+  void publish_imu()
+  {
+    if (!imu_ok_) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "OpenCR IMU not connected: /imu/data off");
+      return;
+    }
+    sensor_msgs::msg::Imu imu;
+    imu.header.stamp = now();
+    imu.header.frame_id = imu_frame_;
+    imu.orientation_covariance[0] = -1.0;  // no orientation estimate
+    imu.angular_velocity.x = imu_sample_[0] - imu_gyro_bias_[0];
+    imu.angular_velocity.y = imu_sample_[1] - imu_gyro_bias_[1];
+    imu.angular_velocity.z = imu_sample_[2] - imu_gyro_bias_[2];
+    imu.linear_acceleration.x = imu_sample_[3];
+    imu.linear_acceleration.y = imu_sample_[4];
+    imu.linear_acceleration.z = imu_sample_[5];
+    for (int i : {0, 4, 8}) {
+      imu.angular_velocity_covariance[i] = imu_gyro_variance_;
+      imu.linear_acceleration_covariance[i] = imu_accel_variance_;
+    }
+    imu_pub_->publish(imu);
   }
 
   bool validate_odom(const nav_msgs::msg::Odometry & odom)
@@ -723,6 +770,7 @@ private:
     }
     if (clock_wheel_feedback_updated) {
       publish_wheel_odometry(now_s, serial_timeout_s_);
+      publish_imu();
       drive_received_at_ = now_s;
       update_settle(clock_anchor_, {clock_angle_}, clock_stable_at_, now_s);
     }
@@ -934,7 +982,14 @@ private:
   bool have_arm_lm_feedback_ = false;
   craft_control::WheelOdometry wheel_odometry_;
   std::optional<double> wheel_odom_at_;
-  std::string odom_frame_, base_frame_;
+  std::string odom_frame_, base_frame_, imu_frame_;
+  bool publish_odom_tf_ = false;
+  double wheel_vx_variance_ = 0.0, wheel_vyaw_variance_ = 0.0;
+  double imu_gyro_variance_ = 0.0, imu_accel_variance_ = 0.0;
+  std::vector<double> imu_gyro_bias_;
+  bool imu_ok_ = false;
+  std::array<double, 6> imu_sample_{};  // gx, gy, gz [rad/s], ax, ay, az [m/s^2]
+  rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_pub_;
   double serial_timeout_s_ = 0.5;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr wheel_odom_pub_;
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;

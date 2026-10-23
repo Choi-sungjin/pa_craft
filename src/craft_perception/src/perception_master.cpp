@@ -120,7 +120,8 @@ std::unique_ptr<msg::PuckObservationArray> puck_message(const std_msgs::msg::Hea
 PerceptionMaster::PerceptionMaster() : Node("perception_master") {
   configure();
   connect();
-  RCLCPP_WARN(get_logger(), "StateEstimator re-expresses one odometry source in the map frame; wheel/IMU/lidar fusion is not implemented");
+  RCLCPP_INFO(get_logger(), "StateEstimator: %s -> /perception/state/odom in %s (fusion: robot_localization)",
+    odometry_topic_.c_str(), map_frame_.c_str());
   RCLCPP_INFO(get_logger(), "PerceptionMaster ready; D435 classes=%zu, C310 classes=%zu, "
     "executor_threads=%d", d435_labels_.size(), c310_labels_.size(), executor_threads_);
 }

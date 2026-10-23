@@ -16,6 +16,9 @@
   <exec_depend>craft_planning</exec_depend>
   <exec_depend>craft_control</exec_depend>
   <exec_depend>slam_toolbox</exec_depend>
+  <exec_depend>robot_localization</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>lifecycle_msgs</exec_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

@@ -4,7 +4,7 @@
 #include <string>
 
 namespace craft_perception {
-// Re-express one odometry source in the map frame. Wheel/IMU/lidar fusion remains unimplemented.
+// Re-express the fused odometry (robot_localization ekf_global) in the map frame; relay if already there.
 class StateEstimator {
 public:
   bool is_valid_input(const nav_msgs::msg::Odometry &input) const;

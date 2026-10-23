@@ -4,8 +4,8 @@ perception_master:
     # C++ keeps no duplicate defaults. Startup fails on a missing or mistyped key.
     executor_threads: 6
     max_input_age_s: 0.5
-    odometry_source_topic: /wheel/odom  # control_master wheel dead reckoning (fusion on hold)
-    map_frame: map  # StateEstimator republishes the source in this frame via TF (slam map->odom)
+    odometry_source_topic: /odometry/global  # robot_localization ekf_global (wheel + IMU + SLAM)
+    map_frame: map  # source already in map is relayed; other frames are moved here via TF
     tag_registry_file: config/tag_registry.yaml
 
     d435:

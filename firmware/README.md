@@ -5,13 +5,18 @@ TODO를 실제 구현으로 교체했습니다. 호스트는 `src/craft_control/
 
 | 보드 / 스케치 | 명령 CSV | 피드백 CSV |
 | --- | --- | --- |
-| `wheel_clock/wheel_clock.ino` | `wheel_l,wheel_r,clock` | `wheel_l,wheel_r,clock,wheel_state,clock_state` |
+| `wheel_clock/wheel_clock.ino` | `wheel_l,wheel_r,clock` | `wheel_l,wheel_r,clock,wheel_state,clock_state,imu_ok,gx,gy,gz,ax,ay,az` |
 | `lm_arm/lm_arm.ino` | `lm,shoulder,elbow,wrist_pitch,tool_roll,gripper` | 같은 6개 위치 + `arm_lm_state,gripper_current_a` |
 
 USB CDC `Serial`, 115200 설정, ASCII CSV, 줄 끝 `\n`입니다. `\r\n`도 받습니다.
 피드백은 명령을 받기 전부터 자체 송신하며 정상 버스에서는 약 50 Hz입니다.
 wheel 값은 **rad/s**, 나머지 축은 **모터 rad**, 그리퍼 전류는 **A**입니다.
 LM의 m→rad 변환과 IK 관절 매핑은 호스트가 담당합니다.
+
+`wheel_clock` 보드는 OpenCR 내장 IMU(2018년 보드: MPU9250, ±2000 dps / ±2 g)를 같은 줄 뒤에 붙입니다.
+자이로는 **rad/s**, 가속도는 **m/s²**, 값은 보드 좌표계 그대로이고 장착 방향(현재 뒤집힘)은
+호스트의 `base_link→imu_link` TF가 처리합니다. 전원 투입 후 최대 5초간 자이로 영점을 잡으므로
+**그동안 로봇을 움직이지 마세요.** IMU가 응답하지 않으면 `imu_ok=0`과 0값을 보냅니다.
 
 ## 하드웨어 설정
 
