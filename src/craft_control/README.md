@@ -43,7 +43,7 @@ motor measurements. Healthy boards continue receiving hold commands.
 `[slide_joint, shoulder_joint, elbow_joint, wrist_pitch_joint, tool_roll_joint]`,
 with units `[m, rad, rad, rad, rad]`, `frame_id=base_link`. It is emitted only for
 fresh healthy arm feedback with both arm and LM mappings confirmed and valid
-calibration. Values invert the configured motor offsets, directions and gearing;
+calibration. Values invert the configured motor offsets, directions and measured LM conversion;
 they are measured feedback, not the previous command or RViz interpolation.
 
 Physical dimensions, limits, tracking tolerances, and clock geometry are defined
@@ -60,14 +60,32 @@ values in YAML. `LmController` handles the slide joint independently, converting
 linear displacement in metres to motor radians:
 
 ```text
-lm_motor_angle = lm_motor_offset + lm_motor_direction * lm_gear_ratio * position_m / lm_pulley_radius
+lm_motor_angle = lm_motor_offset + lm_motor_direction * position_m / lm_meters_per_rad
 ```
 
 LM motor limits and calibration use separate `lm_*` parameters, including
-`lm_mapping_confirmed`. Zero pulley radius and gear ratio disable LM targets and
-hold its measured motor angle; they do not disable the rotational arm controller.
-LM limits retain the former slide channel's values, in motor radians, pending
-hardware calibration. `GripperController` remains independent.
+`lm_mapping_confirmed`. A zero `lm_meters_per_rad` disables LM targets and
+holds its measured motor angle; this does not disable the rotational arm controller.
+`lm_meters_per_rad` is measured travel divided by motor rotation in radians; separate
+pulley radius and gear ratio parameters are unnecessary. LM calibration uses
+108 mm travel over -141.4 to 808.1 degrees, with 249.4 degrees as slide zero. `GripperController` remains independent.
+
+Direction settings assume hardware Reverse OFF. With URDF +Y forward and +Z up
+at the reference pose, `arm_joint_directions` is `[+1, +1, -1, +1]` in
+shoulder, elbow, wrist_pitch, tool_roll order; `lm_motor_direction` is `+1`
+(URDF `slide_joint` axis is -X, so + moves toward the LM motor, same as motor raw +).
+These arm signs were inferred from the reported physical motions at the reference
+pose and still require hardware validation with calibrated offsets. Arm firmware
+preserves raw motor signs; apply the URDF sign correction only in host YAML.
+Wheel signs are applied in firmware: left `+1`, right `-1`. Clock uses firmware
+`+1`, host `clock_direction: +1`, and host zero angle 314.6 degrees (slot 12).
+Gripper closes toward 229 degrees (5 degrees inside the 234-degree hard stop) from its
+94-degree open pose; its opposite closed endpoint is -53.1 degrees (limit -48.1).
+Grasp is detected by current (0.1 A for 0.1 s), not by reaching the close target. It uses open/close targets rather than an IK sign.
+
+Arm zero offsets and wrist pitch limits remain uncalibrated. Mapping confirmation
+flags and both firmware `kHardwareConfirmed` flags remain false. No board upload
+or physical motion validation has been performed for these settings.
 
 `TaskCommand.joints` carries the five-joint IK result: slide [m], then shoulder,
 elbow, wrist_pitch and tool_roll [rad]. ControlMaster validates the complete manipulator

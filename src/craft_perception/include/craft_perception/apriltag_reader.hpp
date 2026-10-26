@@ -1,5 +1,10 @@
 #pragma once
+#include <opencv2/core/version.hpp>
+#if CV_VERSION_MAJOR > 4 || (CV_VERSION_MAJOR == 4 && CV_VERSION_MINOR >= 7)
+#include <opencv2/objdetect/aruco_detector.hpp>
+#else
 #include <opencv2/aruco.hpp>
+#endif
 #include <string>
 #include <vector>
 

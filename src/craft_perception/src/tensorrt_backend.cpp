@@ -139,9 +139,9 @@ public:
     if (!context_->enqueueV3(stream_)) throw std::runtime_error("TensorRT enqueueV3 failed");
     check(cudaMemcpyAsync(host_output_, device_output_, sizeof(float) * rows_ * anchors_,
                           cudaMemcpyDeviceToHost, stream_), "copy output");
-    const size_t plane = static_cast<size_t>(mask_h_) * mask_w_;
+    const size_t mask_plane = static_cast<size_t>(mask_h_) * mask_w_;
     if (mask_dim_) {
-      check(cudaMemcpyAsync(host_protos_, device_protos_, sizeof(float) * mask_dim_ * plane,
+      check(cudaMemcpyAsync(host_protos_, device_protos_, sizeof(float) * mask_dim_ * mask_plane,
                             cudaMemcpyDeviceToHost, stream_), "copy protos");
     }
     check(cudaStreamSynchronize(stream_), "synchronize");
@@ -151,7 +151,7 @@ public:
     result.anchors = anchors_;
     if (mask_dim_) {
       result.protos = host_protos_;
-      result.plane_stride = plane;
+      result.plane_stride = mask_plane;
       result.mask_dim = mask_dim_;
       result.mask_h = mask_h_;
       result.mask_w = mask_w_;

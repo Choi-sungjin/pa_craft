@@ -1,0 +1,5 @@
+# LDS-03 x2 on Jetson (CP2102 10c4:ea60). Same VID/PID and by-id, so names follow physical USB ports.
+# Verified 2026-10-24 by covering the front LiDAR: 1-2.4 = front, 1-2.1 = rear.
+# Keep hub and cables in the same sockets; recheck with src/lidar_processor/scripts/find_lidar_ports.sh.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", KERNELS=="1-2.4", SYMLINK+="lidar_front", MODE="0666"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", KERNELS=="1-2.1", SYMLINK+="lidar_rear",  MODE="0666"

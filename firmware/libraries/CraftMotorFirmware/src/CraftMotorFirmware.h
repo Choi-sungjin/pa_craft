@@ -73,7 +73,7 @@ public:
     // Limit work per pass so a noisy USB sender cannot starve motor/watchdog work.
     double incoming[N];
     for (unsigned budget = 0; budget < 512 && Serial.available(); ++budget) {
-      if (receiver_.push(static_cast<char>(Serial.read()), incoming) && !fault_) {
+      if (receiver_.push(static_cast<char>(Serial.read()), incoming) && !fault_ && !relaxed_) {
         bool valid = true;
         for (unsigned i = 0; i < N; ++i) {
           const auto &a = axes_[i];
@@ -89,6 +89,9 @@ public:
           holding_ = false;
         }
       }
+      const Keyword keyword = receiver_.takeKeyword();
+      if (keyword == Keyword::kRelax && !fault_) relax();
+      if (keyword == Keyword::kHold && !fault_) hold();
     }
     const uint32_t now = millis();
     if (static_cast<uint32_t>(now - last_tick_ms_) < kPeriodMs) return;
@@ -96,7 +99,7 @@ public:
     if (!fault_) {
       if (!readFeedback()) {
         tripFault();
-      } else {
+      } else if (!relaxed_) {
         // Hold is captured once at timeout; no drift-following hold on later ticks.
         expired_ = commandExpired(millis(), last_command_ms_, received_, kCommandTimeoutMs);
         if (expired_ && !holding_) { holdTargets(); holding_ = true; }
@@ -107,6 +110,30 @@ public:
   }
 
 private:
+  // Torque off for moving the axes by hand. Feedback keeps tracking, so multi-turn
+  // positions stay valid; CSV commands are ignored and state reports 2 until HOLD.
+  void relax() {
+    if (!started_ || relaxed_) return;
+    relaxed_ = true;
+    received_ = false;
+    holding_ = true;
+    for (unsigned i = 0; i < N; ++i) {
+      if (!bus_.torqueOff(axes_[i].id) || !statusOk()) { tripFault(); return; }
+    }
+  }
+
+  // Torque back on, holding wherever the axes were left (wheels stopped).
+  void hold() {
+    if (!relaxed_) return;
+    if (!readFeedback()) { tripFault(); return; }
+    holdTargets();
+    if (!writeTargets()) { tripFault(); return; }
+    for (unsigned i = 0; i < N; ++i) {
+      if (!bus_.torqueOn(axes_[i].id) || !statusOk()) { tripFault(); return; }
+    }
+    relaxed_ = false;
+  }
+
   bool statusOk() const {
     return bus_.getLastLibErrCode() == 0 && bus_.getLastStatusPacketError() == 0;
   }
@@ -142,7 +169,7 @@ private:
       int32_t raw, error, torque;
       if (!read(ControlTableItem::HARDWARE_ERROR_STATUS, i, error) || error != 0 ||
           !read(ControlTableItem::TORQUE_ENABLE, i, torque) ||
-          (started_ && torque != 1) ||
+          (started_ && !relaxed_ && torque != 1) ||
           !read(axes_[i].velocity ? ControlTableItem::PRESENT_VELOCITY :
                                  ControlTableItem::PRESENT_POSITION, i, raw)) return false;
       // Subtract in double to avoid overflowing signed raw extended positions.
@@ -199,7 +226,7 @@ private:
   }
 
   int state(unsigned first, unsigned last) const {
-    if (fault_ || (received_ && expired_)) return 2;
+    if (fault_ || relaxed_ || (received_ && expired_)) return 2;
     for (unsigned i = first; i < last; ++i) {
       if (axes_[i].velocity) {
         if (fabs(feedback_[i]) > axes_[i].tolerance ||
@@ -246,6 +273,7 @@ private:
   bool initialized_ = false;
   bool started_ = false;
   bool fault_ = false;
+  bool relaxed_ = false;
 };
 
 }  // namespace craft

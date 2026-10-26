@@ -26,6 +26,17 @@ void protocol() {
   assert(!frame(receiver, std::string(300, '0') + "1,2,3\n", values));
   assert(!frame(receiver, std::string("1,2,3\0junk\n", 11), values));
   assert(frame(receiver, "4,5,6\n", values));
+  assert(receiver.takeKeyword() == craft::Keyword::kNone);
+  assert(!frame(receiver, "RELAX\r\n", values));
+  assert(receiver.takeKeyword() == craft::Keyword::kRelax);
+  assert(receiver.takeKeyword() == craft::Keyword::kNone); // read once
+  assert(!frame(receiver, "HOLD\n", values));
+  assert(receiver.takeKeyword() == craft::Keyword::kHold);
+  for (const auto &bad : {"RELAXX\n", "relax\n", " HOLD\n", "HOLD,1,2\n"}) {
+    assert(!frame(receiver, bad, values));
+    assert(receiver.takeKeyword() == craft::Keyword::kNone);
+  }
+  assert(values[0] == 4 && values[1] == 5 && values[2] == 6);
   assert(!craft::commandExpired(0x20, 0xfffffff0, true, 100));
   assert(craft::commandExpired(0x80, 0xfffffff0, true, 100));
   assert(craft::commandExpired(0, 0, false, 100));
@@ -106,6 +117,32 @@ void manipulator() {
     assert((bus.registers[{i + 1, GOAL_POSITION}] == static_cast<int32_t>((i + 1) * 1000)));
   }
   assert(Serial.output.find(",1,-0.026900\n") != std::string::npos);
+
+  // RELAX: torque off, commands ignored, moved-by-hand positions tracked without a fault.
+  Serial.input = "RELAX\n";
+  test_time_ms += 20;
+  board.tick();
+  for (unsigned i = 1; i <= 6; ++i) assert((bus.registers[{i, TORQUE_ENABLE}] == 0));
+  bus.registers[{2, PRESENT_POSITION}] = 7777;
+  Serial = {};
+  Serial.input = "0,0,0,0,0,0\n";
+  test_time_ms += 20;
+  board.tick();
+  assert((bus.registers[{1, GOAL_POSITION}] == 1000));
+  assert(Serial.output.find("7.777000") != std::string::npos);
+  assert(Serial.output.find(",2,-0.026900\n") != std::string::npos);
+  // HOLD: torque back on at the hand-moved position; commands work again.
+  Serial.input = "HOLD\n";
+  test_time_ms += 20;
+  board.tick();
+  for (unsigned i = 1; i <= 6; ++i) assert((bus.registers[{i, TORQUE_ENABLE}] == 1));
+  assert((bus.registers[{2, GOAL_POSITION}] == 7777));
+  Serial.input = "1,2,3,4,5,6\n";
+  test_time_ms += 20;
+  board.tick();
+  assert((bus.registers[{2, GOAL_POSITION}] == 2000));
+  bus.registers[{2, PRESENT_POSITION}] = 2000;
+
   bus.failed_item = PRESENT_CURRENT;
   test_time_ms += 20;
   board.tick();
@@ -116,5 +153,5 @@ int main() {
   protocol();
   wheelClock();
   manipulator();
-  std::cout << "Firmware protocol, watchdog, fault and channel tests passed\n";
+  std::cout << "Firmware protocol, watchdog, fault, relax/hold and channel tests passed\n";
 }

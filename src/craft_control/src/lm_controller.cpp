@@ -8,7 +8,7 @@ namespace craft_control
 
 bool LmController::configure(
   const std::string & joint_name, double min_angle, double max_angle,
-  double direction, double offset, double pulley_radius, double gear_ratio, double tolerance)
+  double direction, double offset, double meters_per_rad, double tolerance)
 {
   if (joint_name.empty() || !std::isfinite(min_angle) || !std::isfinite(max_angle) ||
     min_angle >= max_angle || !std::isfinite(direction) || std::abs(direction) != 1.0 ||
@@ -16,11 +16,8 @@ bool LmController::configure(
   {
     return false;
   }
-  // All-zero calibration remains a placeholder: hold position and reject linear targets.
-  const bool placeholder = pulley_radius == 0.0 && gear_ratio == 0.0;
-  const bool calibrated = std::isfinite(pulley_radius) && pulley_radius > 0.0 &&
-    std::isfinite(gear_ratio) && gear_ratio > 0.0;
-  if (!placeholder && !calibrated) {
+  // Zero calibration holds position and rejects linear targets.
+  if (!std::isfinite(meters_per_rad) || meters_per_rad < 0.0) {
     return false;
   }
   joint_name_ = joint_name;
@@ -28,10 +25,9 @@ bool LmController::configure(
   max_angle_ = max_angle;
   direction_ = direction;
   offset_ = offset;
-  pulley_radius_ = pulley_radius;
-  gear_ratio_ = gear_ratio;
+  meters_per_rad_ = meters_per_rad;
   tolerance_ = tolerance;
-  conversion_ready_ = calibrated;
+  conversion_ready_ = meters_per_rad > 0.0;
   return true;
 }
 
@@ -39,7 +35,7 @@ bool LmController::is_valid_target(const std::string & joint_name, double positi
 {
   return conversion_ready_ && joint_name == joint_name_ &&
          std::isfinite(position) &&
-         std::isfinite(offset_ + direction_ * gear_ratio_ * position / pulley_radius_);
+         std::isfinite(offset_ + direction_ * position / meters_per_rad_);
 }
 
 void LmController::set_target(double position)
@@ -56,7 +52,7 @@ void LmController::clear_target()
 double LmController::compute_command(double current_angle) const
 {
   const double requested = has_target_ ?
-    offset_ + direction_ * gear_ratio_ * target_position_ / pulley_radius_ : current_angle;
+    offset_ + direction_ * target_position_ / meters_per_rad_ : current_angle;
   return std::clamp(requested, min_angle_, max_angle_);
 }
 
@@ -65,7 +61,7 @@ std::optional<double> LmController::get_joint_position(double current_angle) con
   if (!conversion_ready_) {
     return std::nullopt;
   }
-  const double position = (current_angle - offset_) * pulley_radius_ / (direction_ * gear_ratio_);
+  const double position = (current_angle - offset_) * meters_per_rad_ / direction_;
   return std::isfinite(position) ? std::optional<double>(position) : std::nullopt;
 }
 

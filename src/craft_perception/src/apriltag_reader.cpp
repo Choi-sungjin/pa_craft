@@ -10,8 +10,13 @@ bool AprilTagReader::configure(const std::string &family) {
     {"tag36h10", cv::aruco::DICT_APRILTAG_36h10}, {"tag36h11", cv::aruco::DICT_APRILTAG_36h11}};
   const auto found = families.find(family);
   if (found == families.end()) return false;
+#if CV_VERSION_MAJOR > 4 || (CV_VERSION_MAJOR == 4 && CV_VERSION_MINOR >= 7)
+  dictionary_ = cv::makePtr<cv::aruco::Dictionary>(cv::aruco::getPredefinedDictionary(found->second));
+  parameters_ = cv::makePtr<cv::aruco::DetectorParameters>();
+#else
   dictionary_ = cv::aruco::getPredefinedDictionary(found->second);
   parameters_ = cv::aruco::DetectorParameters::create();
+#endif
   parameters_->cornerRefinementMethod = cv::aruco::CORNER_REFINE_APRILTAG;
   return true;
 }
@@ -25,7 +30,11 @@ std::vector<AprilTagDetection> AprilTagReader::compute_result(const cv::Mat &bgr
   cv::cvtColor(bgr, gray, cv::COLOR_BGR2GRAY);
   std::vector<int> ids;
   std::vector<std::vector<cv::Point2f>> corners;
+#if CV_VERSION_MAJOR > 4 || (CV_VERSION_MAJOR == 4 && CV_VERSION_MINOR >= 7)
+  cv::aruco::ArucoDetector(*dictionary_, *parameters_).detectMarkers(gray, corners, ids);
+#else
   cv::aruco::detectMarkers(gray, dictionary_, corners, ids, parameters_);
+#endif
   std::vector<AprilTagDetection> output;
   for (size_t i = 0; i < ids.size(); ++i) {
     cv::Point2f center;

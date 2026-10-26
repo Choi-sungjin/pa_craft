@@ -147,7 +147,7 @@ TEST(ArmController, MeasuredJointPositionsInvertMotorDirectionAndOffset)
 TEST(LmController, ConvertsLinearDisplacementUsingItsOwnMappingAndLimits)
 {
   craft_control::LmController controller;
-  ASSERT_TRUE(controller.configure("slide_joint", -5.0, 5.0, -1.0, 0.2, 0.01, 2.0, 0.01));
+  ASSERT_TRUE(controller.configure("slide_joint", -5.0, 5.0, -1.0, 0.2, 0.005, 0.01));
   EXPECT_DOUBLE_EQ(controller.compute_command(0.4), 0.4);
   ASSERT_TRUE(controller.is_valid_target("slide_joint", 0.01));
   controller.set_target(0.01);
@@ -158,10 +158,29 @@ TEST(LmController, ConvertsLinearDisplacementUsingItsOwnMappingAndLimits)
   EXPECT_DOUBLE_EQ(controller.compute_command(0.4), 0.4);
 }
 
+TEST(LmController, MeasuredTravelAndNominalPoseCalibration)
+{
+  craft_control::LmController controller;
+  constexpr double min_angle = -2.467895562319982;
+  constexpr double max_angle = 14.104005685366177;
+  constexpr double zero_angle = 4.352851154473858;
+  ASSERT_TRUE(controller.configure(
+    "slide_joint", min_angle, max_angle, 1.0, zero_angle, 0.006517055489639695, 0.01));
+  const auto lower = controller.get_joint_position(min_angle);
+  const auto upper = controller.get_joint_position(max_angle);
+  ASSERT_TRUE(lower);
+  ASSERT_TRUE(upper);
+  EXPECT_NEAR(*upper - *lower, 0.108, 1e-12);
+  controller.set_target(0.0);
+  EXPECT_NEAR(controller.compute_command(min_angle), zero_angle, 1e-12);
+  controller.set_target(*upper);
+  EXPECT_NEAR(controller.compute_command(min_angle), max_angle, 1e-12);
+}
+
 TEST(LmController, PlaceholderCalibrationHoldsAndRejectsTargets)
 {
   craft_control::LmController controller;
-  ASSERT_TRUE(controller.configure("slide_joint", -1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.01));
+  ASSERT_TRUE(controller.configure("slide_joint", -1.0, 1.0, 1.0, 0.0, 0.0, 0.01));
   EXPECT_FALSE(controller.is_valid_target("slide_joint", 0.1));
   EXPECT_DOUBLE_EQ(controller.compute_command(0.3), 0.3);
 }
@@ -169,11 +188,11 @@ TEST(LmController, PlaceholderCalibrationHoldsAndRejectsTargets)
 TEST(LmController, RejectsWrongNamesInvalidCalibrationAndNonFiniteTargets)
 {
   craft_control::LmController controller;
-  EXPECT_FALSE(controller.configure("slide_joint", -1, 1, 0, 0, 0.01, 1, 0.01));
-  EXPECT_FALSE(controller.configure("slide_joint", 1, -1, 1, 0, 0.01, 1, 0.01));
-  EXPECT_FALSE(controller.configure("slide_joint", -1, 1, 1, 0, 0, 1, 0.01));
-  EXPECT_FALSE(controller.configure("slide_joint", -1, 1, 1, 0, -0.01, 1, 0.01));
-  ASSERT_TRUE(controller.configure("slide_joint", -1, 1, 1, 0, 0.01, 1, 0.01));
+  EXPECT_FALSE(controller.configure("slide_joint", -1, 1, 0, 0, 0.01, 0.01));
+  EXPECT_FALSE(controller.configure("slide_joint", 1, -1, 1, 0, 0.01, 0.01));
+  EXPECT_FALSE(controller.configure("slide_joint", -1, 1, 1, 0, std::numeric_limits<double>::quiet_NaN(), 0.01));
+  EXPECT_FALSE(controller.configure("slide_joint", -1, 1, 1, 0, -0.01, 0.01));
+  ASSERT_TRUE(controller.configure("slide_joint", -1, 1, 1, 0, 0.01, 0.01));
   EXPECT_FALSE(controller.is_valid_target("shoulder_joint", 0.1));
   EXPECT_FALSE(controller.is_valid_target("slide_joint", std::numeric_limits<double>::quiet_NaN()));
   EXPECT_FALSE(controller.is_valid_target("slide_joint", std::numeric_limits<double>::infinity()));
@@ -182,14 +201,14 @@ TEST(LmController, RejectsWrongNamesInvalidCalibrationAndNonFiniteTargets)
 TEST(LmController, MeasuredLinearPositionInvertsCalibratedMotorMapping)
 {
   craft_control::LmController controller;
-  ASSERT_TRUE(controller.configure("slide_joint", -10.0, 10.0, -1.0, 0.2, 0.01, 2.0, 0.01));
+  ASSERT_TRUE(controller.configure("slide_joint", -10.0, 10.0, -1.0, 0.2, 0.005, 0.01));
   controller.set_target(0.02);
   const auto measured = controller.get_joint_position(controller.compute_command(0.0));
   ASSERT_TRUE(measured);
   EXPECT_NEAR(*measured, 0.02, 1e-12);
   EXPECT_EQ(controller.get_joint_name(), "slide_joint");
   EXPECT_FALSE(controller.get_joint_position(std::numeric_limits<double>::quiet_NaN()));
-  ASSERT_TRUE(controller.configure("slide_joint", -1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.01));
+  ASSERT_TRUE(controller.configure("slide_joint", -1.0, 1.0, 1.0, 0.0, 0.0, 0.01));
   EXPECT_FALSE(controller.get_joint_position(0.3));
 }
 
@@ -211,18 +230,18 @@ TEST(GripperController, ClearingTargetHoldsAndResetsGraspDetection)
   craft_control::GripperController controller;
   ASSERT_TRUE(controller.configure(0.0, 2.0, 0.5, 1.5, 1.0, 0.1, 0.05));
   controller.set_target(true);
-  controller.update_current_feedback(1.2, 0.2);
+  controller.update_current_feedback(1.2, 0.2, 1.0);
   ASSERT_TRUE(controller.is_grasped());
   controller.clear_target();
   EXPECT_DOUBLE_EQ(controller.compute_command(0.9), 0.9);
   EXPECT_FALSE(controller.is_target_reached(1.5));
   EXPECT_FALSE(controller.is_grasped());
-  controller.update_current_feedback(1.2, 0.2);
+  controller.update_current_feedback(1.2, 0.2, 1.0);
   EXPECT_FALSE(controller.is_grasped());
   controller.set_target(true);
-  controller.update_current_feedback(1.2, 0.05);
+  controller.update_current_feedback(1.2, 0.05, 1.0);
   EXPECT_FALSE(controller.is_grasped());
-  controller.update_current_feedback(1.2, 0.06);
+  controller.update_current_feedback(1.2, 0.06, 1.0);
   EXPECT_TRUE(controller.is_grasped());
 }
 
@@ -317,7 +336,7 @@ TEST(ArmController, TargetReachedRequiresAllJointsWithinTolerance)
 TEST(LmController, TargetReachedComparesMotorAngle)
 {
   craft_control::LmController controller;
-  ASSERT_TRUE(controller.configure("slide_joint", -5.0, 5.0, -1.0, 0.2, 0.01, 2.0, 0.01));
+  ASSERT_TRUE(controller.configure("slide_joint", -5.0, 5.0, -1.0, 0.2, 0.005, 0.01));
   EXPECT_FALSE(controller.is_target_reached(0.2));  // no target
   controller.set_target(0.01);  // -1.8 motor rad
   EXPECT_TRUE(controller.is_target_reached(-1.795));
@@ -334,10 +353,27 @@ TEST(GripperController, CloseCompletesOnAngleOrGrasp)
   controller.set_target(true);
   EXPECT_FALSE(controller.is_target_reached(1.0));
   EXPECT_TRUE(controller.is_target_reached(1.48));
-  controller.update_current_feedback(1.2, 0.2);  // object stops the jaws before close_angle
+  controller.update_current_feedback(1.2, 0.2, 1.0);  // object stops the jaws before close_angle
   EXPECT_TRUE(controller.is_target_reached(1.0));
   controller.set_target(false);  // grasp does not complete an open command
   EXPECT_FALSE(controller.is_target_reached(1.0));
+}
+
+TEST(GripperController, GraspLatchesAndHoldsASmallSqueezeInsteadOfStalling)
+{
+  craft_control::GripperController controller;
+  ASSERT_TRUE(controller.configure(0.0, 2.0, 0.5, 1.5, 1.0, 0.1, 0.05, 0.05));
+  controller.set_target(true);
+  EXPECT_DOUBLE_EQ(controller.compute_command(0.9), 1.5);  // closing toward close_angle
+  controller.update_current_feedback(1.2, 0.2, 0.9);     // the object stops the jaws at 0.9
+  ASSERT_TRUE(controller.is_grasped());
+  EXPECT_DOUBLE_EQ(controller.compute_command(0.9), 0.95);  // contact + squeeze, not 1.5
+  controller.update_current_feedback(0.3, 0.2, 0.93);    // lower current at the lighter squeeze
+  EXPECT_TRUE(controller.is_grasped());                   // stays latched
+  EXPECT_DOUBLE_EQ(controller.compute_command(0.93), 0.95);
+  controller.set_target(false);
+  EXPECT_FALSE(controller.is_grasped());
+  EXPECT_DOUBLE_EQ(controller.compute_command(0.93), 0.5);
 }
 
 TEST(ClockController, HoldsBeforeTargetAndNeverReportsUncommandedCompletion)

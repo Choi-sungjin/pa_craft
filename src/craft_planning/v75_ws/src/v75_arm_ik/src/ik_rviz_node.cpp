@@ -88,7 +88,7 @@ class IkRvizNode : public rclcpp::Node {
     const std::string knob_joint = declare_parameter<std::string>("knob_joint", "knob_joint");
     const std::string roll_joint = declare_parameter<std::string>("roll_joint", "tool_roll_joint");
     jaw_joints_ = declare_parameter<std::vector<std::string>>(
-        "jaw_joints", std::vector<std::string>{"jaw_upper_joint", "jaw_lower_joint"});
+        "jaw_joints", std::vector<std::string>{"jaw_upper_joint"});  // jaw_lower_joint mimics it
     jaw_open_ = declare_parameter<double>("jaw_open", -0.021);
     jaw_grip_ = declare_parameter<double>("jaw_grip", -0.0018);
     grab_radius_ = declare_parameter<double>("knob_grab_radius", 0.006);
@@ -311,7 +311,7 @@ class IkRvizNode : public rclcpp::Node {
     const Vector3d axis_w = cam_b.translation() + Vector3d(0, base1, 0);
     // 3) LM 만 이동: 그리퍼 축을 카메라가 보던 축으로
     VectorXd q3 = r1.q;
-    q3[slide] += cam_off.x();
+    q3[slide] -= cam_off.x();  // slide_joint axis is -X
     if (q3[slide] < m.lowerPositionLimit[slide] || q3[slide] > m.upperPositionLimit[slide]) {
       RCLCPP_WARN(get_logger(), "LM 이동 후 위치 %.1f mm 가 LM 범위 밖", q3[slide] * 1000);
       return;

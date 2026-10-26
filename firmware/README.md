@@ -26,21 +26,27 @@ EKF가 쓰는 값이 이것뿐이라서입니다. 단위는 **rad/s**, 값은 �
 바꿔 빌드하면 초기 위치를 유지하며 토크를 켭니다.
 
 - 기본 통신은 OpenCR `Serial3`, DIR 84, `BDPIN_DXL_PWR_EN`, Protocol 2.0, 1 Mbps입니다.
-- 확정 ID는 wheel/clock 보드 **wheel_r=1, clock=2, wheel_l=3**입니다.
+- 확정 ID는 wheel/clock 보드 **wheel_l=1, wheel_r=2, clock=3**입니다.
   CSV 채널 순서는 기존 `wheel_l,wheel_r,clock`을 유지하고 각 채널의 모터 ID만 매핑합니다.
 - LM/arm 보드는 **LM=1, shoulder=2, elbow=3, wrist_pitch=4, tool_roll=5, gripper=6**입니다.
   보드마다 별도 버스이므로 ID가 같아도 됩니다.
   이 펌웨어는 모터 ID나 통신 속도를 재설정하지 않습니다.
 - 기본 환산값은 4096 ticks/rev, 속도 0.229 RPM/tick을 사용하는 X-series 기준입니다.
   LM/arm 보드의 그리퍼는 `PRESENT_CURRENT`를 지원해야 합니다.
-  0.00269 A/tick은 XM430 예시이며 실제 모델에 맞게 수정해야 합니다.
+  확인된 모델은 바퀴 XM430-W210, 나머지 XM430-W350이며 전류 환산은 0.00269 A/tick입니다.
 - 위치축은 **Extended Position Control Mode(4)**, wheel은 **Velocity Control Mode(1)**입니다.
   필요한 모드/레지스터를 지원하지 않거나 버스 읽기/쓰기가 실패하면 오류로 정지합니다.
 - `direction`은 물리 모터 회전 방향, `zero_tick`은 호스트 모터각 0의 raw 위치입니다.
   `angle_rad = direction * (raw - zero_tick) * units_per_tick`입니다.
   호스트의 IK→모터 방향·오프셋과 중복 적용하지 않도록 좌표계를 맞추세요.
+- 모든 모터의 하드웨어 Reverse는 OFF 기준입니다. wheel 펌웨어 방향은 왼쪽 +1,
+  오른쪽 -1, clock +1입니다. LM/arm/gripper 펌웨어 방향은 모두 +1로 raw 부호를 유지합니다.
+  URDF 방향 보정은 호스트에서만 shoulder +1, elbow +1, wrist_pitch -1, tool_roll +1,
+  LM +1로 적용합니다 (URDF slide 축을 -X로 바꿔 raw +와 일치). 팔 방향은 기준 자세에서의 실측 설명에 따른 판단이며 영점 보정 후
+  실기 검증이 남아 있습니다. 두 계층에서 같은 방향 보정을 중복 적용하지 않습니다.
+- clock 영점은 슬롯 12에서 314.6도로 YAML에만 적용하며 펌웨어 zero_tick은 0입니다.
 - wheel은 `max_wheel=7.8`을 따르고, LM·arm·gripper 제한은 현재 `control.yaml`의
-  **임시값**과 같습니다. 실측 제한을 두 설정에 함께 반영해야 합니다.
+  실측값과 일치합니다.
 - `PROFILE_ACCELERATION` 예시 raw 값은 10, 위치축 `PROFILE_VELOCITY`는 30입니다.
   실제 모델의 단위와 하중에 맞춰 조정하세요. 가속 프로파일과 PID는 DYNAMIXEL이 담당합니다.
   `DRIVE_MODE=0`으로 정방향·속도 기반 프로파일을 설정하고 물리 방향은 소프트웨어로 환산합니다.
@@ -70,6 +76,11 @@ clock은 각도를 0~2π로 접지 않습니다. 음수와 2π 초과 목표를 
 - 오류 피드백의 위치·전류는 마지막 완전한 샘플입니다. 최초 샘플 전 오류는 0입니다.
   호스트는 `state=2`일 때 도착/파지 완료를 false로 보고합니다. timeout 복구를 위해
   명령 송신은 계속하며, 펌웨어의 영구 오류에서는 수신 목표를 무시합니다.
+- 한 줄 전체가 `RELAX`이면 보드의 모든 축 토크를 끕니다(손으로 옮기기용, 팔은 떨어집니다).
+  피드백은 계속 나가고 전원이 유지되는 한 다회전 위치도 유지됩니다. 해제 중에는 CSV 명령을
+  무시하고 `state=2`입니다. `HOLD`는 그 자리의 위치를 목표로 잡고 토크를 다시 켭니다.
+  최초 명령 이후의 의도한 해제이므로 위의 "예상하지 않은 토크 해제" 오류가 아닙니다.
+  호스트 단축 명령: `relaxarm` / `holdarm` (`~/.bashrc`, control_master 종료 후).
 
 ## 빌드 및 업로드
 

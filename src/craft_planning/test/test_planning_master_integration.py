@@ -165,8 +165,8 @@ def fake(tmp_path, monkeypatch, request):
             args = [str(control_binary),'--ros-args','--params-file',str(control_config)]
             for key, value in {'arm_lm_port':boards[0].port,'clock_wheel_port':boards[1].port,
                                'arm_ik_mapping_confirmed':'true','lm_mapping_confirmed':'true',
-                               'gripper_mapping_confirmed':'true','lm_pulley_radius':'1.0',
-                               'lm_gear_ratio':'1.0','gripper_open_angle':'0.2',
+                               'gripper_mapping_confirmed':'true','lm_meters_per_rad':'1.0',
+                               'gripper_open_angle':'0.2',
                                'gripper_close_angle':'1.2'}.items():
                 args.extend(['-p',f'{key}:={value}'])
             control_child = subprocess.Popen(args,stdout=log,stderr=log)

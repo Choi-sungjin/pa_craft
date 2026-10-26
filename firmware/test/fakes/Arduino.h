@@ -26,6 +26,7 @@ struct TestSerial {
     stream << std::fixed << std::setprecision(precision) << value;
     output += stream.str();
   }
+  void println() { output += '\n'; }
   void println(int value) { print(value); output += '\n'; }
   void println(double value, int precision) { print(value, precision); output += '\n'; }
 };

@@ -121,37 +121,51 @@
   <joint name="slide_joint" type="prismatic">
     <parent link="base_link" />
     <child link="slide_link" />
-    <origin xyz="0.02 0 0" rpy="0 0 0" />
-    <axis xyz="1 0 0" />
-    <limit effort="0" velocity="0" lower="-0.072" upper="0.032" />
+    <!-- Measured: carriage block left edge 36 mm from the waffle's LM-motor edge at the motor end
+         stop (motor 808.1 deg); was x 0.02, which drew the carriage 31.4 mm too far from the motor.
+         +10 mm after the first puck pick on hardware went 1 cm past the puck (2026-10-24). -->
+    <origin xyz="-0.00135 0 0" rpy="0 0 0" />
+    <!-- + moves the carriage toward the LM motor (-X), matching motor raw +. -->
+    <axis xyz="-1 0 0" />
+    <!-- 5-degree margin inside measured motor limits; previous lower=-0.032 upper=0.072. -->
+    <limit effort="0" velocity="0" lower="-0.0320" upper="0.0630" />
   </joint>
   <joint name="shoulder_joint" type="revolute">
     <parent link="slide_link" />
     <child link="shoulder_link" />
     <origin xyz="0.129 0.051 0.12225" rpy="0 0 0" />
     <axis xyz="1 -4.17700833006e-17 -1.45864345059e-18" />
-    <limit effort="0" velocity="0" lower="-1.15191730632" upper="1.98967534727" />
+    <!-- 5-degree margin inside measured motor limits; previous lower=-0.4721 upper=2.1110. -->
+    <limit effort="0" velocity="0" lower="-0.3848" upper="2.0237" />
   </joint>
   <joint name="elbow_joint" type="revolute">
     <parent link="shoulder_link" />
     <child link="elbow_link" />
-    <origin xyz="1.11022302463e-16 0.0764664888983 0.171746546037" rpy="0 0 0" />
+    <!-- Measured 190 mm axis to axis, CAD direction kept (scripts/fit_measured.py);
+         was 0 0.0764664888983 0.171746546037 (188.0 mm). -->
+    <origin xyz="0 0.077280 0.173574" rpy="0 0 0" />
     <axis xyz="1 -6.34787704949e-17 -3.21286950234e-19" />
-    <limit effort="0" velocity="0" lower="-1.52541776624" upper="2.83790536374" />
+    <!-- 5-degree margin inside measured motor limits; previous lower=-1.5252 upper=3.4490. -->
+    <limit effort="0" velocity="0" lower="-1.4379" upper="3.3618" />
   </joint>
   <joint name="wrist_pitch_joint" type="revolute">
     <parent link="elbow_link" />
     <child link="wrist_pitch_link" />
-    <origin xyz="2.77555756156e-16 0.0835666144223 0.0451842998617" rpy="0 0 0" />
+    <!-- Centered on the forearm wrist-pitch motor horn (was 0.0835666 0.0451843, 24 mm above it).
+         Measured 92 mm axis to axis, direction kept; was 0 0.0924 0.0220 (95.0 mm). -->
+    <origin xyz="0 0.089498 0.021309" rpy="0 0 0" />
     <axis xyz="1 -6.34787704949e-17 -3.21286950234e-19" />
-    <limit effort="0" velocity="0" lower="-1.67900674042" upper="1.98618468877" />
+    <!-- 5-degree margin inside measured motor limits; previous lower=-0.5243 upper=1.6749. -->
+    <limit effort="0" velocity="0" lower="-0.4370" upper="1.5876" />
   </joint>
   <joint name="tool_roll_joint" type="revolute">
     <parent link="wrist_pitch_link" />
     <child link="tool_roll_link" />
-    <origin xyz="2.77555756156e-17 0.056 1.11022302463e-16" rpy="0 0 0" />
+    <!-- Measured 55 mm from the wrist-pitch axis to the tool-roll motor horn; was 0.056. -->
+    <origin xyz="0 0.055 0" rpy="0 0 0" />
     <axis xyz="-2.58569494309e-15 1 7.70863789488e-17" />
-    <limit effort="0" velocity="0" lower="-1.74532925199" upper="1.74532925199" />
+    <!-- 5-degree margin inside measured motor limits; previous lower=-4.8099 upper=3.9167. -->
+    <limit effort="0" velocity="0" lower="-4.7226" upper="3.8295" />
   </joint>
   <joint name="jaw_upper_joint" type="prismatic">
     <parent link="tool_roll_link" />
@@ -173,18 +187,22 @@
     <origin xyz="0 -1.11022302463e-16 0.01" rpy="0 0 0" />
     <axis xyz="-3.57353036051e-13 5.55111512313e-14 1" />
     <limit effort="0" velocity="0" lower="-0.021" upper="0.01" />
+    <!-- One gripper motor drives both jaws symmetrically. -->
+    <mimic joint="jaw_upper_joint" multiplier="1" offset="0" />
   </joint>
   <joint name="idler_joint" type="continuous">
     <parent link="base_link" />
     <child link="idler_link" />
-    <origin xyz="0.234 0.0563662 0.0955" rpy="0 0 0" />
+    <!-- Follows the LM plate refit to its measured span (scripts/fit_measured.py); was x 0.234. -->
+    <origin xyz="0.22164 0.0563662 0.0955" rpy="0 0 0" />
     <axis xyz="0 0 1" />
     <limit effort="0" velocity="0" />
   </joint>
   <joint name="tool_tcp_joint" type="fixed">
     <parent link="tool_roll_link" />
     <child link="tool_tcp" />
-    <origin xyz="0 0.1024 0" rpy="0 0 0" />
+    <!-- Measured horn face to open fingertip 133 mm (CAD 125.3); jaws stretched by fit_measured.py, was 0.1024. -->
+    <origin xyz="0 0.1101 0" rpy="0 0 0" />
   </joint>
   <link name="base_link_vis_green">
     <visual name="base_link_green">

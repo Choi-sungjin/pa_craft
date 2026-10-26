@@ -3,25 +3,28 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, EmitEvent, IncludeLaunchDescription, RegisterEventHandler
+from launch.actions import (DeclareLaunchArgument, EmitEvent, GroupAction, IncludeLaunchDescription,
+                            RegisterEventHandler)
 from launch.events import matches_action
 from lifecycle_msgs.msg import Transition
 from launch.conditions import IfCondition
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import LifecycleNode, Node
 from launch_ros.event_handlers import OnStateTransition
 from launch_ros.events.lifecycle import ChangeState
 
-NODES = {
-    'craft_sensors': ['realsense_processor', 'c310_processor'],
-    'craft_perception': ['perception_master'],
-    'craft_control': ['control_master'],
-}
+# group:= selects what this launch starts; the dashboard runs one group per pane.
+GROUPS = ('all', 'perception', 'planning', 'control', 'infra')
 
 # slam_toolbox publishers, remapped to /perception/lidar/<name>.
 SLAM_TOPICS = ['pose', 'map', 'map_metadata', 'slam_toolbox/graph_visualization',
                'slam_toolbox/scan_visualization', 'slam_toolbox/pose_graph',
                'slam_toolbox/loop_closure_event', 'slam_toolbox/new_node_event']
+
+
+def in_group(name):
+    return IfCondition(PythonExpression(
+        ["'", LaunchConfiguration('group'), f"' in ('all', '{name}')"]))
 
 
 def generate_launch_description():
@@ -31,22 +34,29 @@ def generate_launch_description():
     control_yaml = os.path.join(get_package_share_directory('craft_control'), 'config', 'control.yaml')
     planning_yaml = os.path.join(get_package_share_directory('craft_planning'), 'config', 'planning.yaml')
     perception_yaml = os.path.join(get_package_share_directory('craft_perception'), 'config', 'perception.yaml')
-    params = {'craft_sensors': [camera_yaml], 'craft_control': [control_yaml],
-              'craft_perception': [perception_yaml, {
-                  'lidar.input_mode': LaunchConfiguration('lidar_input_mode'),
-                  'd435.yolo.model_dir': LaunchConfiguration('d435_model_dir'),
-                  'c310.yolo.model_dir': LaunchConfiguration('c310_model_dir')}]}
+    perception_params = [perception_yaml, {
+        'lidar.input_mode': LaunchConfiguration('lidar_input_mode'),
+        'd435.yolo.model_dir': LaunchConfiguration('d435_model_dir'),
+        'c310.yolo.model_dir': LaunchConfiguration('c310_model_dir')}]
 
-    nodes = [Node(package=pkg, executable=exe, output='screen',
-                  parameters=params.get(pkg, []))
-             for pkg, exes in NODES.items() for exe in exes]
+    masters = [
+        Node(package='craft_perception', executable='perception_master', output='screen',
+             parameters=perception_params, condition=in_group('perception')),
+        Node(package='craft_planning', executable='planning_master', output='screen',
+             parameters=[planning_yaml, {'map_file': LaunchConfiguration('map_file')}],
+             condition=in_group('planning')),
+        Node(package='craft_control', executable='control_master', output='screen',
+             parameters=[control_yaml], condition=in_group('control')),
+    ]
+
+    # Everything that is not a master: camera drivers, LiDAR, IMU TF, EKF, SLAM.
+    nodes = [Node(package='craft_sensors', executable=exe, output='screen', parameters=[camera_yaml])
+             for exe in ('realsense_processor', 'c310_processor')]
     nodes.append(IncludeLaunchDescription(
         os.path.join(get_package_share_directory('lidar_processor'), 'launch',
                      'lidar_processor.launch.py'),
         launch_arguments={'start_processor': 'false'}.items(),
         condition=IfCondition(LaunchConfiguration('start_lidar'))))
-    nodes.append(Node(package='craft_planning', executable='planning_master', output='screen',
-                      parameters=[planning_yaml, {'map_file': LaunchConfiguration('map_file')}]))
     # OpenCR on-board IMU is mounted upside down: roll = pi. Offsets are launch args (measure them).
     nodes.append(Node(package='tf2_ros', executable='static_transform_publisher', name='tf_imu',
                       arguments=['--x', LaunchConfiguration('imu_x'), '--y', LaunchConfiguration('imu_y'),
@@ -72,6 +82,9 @@ def generate_launch_description():
                       lifecycle_node_matcher=matches_action(slam),
                       transition_id=Transition.TRANSITION_ACTIVATE))]))]
     return LaunchDescription([
+        DeclareLaunchArgument('group', default_value='all', choices=GROUPS,
+                              description='all, one master (perception/planning/control) '
+                                          'or infra (sensors, LiDAR, TF, EKF, SLAM)'),
         DeclareLaunchArgument('start_lidar', default_value='true',
                               description='Start dual LiDAR drivers and static TF; '
                                           'set false when already running on the Pi'),
@@ -90,5 +103,6 @@ def generate_launch_description():
         DeclareLaunchArgument('imu_z', default_value='0.0', description='IMU offset from base_link [m]'),
         DeclareLaunchArgument('imu_yaw', default_value='0.0',
                               description='IMU yaw misalignment after the upside-down flip [rad]'),
-        *nodes,
+        *masters,
+        GroupAction(nodes, scoped=False, condition=in_group('infra')),
     ])

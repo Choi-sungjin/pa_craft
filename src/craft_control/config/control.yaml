@@ -1,7 +1,7 @@
 # ControlMaster reads these parameters and passes them to the actuator controllers.
 # ros2 run craft_control control_master --ros-args --params-file $(ros2 pkg prefix craft_control)/share/craft_control/config/control.yaml
 # Every OpenCR reports the same USB serial (FFFFFFFEFFFF), so ttyACM0/1 order is not fixed and by-id
-# cannot tell them apart. Pin each board by USB port: ls -l /dev/serial/by-path/
+# cannot tell them apart. Install config/udev/99-craft-opencr.rules; keep USB ports fixed.
 
 control_master:
   ros__parameters:
@@ -12,9 +12,8 @@ control_master:
     wheel_stop_tolerance_rad_s: 0.02
     task_timeout_s: 30.0
     odom_timeout_s: 0.5
-    # TODO: update port names
-    arm_lm_port: /dev/ttyACM0    # LM + four rotational arm motors + gripper OpenCR
-    clock_wheel_port: /dev/ttyACM1  # clock + wheel x2 OpenCR
+    arm_lm_port: /dev/opencr_arm_lm    # LM + four rotational arm motors + gripper OpenCR
+    clock_wheel_port: /dev/opencr_wheel_clock  # clock + wheel x2 OpenCR
 
     # /planning/hold is a live heartbeat: true or missing/stale input holds every axis.
     # Resume requires fresh false, /control/planning_held=false, then new targets.
@@ -45,8 +44,8 @@ control_master:
     # Host limits target speed. OpenCR firmware must configure DYNAMIXEL Profile Acceleration(108)
     # and owns the motor velocity PID, feedforward, acceleration profile, and motor-level tracking.
     # Profile Acceleration must be nonzero; zero makes target-velocity changes effectively immediate.
-    # TODO: confirm the wheel angular-speed limit for this robot's motors/gearing.
-    max_wheel: 7.8        # [rad/s] project starting value at the wheel
+    # Wheels: XM430-W210; project speed cap below (not a guaranteed loaded speed).
+    max_wheel: 7.8        # [rad/s] wheel output-shaft speed cap
     # Pure Pursuit tuning: path and odometry must use the same frame, at the axle center.
     lookahead_distance: 0.3  # [m] starting value; tune on the robot
     wheel_goal_tolerance: 0.03  # [m] stop when the path endpoint is within this distance
@@ -54,50 +53,76 @@ control_master:
     # and republished on /control/tracking_path. Keep it well below lookahead.
     path_spacing: 0.02  # [m]
 
-    # 12-slot puck storage: 0 motor rad = slot 12; positive CCW increases slot numbers.
+    # Wheel polarity is corrected in firmware/wheel_clock/config.h:
+    # wheel_l ID 1 direction=+1, wheel_r ID 2 direction=-1; hardware Reverse OFF.
+    # Both host wheel commands/feedback are positive for forward travel.
+
+    # 12-slot puck storage: measured slot 12 alignment = 314.6 raw motor degrees.
+    # Positive motor rotation is CCW viewed from above.
     # Adjacent slots are 30 motor degrees (pi/6 rad); shortest rotation is chosen.
     # OpenCR must accept/report unwrapped motor radians (e.g. 12 -> 7 commands -5*pi/6).
     clock_slot_count: 12
     clock_slot_angle: 0.5235987755982988  # [motor rad/slot] 30 degrees
-    clock_zero_angle: 0.0  # [motor rad] slot 12 alignment
+    clock_zero_angle: 5.490805826774161  # [motor rad] 314.6 degrees, slot 12 alignment
+    # Firmware clock zero_tick stays 0: apply this offset here only.
+    # Recheck physical alignment after a motor power cycle/multi-turn reset.
     clock_direction: 1.0  # +1: CCW motor rotation increases slot numbers; -1: reverse
     clock_angle_tolerance: 0.03490658503988659  # [rad] 2 degrees; tune alignment tolerance
 
     # Rotational arm motors only: shoulder, elbow, wrist_pitch, tool_roll [motor rad].
-    # TODO: replace these placeholder limits with measured limits in both host and firmware config.
-    arm_min_angle: [-3.14, -1.57, -1.57, -1.57]
-    arm_max_angle: [3.14, 1.57, 1.57, 1.57]
+    # Measured degrees: shoulder 39–187, elbow 38–323, wrist_pitch 114–240, tool_roll 0–500.
+    # Limits below keep a 5-degree margin inside those (sync is approximate):
+    # shoulder 44–182, elbow 43–318, wrist_pitch 119–235, tool_roll 5–495.
+    # Original measured limits [rad]: min [0.6806784082777885, 0.6632251157578453, 1.9896753472735358, 0.0]
+    #                                 max [3.263765701229396, 5.6374134839416845, 4.1887902047863905, 8.726646259971648]
+    # Rounded inward to 4 decimals: ControlMaster sends '%.4f', and the firmware rejects a whole
+    # frame if any value falls outside its limits, so limits must be exactly representable.
+    arm_min_angle: [0.7680, 0.7505, 2.0770, 0.0873]
+    arm_max_angle: [3.1764, 5.5501, 4.1015, 8.6393]
 
     # Rotational part of /ik_solution; ControlMaster routes slide_joint to LmController.
     arm_ik_joint_names: [shoulder_joint, elbow_joint, wrist_pitch_joint, tool_roll_joint]
-    arm_ik_mapping_confirmed: false
-    # TODO: calibrate direction and zero offset in IK output order against the URDF's q=0 pose.
-    arm_joint_directions: [1.0, 1.0, 1.0, 1.0]
-    arm_joint_offsets: [0.0, 0.0, 0.0, 0.0]
+    arm_ik_mapping_confirmed: true
+    # motor_angle = offset + direction * URDF joint angle (hardware Reverse OFF).
+    # Directions checked against joint_state_publisher_gui: +1 = URDF + and motor raw + move the same way.
+    # Offsets from a pose matched in RViz (2026-10-24): raw [90.4, 178.9, 197.3, 184.2] deg at
+    # URDF [0.425, 0.934, 0.221, -1.595] rad. Keep mapping unconfirmed until verified on hardware.
+    arm_joint_directions: [1.0, 1.0, -1.0, 1.0]
+    arm_joint_offsets: [1.152778, 2.188394, 3.664535, 4.809896]  # [motor rad] 66.05, 125.39, 209.96, 275.59 deg
     arm_angle_tolerance: 0.03490658503988659  # [motor rad] 2 degrees per joint, same as every motor
 
     # Independent LM controller: target displacement [m] -> motor angle [rad].
     lm_linear_joint_name: slide_joint
-    lm_mapping_confirmed: false
-    lm_min_angle: 0.0  # [motor rad] preserved from the former first arm channel
-    lm_max_angle: 0.3  # [motor rad] TODO: measure actual motor travel limits
+    lm_mapping_confirmed: true
+    # Measured -141.4 to 808.1 degrees (-2.467895562319982 to 14.104005685366177 rad); 5-degree margin below.
+    lm_min_angle: -2.3806  # [motor rad] -136.4 degrees, 4 decimals rounded inward
+    lm_max_angle: 14.0167  # [motor rad] 803.1 degrees, 4 decimals rounded inward
+    # Motor raw + and URDF slide_joint + (axis -X) both move the carriage toward the LM motor.
     lm_motor_direction: 1.0
-    lm_motor_offset: 0.0  # [motor rad]
-    # TODO: measure pulley radius [m] and motor-radians per pulley-radian ratio.
-    lm_pulley_radius: 0.0
-    lm_gear_ratio: 0.0
+    # The earlier reported 317.2-degree zero was withdrawn; do not use it.
+    lm_motor_offset: 4.352851154473858  # [motor rad] 249.4 degrees at slide position zero
+    # Measured 0.108 m travel over 949.5 degrees of motor rotation.
+    lm_meters_per_rad: 0.006517055489639695  # [m/motor rad]; zero disables conversion
     lm_angle_tolerance: 0.03490658503988659  # [motor rad] 2 degrees, same as every motor
 
     # Gripper uses a separate Bool command: true=close/grasp, false=open/release.
     # Gripper follows the five IK joints as the final OpenCR channel.
-    # TODO: measure gripper travel limits.
-    gripper_min_angle: -3.14
-    gripper_max_angle: 3.14
-    gripper_open_angle: 0.0
-    gripper_close_angle: 0.0
-    gripper_mapping_confirmed: false
+    # Measured: open at 94 degrees; fully closed at either -53.1 or 234 degrees.
+    # Use the 234-degree closing branch (140 degrees from open).
+    # 5-degree margin inside the measured -53.1 to 234 degrees; grasp is detected by current,
+    # so the close target need not reach the hard stop. Original: min -0.9267698328089891,
+    # max/close 4.084070449666731 [rad].
+    gripper_min_angle: -0.8395  # -48.1 degrees, 4 decimals rounded inward
+    gripper_max_angle: 3.9968  # 229 degrees, 4 decimals rounded inward
+    gripper_open_angle: 1.6406  # 94 degrees
+    gripper_close_angle: 3.9968  # 229 degrees (= gripper_max_angle)
+    # Confirmed raw + closes/grasps; raw - opens.
+    gripper_mapping_confirmed: true
     gripper_angle_tolerance: 0.03490658503988659  # [motor rad] 2 degrees, same as every motor
     # Firmware appends gripper_current_a [A]; calibrate its model-specific scale and these thresholds.
     # All-zero values disable current-based grasp estimation.
-    grasp_current_threshold_a: 0.0
-    grasp_current_debounce: 0.0
+    grasp_current_threshold_a: 0.1  # [A] 100 mA
+    grasp_current_debounce: 0.1  # [s] current must stay above threshold this long
+    # After a grasp is detected the gripper holds (contact angle + this) instead of driving on to
+    # gripper_close_angle: a stalled jaw at full current trips the DYNAMIXEL overload error.
+    gripper_grasp_squeeze_angle: 0.0349  # [motor rad] 2 degrees

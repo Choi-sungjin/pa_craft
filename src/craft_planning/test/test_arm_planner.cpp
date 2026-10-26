@@ -28,9 +28,9 @@ protected:
 TEST_F(ArmPlannerTest, ForwardUsesTheUrdfTcpInBaseCoordinates) {
   const auto pose = planner.forward(seed);
   EXPECT_EQ(pose.header.frame_id, "base_link");
-  EXPECT_NEAR(pose.pose.position.x, 0.149, 1e-9);
-  EXPECT_NEAR(pose.pose.position.y, 0.3694331033206, 1e-9);
-  EXPECT_NEAR(pose.pose.position.z, 0.3391808458987, 1e-9);
+  EXPECT_NEAR(pose.pose.position.x, 0.12765, 1e-9);
+  EXPECT_NEAR(pose.pose.position.y, 0.382878, 1e-9);
+  EXPECT_NEAR(pose.pose.position.z, 0.317133, 1e-9);
 }
 
 TEST_F(ArmPlannerTest, SolvesAReachablePoseFromADifferentSeed) {

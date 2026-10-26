@@ -108,8 +108,13 @@ TEST(Yolo, RejectsWrongLayoutAndNonFiniteBoxes) {
 TEST(AprilTag, SortsIdsByImagePosition) {
   cv::Mat image(220, 420, CV_8UC1, cv::Scalar(255)), left, right, bgr;
   auto dictionary = cv::aruco::getPredefinedDictionary(cv::aruco::DICT_APRILTAG_36h11);
+#if CV_VERSION_MAJOR > 4 || (CV_VERSION_MAJOR == 4 && CV_VERSION_MINOR >= 7)
+  cv::aruco::generateImageMarker(dictionary, 17, 120, left);
+  cv::aruco::generateImageMarker(dictionary, 3, 120, right);
+#else
   cv::aruco::drawMarker(dictionary, 17, 120, left);
   cv::aruco::drawMarker(dictionary, 3, 120, right);
+#endif
   left.copyTo(image(cv::Rect(30, 50, 120, 120)));
   right.copyTo(image(cv::Rect(260, 50, 120, 120)));
   cv::cvtColor(image, bgr, cv::COLOR_GRAY2BGR);

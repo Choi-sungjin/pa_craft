@@ -138,14 +138,14 @@ public:
     const double lm_max_angle = declare_parameter<double>("lm_max_angle");
     const double lm_motor_direction = declare_parameter<double>("lm_motor_direction");
     const double lm_motor_offset = declare_parameter<double>("lm_motor_offset");
-    const double lm_pulley_radius = declare_parameter("lm_pulley_radius", 0.0);
-    const double lm_gear_ratio = declare_parameter("lm_gear_ratio", 0.0);
+    const double lm_meters_per_rad = declare_parameter("lm_meters_per_rad", 0.0);
     const double gripper_min_angle = declare_parameter("gripper_min_angle", 0.0);
     const double gripper_max_angle = declare_parameter("gripper_max_angle", 0.0);
     const double gripper_open_angle = declare_parameter("gripper_open_angle", 0.0);
     const double gripper_close_angle = declare_parameter("gripper_close_angle", 0.0);
     const double grasp_current_threshold_a = declare_parameter("grasp_current_threshold_a", 0.0);
     const double grasp_current_debounce = declare_parameter("grasp_current_debounce", 0.0);
+    const double gripper_grasp_squeeze_angle = declare_parameter("gripper_grasp_squeeze_angle", 0.0);
     gripper_mapping_confirmed_ = declare_parameter("gripper_mapping_confirmed", false);
     const double arm_angle_tolerance = positive_param("arm_angle_tolerance");
     const double lm_angle_tolerance = positive_param("lm_angle_tolerance");
@@ -167,14 +167,14 @@ public:
     if (std::find(arm_ik_joint_names.begin(), arm_ik_joint_names.end(), lm_linear_joint_name_) !=
       arm_ik_joint_names.end() || !lm_controller_.configure(
         lm_linear_joint_name_, lm_min_angle, lm_max_angle, lm_motor_direction, lm_motor_offset,
-        lm_pulley_radius, lm_gear_ratio, lm_angle_tolerance))
+        lm_meters_per_rad, lm_angle_tolerance))
     {
       throw std::runtime_error("invalid LM limits, mapping or calibration in config/control.yaml");
     }
     if (!gripper_controller_.configure(
       gripper_min_angle, gripper_max_angle,
       gripper_open_angle, gripper_close_angle, grasp_current_threshold_a, grasp_current_debounce,
-      gripper_angle_tolerance))
+      gripper_angle_tolerance, gripper_grasp_squeeze_angle))
     {
       throw std::runtime_error("invalid gripper angle limits or open/close targets");
     }
@@ -623,6 +623,18 @@ private:
     clear_clock_target();
   }
 
+  void clear_targets_for_new_task()
+  {
+    // Keep the manipulator's last arm/LM/gripper targets across tasks. Clearing them makes the
+    // arm hold its measured pose, which sits below the target by the gravity sag (it drops each
+    // task), and releases a closed gripper. STOP/hold/fault still clear everything.
+    clear_wheel_target();
+    longitudinal_.clear_target();
+    clear_path_target();
+    lateral_.clear_odom();
+    clear_clock_target();
+  }
+
   void discard_pending_targets()
   {
     pending_odom_.reset();
@@ -719,7 +731,7 @@ private:
       return;
     }
     if (!update) {
-      clear_planning_targets();
+      clear_targets_for_new_task();
       task_.begin(c, participants); last_task_id_ = c.task_id; task_at_ = at;
       arm_stable_at_ = clock_stable_at_ = at;
     } else task_.result.revision = c.revision;
@@ -803,7 +815,7 @@ private:
     if (have_arm_lm_feedback_) {
       if (arm_lm_feedback_updated && arm_lm_state_ != 2) {
         publish_arm_joint_feedback();
-        gripper_controller_.update_current_feedback(gripper_current_a_, dt);
+        gripper_controller_.update_current_feedback(gripper_current_a_, dt, gripper_angle_);
         std_msgs::msg::Bool grasped_msg;
         grasped_msg.data = gripper_controller_.is_grasped();
         gripper_grasped_pub_->publish(grasped_msg);
