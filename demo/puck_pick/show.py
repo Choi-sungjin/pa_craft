@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Throwaway demo: loop plan.yaml frames on /joint_states and draw the puck / front LiDAR in RViz.
 
-Visualization only: publishes /joint_states and /demo/markers, never talks to control or hardware.
+Usage: show.py [plan_lying.yaml]  (default plan.yaml). Visualization only: publishes /joint_states and /demo/markers, never talks to control or hardware.
 Delete with: rm -rf ~/craft/demo
 """
+import sys
 from pathlib import Path
 
 import rclpy
@@ -19,7 +20,7 @@ EXTRA = ['carousel_joint', 'idler_joint']  # not part of the plan; keep them at 
 class Show(Node):
     def __init__(self):
         super().__init__('puck_pick_demo')
-        plan = yaml.safe_load(open(HERE / 'plan.yaml'))
+        plan = yaml.safe_load(open(HERE / (sys.argv[1] if len(sys.argv) > 1 else 'plan.yaml')))
         self.frames, self.a = plan['frames'], plan['assume']
         if not self.frames:
             raise SystemExit('plan.yaml has no frames (run plan.py; some waypoint failed?)')
@@ -50,10 +51,11 @@ class Show(Node):
         lz0, lz1 = a['lidar_z']
         lidar = (a['lidar_center_x'], a['lidar_center_y'], (lz0 + lz1) / 2)
         ahead = (a['lidar_center_x'], a['lidar_front_y'] - a['puck_ahead'], fz + 0.001)
+        shelf = (ahead[0], a['lidar_front_y'] - (a.get('shelf_ahead') or a['puck_ahead']))
         cx, cy = a['lidar_center_x'], a['lidar_center_y'] + 0.15
         sh = a['shelf_height']; sx, sy = a['shelf_size']
         self.mk.publish(MarkerArray(markers=[
-            self.marker(5, Marker.CUBE, (ahead[0], ahead[1], fz + sh / 2), (sx, sy, sh), (0.55, 0.35, 0.15, 0.6)),
+            self.marker(5, Marker.CUBE, (shelf[0], shelf[1], fz + sh / 2), (sx, sy, sh), (0.55, 0.35, 0.15, 0.6)),
             self.marker(0, Marker.CUBE, f['puck'], a['puck_size'], (0.9, 0.1, 0.1, 0.9)),
             self.marker(1, Marker.CYLINDER, lidar, (0.04, 0.04, lz1 - lz0), (0.1, 0.1, 0.1, 0.35)),
             self.marker(2, Marker.CUBE, (cx, cy, fz - 0.001), (0.6, 0.8, 0.002), (0.6, 0.6, 0.6, 0.35)),

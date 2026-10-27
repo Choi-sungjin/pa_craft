@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Throwaway demo: pick the planned puck on the REAL robot and load it into the clock, via control_master.
 --unload does the reverse: take the puck out of clock slot LOAD_SLOT and put it down at the planned spot.
+--lying picks the lying puck of plan_lying.yaml (plan.py --lying) on its long axis and loads it the same way.
 
 Sends craft_interfaces/TaskCommand on /planning/task_command one step at a time and waits for
 /control/task_result. Keeps the /planning/hold heartbeat alive (control rejects tasks without it).
 Press Enter before every step; Ctrl+C sends STOP and hold.
-Usage:  source ~/craft/install/setup.bash && python3 ~/craft/demo/puck_pick/execute.py [--unload] [--dry-run]
+Usage:  source ~/craft/install/setup.bash && python3 ~/craft/demo/puck_pick/execute.py [--unload | --lying] [--dry-run]
 Delete with: rm -rf ~/craft/demo
 """
 import math
@@ -47,6 +48,20 @@ UNLOAD_ABOVE = 0.06  # [m] above the unload grasp, i.e. 3 cm over the loading po
 # jaws than a front-grasped one, so lowering to the grasp height pressed it into the shelf (the arm's
 # I gain kept pushing) and the arm dropped when the jaws let go. The puck now falls <= this far.
 PUT_DOWN_ABOVE = 0.01  # [m]
+# Elbow first, shoulder last (2026-10-27): every arm move runs elbow, wrist, roll and LM first with the shoulder
+# held, then the shoulder alone, so the shoulder never moves with the rest of the arm still swinging (it carries
+# the whole arm and ran out of torque). Not for taking the puck out of the clock (NO_STAGING).
+# Vertical moves go in STAGE_SEG pieces so the staged path stays near the line.
+NO_STAGING = ('arm over the slot', 'straight down to the grasp', 'straight up ')
+STAGE_SEG = 4  # plan frames (1 mm each) per vertical piece
+# --lying: the arm reaches the plan's tool angle through a pose LYING_HIGH over the grasp, then comes down the
+# vertical line in 1 cm pieces. Going straight from the standing lift pose to the approach dipped the fingertips
+# into the floor in simulation (2026-10-27, nearly happened on the robot).
+LYING_HIGH = 0.10  # [m]
+# The swings between the standing lift pose and LYING_HIGH move the TCP on a straight line in LYING_SWING staged
+# pieces. Staged as one joint move, going out swept the fingertips to the floor (-1 mm) and coming back pressed
+# the held puck 42 mm into the shelf; 20 pieces clear the shelf by >= 49 mm (simulated, 2026-10-27).
+LYING_SWING = 20
 
 
 def load_pose():
@@ -105,10 +120,92 @@ def above(arm, dz):
     return [float(v) for v in q]
 
 
+def plan_pose(name='plan.yaml'):
+    """pose(i): frame i of a plan.py output as [slide + LM_BACKLASH, shoulder, elbow, wrist_pitch, tool_roll]."""
+    f = yaml.safe_load(open(HERE / name))['frames']
+    return lambda i: [f[i]['joints'][ARM[0]] + LM_BACKLASH] + [f[i]['joints'][n] for n in ARM[1:]]
+
+
+def frames_path(pose, i0, i1):
+    """pose(i) for plan frames i0 -> i1 (either direction) every STAGE_SEG frames, both ends included."""
+    step = STAGE_SEG if i1 > i0 else -STAGE_SEG
+    return [pose(i) for i in list(range(i0, i1, step))[1:] + [i1]]
+
+
+def lying_line(heights):
+    """Arms (shoulder, elbow, wrist_pitch, tool_roll) with the plan_lying tool angle at each height over its grasp."""
+    p = yaml.safe_load(open(HERE / 'plan_lying.yaml'))
+    ch, roll = plan.Chain(plan.URDF), p['frames'][0]['joints']['tool_roll_joint']
+    mg = math.radians(p['assume']['limit_margin_deg'])
+    out = []
+    for h in heights:
+        for q in plan.ik_top_down(ch, np.array(p['puck_grasp_urdf']) + [0, 0, h], p['assume']['tool_tilt_deg']):
+            if all(ch.limits(n)[0] + mg <= q[n] <= ch.limits(n)[1] - mg for n in ARM[1:4]):
+                out.append([q[n] for n in ARM[1:4]] + [roll]); break
+        else:
+            raise RuntimeError(f'no pose {h * 100:.0f} cm over the lying grasp')
+    return out
+
+
+def tcp_path(arm0, arm1, n):
+    """n arms (shoulder, elbow, wrist_pitch, tool_roll) moving the TCP on a straight line arm0 -> arm1 with the
+    tool angle and roll turning evenly (IK per point, the branch nearest the previous point)."""
+    ch = plan.Chain(plan.URDF)
+    def pt(arm):
+        T = ch.fk(dict(zip(ARM[1:], arm)))
+        return T[:3, 3], (-90 - math.degrees(math.atan2(T[2, 1], T[1, 1]))) % 360
+    (p0, t0), (p1, t1) = pt(arm0), pt(arm1)
+    t1 = t0 + (t1 - t0 + 180) % 360 - 180
+    out, prev = [], arm0
+    for k in range(1, n + 1):
+        f = k / n
+        roll = arm0[3] + (arm1[3] - arm0[3]) * f
+        sols = [[q[n_] for n_ in ARM[1:4]] + [roll] for q in plan.ik_top_down(ch, p0 + (p1 - p0) * f, t0 + (t1 - t0) * f)]
+        sols = [q for q in sols if all(ch.limits(n_)[0] <= v <= ch.limits(n_)[1] for n_, v in zip(ARM[1:4], q))]
+        if not sols:
+            raise RuntimeError(f'no IK on the TCP line at {f:.0%}')
+        prev = min(sols, key=lambda q: sum(abs(x - y) for x, y in zip(q, prev)))
+        out.append(prev)
+    out[-1] = list(arm1)
+    return out
+
+
+def stage(steps, prev):
+    """Elbow first, shoulder last: each MANIPULATOR target (a pose or a path of poses) becomes the pose with the
+    shoulder still at its previous angle, then the pose. prev: the arm pose before steps (None: first not staged)."""
+    out = []
+    for name, kind, arg in steps:
+        if kind != TaskCommand.MANIPULATOR:
+            out.append((name, kind, arg)); continue
+        path = arg if isinstance(arg[0], list) else [arg]
+        poses = []
+        for q in path:
+            mid = [q[0], prev[1]] + q[2:] if prev is not None and not name.startswith(NO_STAGING) else q
+            if mid != q and mid != prev:
+                poses.append(mid)
+            poses.append(q); prev = q
+        out.append((name, kind, poses))
+    return out
+
+
+def load_tail(lift, start):
+    """Lift pose (puck held, LM on the puck line) -> clock slot LOAD_SLOT -> back to start."""
+    load_slide = LOAD_SLIDE + LM_BACKLASH
+    s = [('LM to the loading line, arm stays', TaskCommand.MANIPULATOR, [load_slide] + lift)]
+    s.append((f'clock to slot {LOAD_SLOT} (loading guide)', TaskCommand.CLOCK, LOAD_SLOT))
+    # Front to back in one joint move: the wrist swings ~250 degrees with the puck held.
+    s.append(('arm to the loading pose, LM stays', TaskCommand.MANIPULATOR, [load_slide] + load_pose()))
+    s.append(('open gripper (drop the puck into the clock)', TaskCommand.GRIPPER, False))
+    s.append(('arm back to the lift pose, LM stays', TaskCommand.MANIPULATOR, [load_slide] + lift))
+    if start is not None:  # reverse of the start: LM alone first, then the arm
+        s.append(('LM back to the start position', TaskCommand.MANIPULATOR, [start[0]] + lift))
+        s.append(('arm back to the start pose', TaskCommand.MANIPULATOR, start))
+    return s
+
+
 def steps_from_plan(current_slide=None, start=None):
-    f = yaml.safe_load(open(HERE / 'plan.yaml'))['frames']
     # plan.py layout at 20 Hz: 0-19 hold above, 20-59 descent, 60-79 close, rest hold (no lift).
-    pose = lambda i: [f[i]['joints'][ARM[0]] + LM_BACKLASH] + [f[i]['joints'][n] for n in ARM[1:]]
+    pose = plan_pose()
     # The arm moves first: a rest pose outside the control limits (clamped, sagging) never settles,
     # and control completes no task, not even a gripper one, until the arm settles.
     s = []
@@ -116,30 +213,43 @@ def steps_from_plan(current_slide=None, start=None):
         s.append(('arm above the puck, LM stays', TaskCommand.MANIPULATOR, [current_slide] + pose(0)[1:]))
     s.append(('open gripper', TaskCommand.GRIPPER, False))
     s.append(('LM to the puck line (move above the puck)', TaskCommand.MANIPULATOR, pose(0)))
-    # One move per leg: the joint-space path bows the TCP a few mm off the vertical line,
-    # inside the 14 mm open-jaw clearance per side, and avoids stop-and-go.
-    s.append(('descend', TaskCommand.MANIPULATOR, pose(59)))
+    s.append(('descend', TaskCommand.MANIPULATOR, frames_path(pose, 20, 59)))
     s += [('close gripper (grasp by current >= 0.1 A)', TaskCommand.GRIPPER, True)]
-    s.append(('lift the puck', TaskCommand.MANIPULATOR, pose(20)))
-    load_slide = LOAD_SLIDE + LM_BACKLASH
-    s.append(('LM to the loading line, arm stays', TaskCommand.MANIPULATOR, [load_slide] + pose(20)[1:]))
-    s.append((f'clock to slot {LOAD_SLOT} (loading guide)', TaskCommand.CLOCK, LOAD_SLOT))
-    # Front to back in one joint move: the wrist swings ~250 degrees with the puck held.
-    s.append(('arm to the loading pose, LM stays', TaskCommand.MANIPULATOR, [load_slide] + load_pose()))
-    s.append(('open gripper (drop the puck into the clock)', TaskCommand.GRIPPER, False))
-    s.append(('arm back to the lift pose, LM stays', TaskCommand.MANIPULATOR, [load_slide] + pose(20)[1:]))
-    if start is not None:  # reverse of the start: LM alone first, then the arm
-        s.append(('LM back to the start position', TaskCommand.MANIPULATOR, [start[0]] + pose(20)[1:]))
-        s.append(('arm back to the start pose', TaskCommand.MANIPULATOR, start))
-    return s
+    s.append(('lift the puck', TaskCommand.MANIPULATOR, frames_path(pose, 59, 20)))
+    return s + load_tail(pose(20)[1:], start)
+
+
+def lying_steps_from_plan(current_slide=None, start=None):
+    """--lying: grip the lying puck's near end at the plan_lying tool angle, come down and lift it on the vertical
+    line, swing it via the LYING_HIGH pose to the standing plan's lift pose (tool down, roll back to 0; the puck
+    sits in the jaws as a standing-grasped one) and load it like steps_from_plan."""
+    pose, lift = plan_pose('plan_lying.yaml'), plan_pose()(20)[1:]
+    a = yaml.safe_load(open(HERE / 'plan_lying.yaml'))['assume']['approach_above']
+    down = lying_line(np.arange(LYING_HIGH, a, -0.01))   # LYING_HIGH .. 1 cm above the approach
+    high, slide = down[0], pose(0)[0]
+    s = []
+    if current_slide is not None:
+        s.append(('arm to the standing lift pose, LM stays', TaskCommand.MANIPULATOR, [current_slide] + lift))
+        s.append((f'tool out, {LYING_HIGH * 100:.0f} cm over the grasp height, LM stays', TaskCommand.MANIPULATOR,
+                  [[current_slide] + q for q in tcp_path(lift, high, LYING_SWING)]))
+    s.append(('open gripper', TaskCommand.GRIPPER, False))
+    s.append(('LM to the puck line, arm stays', TaskCommand.MANIPULATOR, [slide] + high))
+    s.append(('down to the approach (4 cm over the grasp)', TaskCommand.MANIPULATOR,
+              [[slide] + q for q in down[1:]] + [pose(0)]))
+    s.append(('descend', TaskCommand.MANIPULATOR, frames_path(pose, 20, 59)))
+    s.append(('close gripper (grasp by current >= 0.1 A)', TaskCommand.GRIPPER, True))
+    s.append(('lift the puck 4 cm', TaskCommand.MANIPULATOR, frames_path(pose, 59, 20)))
+    s.append((f'up to {LYING_HIGH * 100:.0f} cm, LM stays', TaskCommand.MANIPULATOR, [[slide] + q for q in down[::-1]]))
+    s.append(('arm to the standing lift pose (tool down, roll back), LM stays', TaskCommand.MANIPULATOR,
+              [[slide] + q for q in tcp_path(high, lift, LYING_SWING)]))
+    return s + load_tail(lift, start)
 
 
 def unload_steps_from_plan(current_slide=None, start=None):
     """Reverse of steps_from_plan: come down on the puck from above (clock slot LOAD_SLOT), grip it
     UNLOAD_DEPTH below the loading pose, lift it straight back to the loading pose, swing it
     to the front and set it down where the plan grasps it."""
-    f = yaml.safe_load(open(HERE / 'plan.yaml'))['frames']
-    pose = lambda i: [f[i]['joints'][ARM[0]] + LM_BACKLASH] + [f[i]['joints'][n] for n in ARM[1:]]
+    pose = plan_pose()
     load_slide = LOAD_SLIDE + LM_BACKLASH
     s = []
     if current_slide is not None:  # arm first with the LM held, then the LM alone
@@ -165,9 +275,10 @@ def unload_steps_from_plan(current_slide=None, start=None):
     # plan.yaml frames 20..59: straight descent from approach_above to the grasp in 40 even steps.
     approach_above = yaml.safe_load(open(HERE / 'plan.yaml'))['assume']['approach_above']
     put = 20 + round(39 * (1 - PUT_DOWN_ABOVE / approach_above))
-    s.append((f'put down ({PUT_DOWN_ABOVE * 100:.0f} cm above the grasp height)', TaskCommand.MANIPULATOR, pose(put)))
+    s.append((f'put down ({PUT_DOWN_ABOVE * 100:.0f} cm above the grasp height)', TaskCommand.MANIPULATOR,
+              frames_path(pose, 20, put)))
     s.append(('open gripper (release the puck)', TaskCommand.GRIPPER, False))
-    s.append(('rise above the puck', TaskCommand.MANIPULATOR, pose(20)))
+    s.append(('rise above the puck', TaskCommand.MANIPULATOR, frames_path(pose, put, 20)))
     if start is not None:  # reverse of the start: LM alone first, then the arm
         s.append(('LM back to the start position', TaskCommand.MANIPULATOR, [start[0]] + pose(20)[1:]))
         s.append(('arm back to the start pose', TaskCommand.MANIPULATOR, start))
@@ -218,8 +329,8 @@ class Runner(Node):
 
 
 def describe(kind, arg):
-    if kind == TaskCommand.MANIPULATOR:
-        return [round(v, 4) for v in arg]
+    if kind == TaskCommand.MANIPULATOR:  # a path of poses after stage()
+        return [round(v, 4) for v in arg[-1]] + ([f'{len(arg)} moves'] if len(arg) > 1 else [])
     if kind == TaskCommand.CLOCK:
         return f'slot {arg}'
     return 'close' if arg else 'open'
@@ -237,8 +348,10 @@ def run_steps(node, steps):
             if answer == 'q':
                 return False
             auto = answer == 'bro'
-        tid = node.send(kind, arg)
-        status, reason = node.wait(tid)
+        for target in (arg if kind == TaskCommand.MANIPULATOR else [arg]):
+            status, reason = node.wait(node.send(kind, target))
+            if status != 'SUCCEEDED':
+                break
         extra = f'  grasped={node.grasped}' if kind == TaskCommand.GRIPPER and arg else ''
         print(f'   -> {status} {reason}{extra}')
         if status != 'SUCCEEDED':
@@ -247,17 +360,18 @@ def run_steps(node, steps):
                 # A joint (LM: 0.5 motor deg = 0.06 mm) left more than the 0.5-degree tolerance away (e.g. sagging under load) keeps the
                 # board "moving", and control completes nothing until it settles.
                 now = dict(zip(node.joints.name, node.joints.position))
-                for n, target in zip(ARM, arg):
-                    err = now[n] - target
+                for n, t in zip(ARM, target):
+                    err = now[n] - t
                     unit = f'{err * 1000:+.1f} mm' if n == 'slide_joint' else f'{math.degrees(err):+.1f} deg'
                     flag = '  <-- off' if (abs(err) > 0.00006 if n == 'slide_joint' else abs(err) > math.radians(0.5)) else ''
-                    print(f'     {n:18s} target {target:+.4f} actual {now[n]:+.4f}  error {unit}{flag}')
+                    print(f'     {n:18s} target {t:+.4f} actual {now[n]:+.4f}  error {unit}{flag}')
             return False
     return True
 
 
-def go_home(node, start):
-    """After a failed step or q: rise above the puck where the LM is, then LM and arm back to the start."""
+def go_home(node, start, lying):
+    """After a failed step or q: rise above the puck where the LM is (lying: up its vertical line to LYING_HIGH
+    first when the tool is out there), then LM and arm back to the start, elbow first."""
     time.sleep(0.5)
     s = node.status
     if s is not None and s.fault:
@@ -269,22 +383,30 @@ def go_home(node, start):
     if input('\nreturn to the start pose step by step? Enter = yes, n = no: ').strip().lower() == 'n':
         node.stop()
         return
-    f = yaml.safe_load(open(HERE / 'plan.yaml'))['frames']
-    above = [f[20]['joints'][n] for n in ARM[1:]]
-    slide = dict(zip(node.joints.name, node.joints.position))['slide_joint']
-    slide = min(max(slide, -0.0428), 0.0625)
+    now = dict(zip(node.joints.name, node.joints.position))
+    slide = min(max(now['slide_joint'], -0.0428), 0.0625)
+    rise = [plan_pose()(20)[1:]]
+    if lying:
+        g = yaml.safe_load(open(HERE / 'plan_lying.yaml'))['puck_grasp_urdf']
+        tcp = plan.Chain(plan.URDF).fk(now)[:3, 3]
+        if tcp[1] < (g[1] + plan.ASSUME['lidar_front_y']) / 2:  # tool out over the lying puck
+            h0 = max(tcp[2] - g[2], 0) + STAGE_SEG / 1000
+            up = lying_line(np.arange(h0, LYING_HIGH + 1e-6, STAGE_SEG / 1000))  # 1 mm per plan frame
+            rise = up + tcp_path(up[-1], rise[0], LYING_SWING)
     steps = [('open gripper (drops a held puck)', TaskCommand.GRIPPER, False),
-             ('rise above the puck height, LM stays', TaskCommand.MANIPULATOR, [slide] + above),
-             ('LM back to the start position', TaskCommand.MANIPULATOR, [start[0]] + above),
+             ('rise above the puck height, LM stays', TaskCommand.MANIPULATOR, [[slide] + r for r in rise]),
+             ('LM back to the start position', TaskCommand.MANIPULATOR, [start[0]] + rise[-1]),
              ('arm back to the start pose', TaskCommand.MANIPULATOR, start)]
+    steps = stage(steps, [now[n] for n in ARM])
     if not run_steps(node, steps):
         print('return stopped; sending STOP + hold'); node.stop()
 
 
 def main():
     dry = '--dry-run' in sys.argv
-    make_steps = unload_steps_from_plan if '--unload' in sys.argv else steps_from_plan
-    steps = make_steps()
+    lying = '--lying' in sys.argv
+    make_steps = unload_steps_from_plan if '--unload' in sys.argv else lying_steps_from_plan if lying else steps_from_plan
+    steps = stage(make_steps(), None)
     for name, kind, arg in steps:
         print(f'  {name:45s}', describe(kind, arg))
     if dry:
@@ -318,12 +440,12 @@ def main():
         # Return pose: the start, but 3 degrees inside the limits so it can settle there.
         margin = math.radians(3.0)
         start = [slide] + [min(max(now[n], limits(n)[0] + margin), limits(n)[1] - margin) for n in ARM[1:]]
-        steps = make_steps(slide, start)
+        steps = stage(make_steps(slide, start), [slide] + [now[n] for n in ARM[1:]])
         for name, kind, arg in steps:
             print(f'  {name:45s}', describe(kind, arg))
         print('\nSUPPORT THE ARM. Keep a hand on the 12 V power. Enter = run step, q + Enter = quit.\n')
         if not run_steps(node, steps):
-            go_home(node, start)
+            go_home(node, start, lying)
         print('done. control keeps holding the last pose; Ctrl+C to exit this script.')
         while True:
             time.sleep(1)

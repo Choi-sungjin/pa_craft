@@ -79,7 +79,9 @@ control_master:
     # Rounded inward to 4 decimals: ControlMaster sends '%.4f', and the firmware rejects a whole
     # frame if any value falls outside its limits, so limits must be exactly representable.
     arm_min_angle: [0.7680, 0.7505, 1.3108, -3.0543]
-    arm_max_angle: [3.1764, 5.5501, 5.8468, 3.0543]
+    # elbow / wrist_pitch maxima opened 2026-10-27 for the hand-taught lying-puck grasp (elbow 321.8, wrist 345.1):
+    # elbow at the measured 323 deg (was 318), wrist 345.5 deg (was 335; measured 340 had margin).
+    arm_max_angle: [3.1764, 5.6374, 6.0301, 3.0543]
 
     # Rotational part of /ik_solution; ControlMaster routes slide_joint to LmController.
     arm_ik_joint_names: [shoulder_joint, elbow_joint, wrist_pitch_joint, tool_roll_joint]
@@ -96,15 +98,16 @@ control_master:
     # Independent LM controller: target displacement [m] -> motor angle [rad].
     lm_linear_joint_name: slide_joint
     lm_mapping_confirmed: true
-    # Measured -141.4 to 808.1 degrees (-2.467895562319982 to 14.104005685366177 rad); 5-degree margin below.
-    lm_min_angle: -2.3806  # [motor rad] -136.4 degrees, 4 decimals rounded inward
-    lm_max_angle: 14.0167  # [motor rad] 803.1 degrees, 4 decimals rounded inward
+    # Measured -391.8 to 527.5 degrees (-6.838200009313783 to 9.206611804270088 rad) after the LM guide shifted
+    # (2026-10-27; was -141.4 to 808.1); 5-degree margin below.
+    lm_min_angle: -6.7509  # [motor rad] -386.8 degrees, 4 decimals rounded inward
+    lm_max_angle: 9.1193  # [motor rad] 522.5 degrees, 4 decimals rounded inward
     # Motor raw + and URDF slide_joint + (axis -X) both move the carriage toward the LM motor.
     lm_motor_direction: 1.0
     # The earlier reported 317.2-degree zero was withdrawn; do not use it.
-    lm_motor_offset: 4.352851154473858  # [motor rad] 249.4 degrees at slide position zero
-    # Measured 0.108 m travel over 949.5 degrees of motor rotation.
-    lm_meters_per_rad: 0.006517055489639695  # [m/motor rad]; zero disables conversion
+    lm_motor_offset: -0.20245819323134223  # [motor rad] -11.6 degrees at slide position zero (measured 2026-10-27)
+    # Measured 0.108 m travel over 919.3 degrees of motor rotation (was 949.5).
+    lm_meters_per_rad: 0.006731147816178496  # [m/motor rad]; zero disables conversion
     lm_angle_tolerance: 0.008726646259971648  # [motor rad] 0.5 degree = ~0.06 mm carriage, matches firmware lm_arm (was 2)
 
     # Gripper uses a separate Bool command: true=close/grasp, false=open/release.

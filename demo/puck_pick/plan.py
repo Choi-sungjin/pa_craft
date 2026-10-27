@@ -4,6 +4,8 @@
 Delete with: rm -rf ~/craft/demo
 No package code is used or changed. All assumptions are the ASSUME block below; edit and rerun.
 Writes plan.yaml next to this file (joint waypoints for show.py).
+--lying: puck on its side (long axis front-back), its near end gripped like the standing puck with the tool
+exactly level (pointing -Y) and the jaws closing left-right; writes plan_lying.yaml (execute.py keeps plan.yaml).
 """
 import math
 import sys
@@ -46,7 +48,25 @@ ASSUME = dict(
     limit_margin_deg=3.0,  # every joint stays this far inside its URDF limits (hardware sync is approximate)
     tool_roll=0.0,         # URDF tool_roll_joint; aligned (jaws close front-back)
     jaw_open=-0.021, jaw_grip=-0.0018,  # URDF jaw_upper_joint values (ik_rviz_node defaults)
+    lying=False,           # puck on its side, long axis front-back (--lying)
+    tool_tilt_deg=None,    # fixed tool lean instead of the smallest that fits (90 = level, pointing -Y)
+    shelf_ahead=None,      # LiDAR front face -> shelf CENTRE [m]; None: centred under the puck
 )
+# --lying (2026-10-27): only the tool pointing -Y works. The planned level grasp at 41 cm overloaded the shoulder;
+# a grasp taught by hand reaches 31.7 cm with less shoulder torque. In this model it leans the tool tip up 7.4 deg
+# with the TCP 88 mm high (offsets approximate). It sits on the elbow/wrist limit corner (no room to come down onto
+# it), so the plan keeps its tool angle and height and backs the puck off until the 4 cm vertical approach fits
+# (32.8 cm). The rolled jaws stand +-12 mm (tips) / +-29 mm (base, 28 mm behind the TCP) about the
+# puck axis, so the shelf must end at the puck's near end.
+LYING = dict(
+    lying=True,
+    taught_grasp_motor_deg=(177.4, 321.8, 345.1, 0.0),  # shoulder, elbow, wrist_pitch, tool_roll (by hand, 2026-10-27)
+    tool_roll=-math.pi / 2,   # jaws left-right (motor 0); +90 deg is outside the URDF limit (1.4835)
+    limit_margin_deg=0.5,
+    puck_x_offset=-0.01,      # middle of the LM range (LiDAR centre -58..+38 mm)
+    puck_size=(0.03, 0.06, 0.03),  # x, y (long axis), height [m]
+    puck_height=0.03,
+)  # tool_tilt_deg, puck_ahead and shelf_ahead (shelf near edge 5 mm before the puck's near end) follow the grasp
 # ---------------------------------------------------------------------------
 
 
@@ -106,13 +126,19 @@ class Chain:
 def ik_tilted(ch, tcp):
     """Smallest forward tool lean (whole degrees, up to max_tilt_deg) whose solution keeps limit_margin_deg
     inside every revolute URDF limit (the slide keeps the plain limits)."""
-    mg = math.radians(ASSUME['limit_margin_deg'])
-    for tilt in range(int(ASSUME['max_tilt_deg']) + 1):
+    fixed = ASSUME['tool_tilt_deg']
+    for tilt in ([fixed] if fixed is not None else range(int(ASSUME['max_tilt_deg']) + 1)):
         for q in ik_top_down(ch, tcp, tilt):
-            if all(ch.limits(n)[0] + (0 if n == 'slide_joint' else mg) <= q[n]
-                   <= ch.limits(n)[1] - (0 if n == 'slide_joint' else mg) for n in Chain.NAMES):
+            if inside(ch, q):
                 return [q]
-    return ik_top_down(ch, tcp, 0)  # out of limits; main() reports it
+    return ik_top_down(ch, tcp, fixed or 0)  # out of limits; main() reports it
+
+
+def inside(ch, q):
+    """q keeps limit_margin_deg inside every revolute URDF limit (the slide keeps the plain limits)."""
+    mg = math.radians(ASSUME['limit_margin_deg'])
+    return all(ch.limits(n)[0] + (0 if n == 'slide_joint' else mg) <= q[n]
+               <= ch.limits(n)[1] - (0 if n == 'slide_joint' else mg) for n in Chain.NAMES)
 
 
 def ik_top_down(ch, tcp, tilt_deg=0.0):
@@ -187,6 +213,8 @@ def ros_to_urdf(p):
 
 def main():
     a = ASSUME
+    if '--lying' in sys.argv:
+        a.update(LYING)
     ch = Chain(URDF)
     ctrl = yaml.safe_load(open(CONTROL_YAML))['control_master']['ros__parameters']
     off, dirs = ctrl['arm_joint_offsets'], ctrl['arm_joint_directions']
@@ -198,7 +226,26 @@ def main():
     px, py = a['lidar_center_x'] + a['puck_x_offset'], a['lidar_front_y'] - a['puck_ahead']
     top = a['floor_z'] + a['shelf_height']
     grasp = np.array([px, py, top + grasp_z + a['hw_z_correction']])
-    puck_center = np.array([px, py, top + a['puck_height'] / 2])
+    if a['lying']:  # the taught pose; the puck's near end sits grasp_coverage of its length inside the jaws
+        q = {n: d * (math.radians(m) - o) for n, m, o, d in
+             zip(Chain.NAMES[1:], a['taught_grasp_motor_deg'], off, dirs)}
+        T = ch.fk(q)
+        tool = T[:3, 1]
+        a['tool_tilt_deg'] = float((-90 - math.degrees(math.atan2(tool[2], tool[1]))) % 360)
+        for k in range(41):  # 2.5 mm steps away from the robot until the whole approach line fits
+            grasp = np.array([px, T[1, 3] - 0.0025 * k, T[2, 3]])
+            if all(any(inside(ch, s) for s in ik_top_down(ch, grasp + [0, 0, h], a['tool_tilt_deg']))
+                   for h in np.linspace(0, a['approach_above'], 17)):
+                break
+        else:
+            print('no grasp within 10 cm beyond the taught one fits the approach'); return 1
+        length = a['puck_size'][1]
+        py = grasp[1] - a['finger_beyond_tcp'] + length * a['grasp_coverage'] - length / 2
+        a['puck_ahead'] = float(a['lidar_front_y'] - py)
+        a['shelf_ahead'] = a['puck_ahead'] - length / 2 - 0.005 + a['shelf_size'][1] / 2
+        print(f'taught grasp: tool {a["tool_tilt_deg"] - 90:+.1f} deg from level (+ = tip up), backed off '
+              f'{k * 2.5:.1f} mm; puck centre {a["puck_ahead"] * 100:.1f} cm ahead of the LiDAR face')
+    puck_center = np.array([px, py, top + a['puck_height'] / 2])  # lying: drawn level
     print(f'puck centre in URDF base_link: {np.round(puck_center, 4)}  (LiDAR front face y={a["lidar_front_y"]})')
     print(f'grasp point in URDF base_link:                               {np.round(grasp, 4)}')
     steps = [('approach', grasp + [0, 0, a['approach_above']], a['jaw_open']),
@@ -231,10 +278,11 @@ def main():
         plan.append({'name': name, 'joints': {**{n: float(q[n]) for n in Chain.NAMES},
                                               'jaw_upper_joint': float(jaw)}})
     frames = trajectory(ch, grasp, puck_center - grasp) if ok else []
+    out = 'plan_lying.yaml' if a['lying'] else 'plan.yaml'
     yaml.safe_dump({'assume': {k: (list(v) if isinstance(v, tuple) else v) for k, v in a.items()},
                     'puck_grasp_urdf': [float(v) for v in grasp], 'waypoints': plan, 'frames': frames},
-                   open(HERE / 'plan.yaml', 'w'), sort_keys=False)
-    print('plan.yaml written;', 'all waypoints within limits' if ok else 'SOME WAYPOINTS FAILED')
+                   open(HERE / out, 'w'), sort_keys=False)
+    print(f'{out} written;', 'all waypoints within limits' if ok else 'SOME WAYPOINTS FAILED')
     return 0 if ok else 1
 
 

@@ -12,7 +12,7 @@
 ### 실물 실행
 ```bash
 # 0) 전원 켜기 전: 팔을 받치고 LM을 모터 쪽 끝에 붙인다 (회전 수 기준)
-# 1) 보드 상태 확인 (LM 808~852°, '!!' 경고 없음)
+# 1) 보드 상태 확인 (LM 약 527°, 2026-10-27 재보정 전엔 808°, '!!' 경고 없음)
 checkarm
 # 2) 팔이 너무 접혀 있으면 손으로 반쯤 펴기 (팔 받친 상태에서)
 relaxarm      # 토크 OFF
@@ -133,7 +133,7 @@ python3 demo/puck_pick/execute.py            # --dry-run: 단계만 출력
 | 증상 | 원인 | 해결 |
 | --- | --- | --- |
 | RViz에 `m38_arm ... Could not load mesh` | 같은 LAN의 다른 PC가 도메인 0에서 `/robot_description` 발행. 또 `ros_environment` 훅이 `source` 때마다 탐색 범위를 SUBNET으로 덮어씀 | `show.sh`에서 모든 `source` 뒤에 `ROS_DOMAIN_ID=77`, `ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST` 설정 |
-| LM이 반대로 가서 충돌할 뻔함 | Extended Position 모드는 전원을 켤 때 회전 수가 사라짐(0~360°) | 전원을 켤 때 항상 LM을 모터 끝에 붙임 + 펌웨어 `zero_tick=-8192`. `checkarm`이 범위 밖이면 경고 |
+| LM이 반대로 가서 충돌할 뻔함 | Extended Position 모드는 전원을 켤 때 회전 수가 사라짐(0~360°) | 전원을 켤 때 항상 LM을 모터 끝에 붙임 + 펌웨어 `zero_tick=-4096` (2026-10-27 LM 재보정 전 -8192). `checkarm`이 범위 밖이면 경고 |
 | 명령을 보내도 팔이 안 움직임 | 호스트가 `%.4f`로 반올림한 값이 펌웨어 제한 밖이 되어 프레임 전체가 버려짐 | YAML·펌웨어 제한값을 소수 4자리에서 안쪽으로 반올림 |
 | 실물이 계획보다 약 2.5 cm 낮게 내려감 | 팔 관절 오프셋 오차(RViz에서 눈으로 맞춤). 그리퍼 길이 8 mm 차이는 별도로 수정함 | 임시: `plan.py`의 `hw_z_correction=0.025`. **근본 해결: 오프셋 재보정** |
 | LM이 퍽보다 1 cm 더 감 | slide 원점 오차 | URDF slide 원점 +10 mm |
@@ -225,7 +225,7 @@ python3 demo/puck_pick/execute.py            # --dry-run: 단계만 출력
 - `CraftProtocol.h`, `CraftMotorFirmware.h`: `RELAX` / `HOLD` 명령
   - RELAX: 토크 OFF, 피드백 유지, CSV 명령 무시, 상태 2
   - HOLD: 그 자리에서 토크 ON
-- `lm_arm/config.h`: LM `zero_tick=-8192`, profile velocity 180, 가속 30
+- `lm_arm/config.h`: LM `zero_tick=-4096` (2026-10-27 LM 재보정 전 -8192), profile velocity 180, 가속 30
 - `test/test_firmware.cpp`: RELAX/HOLD 테스트
 - `README.md`: 프로토콜 설명
 

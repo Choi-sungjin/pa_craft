@@ -68,7 +68,7 @@ LM motor limits and calibration use separate `lm_*` parameters, including
 holds its measured motor angle; this does not disable the rotational arm controller.
 `lm_meters_per_rad` is measured travel divided by motor rotation in radians; separate
 pulley radius and gear ratio parameters are unnecessary. LM calibration uses
-108 mm travel over -141.4 to 808.1 degrees, with 249.4 degrees as slide zero. `GripperController` remains independent.
+108 mm travel over -391.8 to 527.5 degrees, with -11.6 degrees as slide zero. `GripperController` remains independent.
 
 Direction settings assume hardware Reverse OFF. With URDF +Y forward and +Z up
 at the reference pose, `arm_joint_directions` is `[+1, +1, -1, +1]` in

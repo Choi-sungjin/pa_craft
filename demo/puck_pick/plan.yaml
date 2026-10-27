@@ -27,6 +27,9 @@ assume:
   tool_roll: 0.0
   jaw_open: -0.021
   jaw_grip: -0.0018
+  lying: false
+  tool_tilt_deg: null
+  shelf_ahead: null
 puck_grasp_urdf:
 - 0.168
 - -0.096

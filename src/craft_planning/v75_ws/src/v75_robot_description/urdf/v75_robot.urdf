@@ -149,7 +149,7 @@
     <origin xyz="0 0.076060 0.170833" rpy="0 0 0" />
     <axis xyz="1 -6.34787704949e-17 -3.21286950234e-19" />
     <!-- 5-degree margin inside measured motor limits; previous lower=-1.5252 upper=3.4490. -->
-    <limit effort="0" velocity="0" lower="-1.4379" upper="3.3618" />
+    <limit effort="0" velocity="0" lower="-1.4379" upper="3.4490" />
   </joint>
   <joint name="wrist_pitch_joint" type="revolute">
     <parent link="elbow_link" />
@@ -159,7 +159,7 @@
     <origin xyz="0 0.092417 0.022004" rpy="0 0 0" />
     <axis xyz="1 -6.34787704949e-17 -3.21286950234e-19" />
     <!-- 5-degree margin inside measured motor limits 70.1–340 deg (2026-10-26); previous lower=-0.4370 upper=1.5876. -->
-    <limit effort="0" velocity="0" lower="-2.1822" upper="2.3537" />
+    <limit effort="0" velocity="0" lower="-2.3655" upper="2.3537" />
   </joint>
   <joint name="tool_roll_joint" type="revolute">
     <parent link="wrist_pitch_link" />
