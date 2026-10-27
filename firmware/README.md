@@ -47,6 +47,12 @@ EKF가 쓰는 값이 이것뿐이라서입니다. 단위는 **rad/s**, 값은 �
 - clock 영점은 슬롯 12에서 314.6도로 YAML에만 적용하며 펌웨어 zero_tick은 0입니다.
 - wheel은 `max_wheel=7.8`을 따르고, LM·arm·gripper 제한은 현재 `control.yaml`의
   실측값과 일치합니다.
+- 도착 허용오차(`tolerance`, 모터 각도)는 `lm_arm`의 LM과 팔 4축(shoulder, elbow,
+  wrist_pitch, tool_roll)이 **0.5도**(약 6 tick, LM 캐리지 약 0.06 mm), gripper는 2도이며
+  `control.yaml`의 `lm_angle_tolerance`·`arm_angle_tolerance`·`gripper_angle_tolerance`와
+  **일치시켰습니다**(2026-10-27, 이전 LM 2도·팔 1도). 보드는 각 축이 이 범위 안에 들어올
+  때까지 `state=1`(moving)을 보내므로, 한쪽만 바꾸면 호스트가 더 좁을 때 작업이 끝나지
+  않습니다. 바꿀 때는 두 곳을 같이 바꾸고 `resetarm`으로 다시 올립니다.
 - `PROFILE_ACCELERATION` 예시 raw 값은 10, 위치축 `PROFILE_VELOCITY`는 30입니다.
   실제 모델의 단위와 하중에 맞춰 조정하세요. 가속 프로파일과 PID는 DYNAMIXEL이 담당합니다.
   `DRIVE_MODE=0`으로 정방향·속도 기반 프로파일을 설정하고 물리 방향은 소프트웨어로 환산합니다.

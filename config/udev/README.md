@@ -5,11 +5,11 @@
 
 | 현재 장치 (변경 가능) | ID_PATH | udev 별칭 |
 | --- | --- | --- |
-| `/dev/ttyACM0` | `platform-3610000.usb-usb-0:2.2.2:1.0` | `/dev/opencr_wheel_clock` |
-| `/dev/ttyACM1` | `platform-3610000.usb-usb-0:2.1:1.0` | `/dev/opencr_arm_lm` |
+| `/dev/ttyACM0` | `platform-3610000.usb-usb-0:2.2.2:1.0` | `/dev/opencr_arm_lm` |
+| 그 밖의 OpenCR | `2.2.2`가 아닌 모든 경로 | `/dev/opencr_wheel_clock` |
 
 별칭은 보드가 아닌 물리 USB 포트를 식별합니다. 허브/케이블 위치를 고정하고 라벨을 붙입니다.
-2026-10-26 하드웨어 변경: arm/LM은 `2.1`(ttyACM1), wheel/clock은 `2.2.2`(ttyACM0)입니다.
+2026-10-26 하드웨어 변경: arm/LM은 `2.2.2`(ttyACM0), 나머지 OpenCR은 wheel/clock입니다.
 `ttyACM0/1` 번호만으로 역할을 판단하지 않습니다.
 
 저장소 루트에서 설치합니다. 제어 노드와 업로더를 먼저 종료합니다.

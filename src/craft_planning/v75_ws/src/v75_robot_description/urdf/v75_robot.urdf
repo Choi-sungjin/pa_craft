@@ -127,13 +127,16 @@
     <origin xyz="-0.00135 0 0" rpy="0 0 0" />
     <!-- + moves the carriage toward the LM motor (-X), matching motor raw +. -->
     <axis xyz="-1 0 0" />
-    <!-- 5-degree margin inside measured motor limits; previous lower=-0.032 upper=0.072. -->
-    <limit effort="0" velocity="0" lower="-0.0320" upper="0.0630" />
+    <!-- 5-degree margin inside measured motor limits (-136.4..803.1 deg, control.yaml); lower was a
+         stale -0.0320 (2026-10-26); previous lower=-0.032 upper=0.072. -->
+    <limit effort="0" velocity="0" lower="-0.0438" upper="0.0630" />
   </joint>
   <joint name="shoulder_joint" type="revolute">
     <parent link="slide_link" />
     <child link="shoulder_link" />
-    <origin xyz="0.129 0.051 0.12225" rpy="0 0 0" />
+    <!-- Shoulder axis measured 114 mm above the floor (wheel bottom = base_link z 0) (2026-10-27);
+         was 0.12225 (122.25 mm, CAD), which put every TCP 8.25 mm above the real one. -->
+    <origin xyz="0.129 0.051 0.114" rpy="0 0 0" />
     <axis xyz="1 -4.17700833006e-17 -1.45864345059e-18" />
     <!-- 5-degree margin inside measured motor limits; previous lower=-0.4721 upper=2.1110. -->
     <limit effort="0" velocity="0" lower="-0.3848" upper="2.0237" />
@@ -141,9 +144,9 @@
   <joint name="elbow_joint" type="revolute">
     <parent link="shoulder_link" />
     <child link="elbow_link" />
-    <!-- Measured 190 mm axis to axis, CAD direction kept (scripts/fit_measured.py);
-         was 0 0.0764664888983 0.171746546037 (188.0 mm). -->
-    <origin xyz="0 0.077280 0.173574" rpy="0 0 0" />
+    <!-- Measured 187 mm axis to axis (2026-10-26), CAD direction kept (scripts/fit_measured.py);
+         was 0 0.077280 0.173574 (190 mm), CAD 0 0.0764664888983 0.171746546037 (188.0 mm). -->
+    <origin xyz="0 0.076060 0.170833" rpy="0 0 0" />
     <axis xyz="1 -6.34787704949e-17 -3.21286950234e-19" />
     <!-- 5-degree margin inside measured motor limits; previous lower=-1.5252 upper=3.4490. -->
     <limit effort="0" velocity="0" lower="-1.4379" upper="3.3618" />
@@ -152,20 +155,21 @@
     <parent link="elbow_link" />
     <child link="wrist_pitch_link" />
     <!-- Centered on the forearm wrist-pitch motor horn (was 0.0835666 0.0451843, 24 mm above it).
-         Measured 92 mm axis to axis, direction kept; was 0 0.0924 0.0220 (95.0 mm). -->
-    <origin xyz="0 0.089498 0.021309" rpy="0 0 0" />
+         Measured 95 mm axis to axis (2026-10-26), direction kept; was 0 0.089498 0.021309 (92 mm). -->
+    <origin xyz="0 0.092417 0.022004" rpy="0 0 0" />
     <axis xyz="1 -6.34787704949e-17 -3.21286950234e-19" />
-    <!-- 5-degree margin inside measured motor limits; previous lower=-0.5243 upper=1.6749. -->
-    <limit effort="0" velocity="0" lower="-0.4370" upper="1.5876" />
+    <!-- 5-degree margin inside measured motor limits 70.1–340 deg (2026-10-26); previous lower=-0.4370 upper=1.5876. -->
+    <limit effort="0" velocity="0" lower="-2.1822" upper="2.3537" />
   </joint>
   <joint name="tool_roll_joint" type="revolute">
     <parent link="wrist_pitch_link" />
     <child link="tool_roll_link" />
-    <!-- Measured 55 mm from the wrist-pitch axis to the tool-roll motor horn; was 0.056. -->
-    <origin xyz="0 0.055 0" rpy="0 0 0" />
+    <!-- Measured 78 mm from the wrist-pitch axis to the tool-roll motor horn (2026-10-26); was 0.055. -->
+    <origin xyz="0 0.078 0" rpy="0 0 0" />
     <axis xyz="-2.58569494309e-15 1 7.70863789488e-17" />
-    <!-- 5-degree margin inside measured motor limits; previous lower=-4.8099 upper=3.9167. -->
-    <limit effort="0" velocity="0" lower="-4.7226" upper="3.8295" />
+    <!-- 5-degree margin inside measured motor limits -180–180 deg, aligned at 90 deg (2026-10-26);
+         previous lower=-4.7226 upper=3.8295. -->
+    <limit effort="0" velocity="0" lower="-4.6250" upper="1.4835" />
   </joint>
   <joint name="jaw_upper_joint" type="prismatic">
     <parent link="tool_roll_link" />
@@ -201,8 +205,9 @@
   <joint name="tool_tcp_joint" type="fixed">
     <parent link="tool_roll_link" />
     <child link="tool_tcp" />
-    <!-- Measured horn face to open fingertip 133 mm (CAD 125.3); jaws stretched by fit_measured.py, was 0.1024. -->
-    <origin xyz="0 0.1101 0" rpy="0 0 0" />
+    <!-- Measured horn face to open fingertip 133 mm (horn->gripper 48 + gripper 85; CAD 125.3), jaws stretched
+         by fit_measured.py. TCP at the middle of the 30 mm usable grip, 15 mm behind the tip; was 0.115 (36 mm grip). -->
+    <origin xyz="0 0.118 0" rpy="0 0 0" />
   </joint>
   <link name="base_link_vis_green">
     <visual name="base_link_green">

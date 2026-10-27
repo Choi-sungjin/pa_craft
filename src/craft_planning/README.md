@@ -70,6 +70,15 @@ Joint order is `slide_joint`, `shoulder_joint`, `elbow_joint`, `wrist_pitch_join
 RViz's interpolated `/joint_states` is not hardware feedback. Arm encoder
 feedback comes from the control side; point `joint_state_topic` at its topic.
 
+IK branch choice: a TCP pose can have several in-limit joint solutions (elbow up/down).
+`ArmPlanner` solves from the seed and from `max_restarts` fixed-seed random starts,
+keeps every distinct solution, and returns the one with the least elbow load; loads
+within 1 mm count as equal and then the solution nearest the seed wins. The URDF has
+no inertias, so the load is the gravity moment about the elbow axis with equal masses
+at the wrist pitch, tool roll and TCP origins (base +z up). Control interpolates in
+joint space, so a far branch means a large swing; the measured puck poses have only
+one in-limit solution.
+
 ## Configuration, maps and coordinates
 
 Supply the complete [config/planning.yaml](config/planning.yaml). All application

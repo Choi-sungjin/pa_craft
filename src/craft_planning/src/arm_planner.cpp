@@ -49,6 +49,25 @@ struct ArmPlanner::Impl {
     }
     return q;
   }
+
+  // Gravity moment about the elbow of everything past it, as a proxy for the elbow holding torque:
+  // the URDF has no inertias, so the wrist pitch, tool roll and TCP origins count as equal masses.
+  // Base +z is up. [m, per unit weight]
+  double elbow_load(v75::pin::Data &data, const v75::VectorXd &q) const {
+    const auto &m = arm.model;
+    v75::pin::forwardKinematics(m, data, q);
+    v75::pin::updateFramePlacement(m, data, arm.base);
+    v75::pin::updateFramePlacement(m, data, arm.tip);
+    const auto &elbow = data.oMi[m.getJointId("elbow_joint")];
+    const v75::Vector3d down = -data.oMf[arm.base].rotation().col(2);
+    v75::Vector3d moment = v75::Vector3d::Zero();
+    for (const v75::Vector3d &point : {data.oMi[m.getJointId("wrist_pitch_joint")].translation(),
+        data.oMi[m.getJointId("tool_roll_joint")].translation(), data.oMf[arm.tip].translation()})
+    {
+      moment += (point - elbow.translation()).cross(down);
+    }
+    return std::abs(moment.dot(elbow.rotation().col(0)));
+  }
 };
 
 ArmPlanner::ArmPlanner() = default;
@@ -112,17 +131,54 @@ ArmPlan ArmPlanner::plan(const geometry_msgs::msg::PoseStamped &goal,
     const Eigen::Quaterniond quaternion(o.w / norm, o.x / norm, o.y / norm, o.z / norm);
     const v75::pin::SE3 target(quaternion.toRotationMatrix(), v75::Vector3d(p.x, p.y, p.z));
     const auto seed = impl_->ordered_joints(current);
+    // Collect every distinct solution (seed first, then the fixed-seed random restarts) instead of
+    // stopping at the seed's: of several branches, take the one with the least elbow load, and of
+    // equal loads the one nearest the seed.
+    const auto &m = impl_->arm.model;
+    v75::pin::Data data(m);
     std::mt19937 rng(42);
-    const auto result = v75::solveIk(impl_->arm, target, seed, impl_->params, rng);
-    if (!result.ok || result.q.size() != static_cast<Eigen::Index>(kControlJointOrder.size()) ||
-      !result.q.allFinite() || !std::isfinite(result.pos_err) || !std::isfinite(result.rot_err))
-    {
+    std::uniform_real_distribution<double> unit(0.0, 1.0);
+    std::vector<v75::VectorXd> solutions;
+    for (int attempt = 0; attempt <= impl_->params.max_restarts; ++attempt) {
+      v75::VectorXd q(m.nq);
+      if (attempt == 0) {
+        q = seed;
+      } else {
+        for (int i = 0; i < m.nq; ++i) {
+          q[i] = m.lowerPositionLimit[i] + unit(rng) * (m.upperPositionLimit[i] - m.lowerPositionLimit[i]);
+        }
+      }
+      double pos_err = 0, rot_err = 0;
+      if (!v75::solveOnce(impl_->arm, data, target, q, impl_->params, pos_err, rot_err) ||
+        !q.allFinite() || !std::isfinite(pos_err) || !std::isfinite(rot_err))
+      {
+        continue;
+      }
+      if (std::none_of(solutions.begin(), solutions.end(),
+          [&q](const v75::VectorXd &s) {return (s - q).norm() < 1e-3;}))
+      {
+        solutions.push_back(q);
+      }
+    }
+    if (solutions.empty()) {
       output.error = "TCP goal is unreachable within URDF joint limits and IK tolerances";
       return output;
     }
+    constexpr double kSameLoad = 1e-3;  // [m]
+    const v75::VectorXd *best = nullptr;
+    double best_load = 0;
+    for (const auto &q : solutions) {
+      const double load = impl_->elbow_load(data, q);
+      if (!best || load < best_load - kSameLoad ||
+        (load < best_load + kSameLoad && (q - seed).norm() < (*best - seed).norm()))
+      {
+        best = &q;
+        best_load = load;
+      }
+    }
     output.joints.header = goal.header;
     output.joints.name = impl_->arm.chain_joints;
-    output.joints.position.assign(result.q.data(), result.q.data() + result.q.size());
+    output.joints.position.assign(best->data(), best->data() + best->size());
     output.ok = true;
   } catch (const std::exception &error) {
     output.error = error.what();

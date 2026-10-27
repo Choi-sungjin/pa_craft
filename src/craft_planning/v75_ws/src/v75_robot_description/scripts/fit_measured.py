@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fit the CAD meshes to hand-measured lengths (2026-10-24). Reads the original meshes from git
+"""Fit the CAD meshes to hand-measured lengths (2026-10-24, arm remeasured 2026-10-26). Reads the original meshes from git
 (ORIG_REV), so rerunning after editing MEASURED gives the same result. Writes meshes/ in place.
 
 Jaws: the finger shank is stretched so the measured horn-to-fingertip length holds.
@@ -26,10 +26,11 @@ MEASURED = dict(  # [m]
     plate_start_from_waffle=-0.007,  # LM plate overhangs the waffle's LM-motor (-X) edge by 0.7 cm
     plate_length=0.257,
     rail_length=0.168,
-    shoulder_elbow=0.190,
-    elbow_wrist=0.092,
-    wrist_tool_horn=0.055,
-    horn_fingertip=0.133,            # tool-roll horn face -> open jaw fingertip, along the tool
+    shoulder_elbow=0.187,            # 2026-10-26 remeasure (was 0.190)
+    elbow_wrist=0.095,               # 2026-10-26 remeasure (was 0.092)
+    wrist_tool_horn=0.078,           # 2026-10-26 remeasure (was 0.055)
+    horn_fingertip=0.133,            # tool-roll horn face -> open jaw fingertip: horn->gripper 48 + gripper 85
+    fingertip_tcp=0.015,             # TCP mid-way along the 30 mm usable grip length from the fingertip (was 36 mm)
 )
 
 # CAD values the measurements replace.
@@ -39,7 +40,6 @@ WRIST_TOOL = np.array([0.0, 0.056, 0.0])
 CAD_PLATE = (-0.0016, 0.2580)
 CAD_RAIL = (0.0290, 0.2290)
 CAD_FINGERTIP = 0.1253  # jaw_upper mesh tip, tool_roll_link Y
-CAD_TCP = 0.1024        # tool_tcp_joint Y (between the jaw pads)
 JAW_BAND = (0.045, 0.075)  # finger shank between the gripper body and the pads (pads start at 0.081)
 LIDAR_BOX = ((0.100, 0.160), (0.030, 0.080), (-1.0, 0.056))  # front LiDAR, not part of the LM
 
@@ -135,7 +135,7 @@ def main():
         t1, t2 = JAW_BAND
         tris[..., 1] = np.where(y <= t1, y, np.where(y >= t2, y + extra, t1 + (y - t1) * (t2 - t1 + extra) / (t2 - t1)))
         write_stl(PKG / 'meshes' / f'{name}.stl', tris)
-    origins['tool_tcp_joint_y'] = CAD_TCP + extra
+    origins['tool_tcp_joint_y'] = m['horn_fingertip'] - m['fingertip_tcp']
 
     plate = (m['waffle_left_x'] + m['plate_start_from_waffle'],
              m['waffle_left_x'] + m['plate_start_from_waffle'] + m['plate_length'])

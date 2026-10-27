@@ -78,7 +78,7 @@ These arm signs were inferred from the reported physical motions at the referenc
 pose and still require hardware validation with calibrated offsets. Arm firmware
 preserves raw motor signs; apply the URDF sign correction only in host YAML.
 Wheel signs are applied in firmware: left `+1`, right `-1`. Clock uses firmware
-`+1`, host `clock_direction: +1`, and host zero angle 314.6 degrees (slot 12).
+`+1`, host `clock_direction: +1`, and host zero angle 210.0 degrees (slot 12, at the loading guide; was 314.6).
 Gripper closes toward 229 degrees (5 degrees inside the 234-degree hard stop) from its
 94-degree open pose; its opposite closed endpoint is -53.1 degrees (limit -48.1).
 Grasp is detected by current (0.1 A for 0.1 s), not by reaching the close target. It uses open/close targets rather than an IK sign.
@@ -231,6 +231,11 @@ A new path revision resets
 `/control/wheel_target_reached`. Arrival tolerances are configured per controller. All tolerances come from `config/control.yaml`, are
 validated as positive by ControlMaster, and are stored in each controller at
 configuration, so every controller exposes `is_target_reached(feedback)`.
+`arm_angle_tolerance` and `lm_angle_tolerance` are 0.5 motor degrees (~6 ticks; LM ~0.06 mm)
+and must equal the per-axis tolerances in `firmware/lm_arm/config.h`: the board reports
+"moving" until each axis is inside its own tolerance, so a host value tighter than the
+firmware one never completes. Arm joints use a position I gain to reach it under load; the
+LM has none, so watch for an LM step that never settles.
 Clock completion additionally requires `clock_state` idle, checked by ControlMaster.
 Targets outside motor limits are not expected: planning accounts for them in IK.
 

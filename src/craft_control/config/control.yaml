@@ -57,28 +57,29 @@ control_master:
     # wheel_l ID 1 direction=+1, wheel_r ID 2 direction=-1; hardware Reverse OFF.
     # Both host wheel commands/feedback are positive for forward travel.
 
-    # 12-slot puck storage: measured slot 12 alignment = 314.6 raw motor degrees.
+    # 12-slot puck storage: slot 12 = 210.0 raw motor degrees, aligned with the loading guide
+    # (2026-10-26; was 314.6).
     # Positive motor rotation is CCW viewed from above.
     # Adjacent slots are 30 motor degrees (pi/6 rad); shortest rotation is chosen.
     # OpenCR must accept/report unwrapped motor radians (e.g. 12 -> 7 commands -5*pi/6).
     clock_slot_count: 12
     clock_slot_angle: 0.5235987755982988  # [motor rad/slot] 30 degrees
-    clock_zero_angle: 5.490805826774161  # [motor rad] 314.6 degrees, slot 12 alignment
+    clock_zero_angle: 3.665191429188092  # [motor rad] 210.0 degrees, slot 12 at the loading guide
     # Firmware clock zero_tick stays 0: apply this offset here only.
     # Recheck physical alignment after a motor power cycle/multi-turn reset.
     clock_direction: 1.0  # +1: CCW motor rotation increases slot numbers; -1: reverse
     clock_angle_tolerance: 0.03490658503988659  # [rad] 2 degrees; tune alignment tolerance
 
     # Rotational arm motors only: shoulder, elbow, wrist_pitch, tool_roll [motor rad].
-    # Measured degrees: shoulder 39–187, elbow 38–323, wrist_pitch 114–240, tool_roll 0–500.
+    # Measured degrees: shoulder 39–187, elbow 38–323, wrist_pitch 70.1–340, tool_roll -180–180 (2026-10-26).
     # Limits below keep a 5-degree margin inside those (sync is approximate):
     # shoulder 44–182, elbow 43–318, wrist_pitch 119–235, tool_roll 5–495.
     # Original measured limits [rad]: min [0.6806784082777885, 0.6632251157578453, 1.9896753472735358, 0.0]
     #                                 max [3.263765701229396, 5.6374134839416845, 4.1887902047863905, 8.726646259971648]
     # Rounded inward to 4 decimals: ControlMaster sends '%.4f', and the firmware rejects a whole
     # frame if any value falls outside its limits, so limits must be exactly representable.
-    arm_min_angle: [0.7680, 0.7505, 2.0770, 0.0873]
-    arm_max_angle: [3.1764, 5.5501, 4.1015, 8.6393]
+    arm_min_angle: [0.7680, 0.7505, 1.3108, -3.0543]
+    arm_max_angle: [3.1764, 5.5501, 5.8468, 3.0543]
 
     # Rotational part of /ik_solution; ControlMaster routes slide_joint to LmController.
     arm_ik_joint_names: [shoulder_joint, elbow_joint, wrist_pitch_joint, tool_roll_joint]
@@ -88,8 +89,9 @@ control_master:
     # Offsets from a pose matched in RViz (2026-10-24): raw [90.4, 178.9, 197.3, 184.2] deg at
     # URDF [0.425, 0.934, 0.221, -1.595] rad. Keep mapping unconfirmed until verified on hardware.
     arm_joint_directions: [1.0, 1.0, -1.0, 1.0]
-    arm_joint_offsets: [1.152778, 2.188394, 3.664535, 4.809896]  # [motor rad] 66.05, 125.39, 209.96, 275.59 deg
-    arm_angle_tolerance: 0.03490658503988659  # [motor rad] 2 degrees per joint, same as every motor
+    # tool_roll: aligned at motor 90.0 deg in the -180..180 frame (2026-10-26; was 275.59 deg).
+    arm_joint_offsets: [1.152778, 2.188394, 3.664535, 1.570796]  # [motor rad] 66.05, 125.39, 209.96, 90.00 deg
+    arm_angle_tolerance: 0.008726646259971648  # [motor rad] 0.5 degree per joint, matches firmware lm_arm (was 1, before that 2: up to ~9 mm TCP height at the grasp)
 
     # Independent LM controller: target displacement [m] -> motor angle [rad].
     lm_linear_joint_name: slide_joint
@@ -103,7 +105,7 @@ control_master:
     lm_motor_offset: 4.352851154473858  # [motor rad] 249.4 degrees at slide position zero
     # Measured 0.108 m travel over 949.5 degrees of motor rotation.
     lm_meters_per_rad: 0.006517055489639695  # [m/motor rad]; zero disables conversion
-    lm_angle_tolerance: 0.03490658503988659  # [motor rad] 2 degrees, same as every motor
+    lm_angle_tolerance: 0.008726646259971648  # [motor rad] 0.5 degree = ~0.06 mm carriage, matches firmware lm_arm (was 2)
 
     # Gripper uses a separate Bool command: true=close/grasp, false=open/release.
     # Gripper follows the five IK joints as the final OpenCR channel.

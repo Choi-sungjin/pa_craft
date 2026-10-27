@@ -7,5 +7,8 @@ Dynamixel2Arduino motor_bus(Serial3, 84);
 craft::MotorBoard<6> motor_board(
     motor_bus, kAxes, kHardwareConfirmed, kDxlBaud, kGripperCurrentAPerTick);
 
-void setup() { motor_board.begin(); }
+void setup() {
+  motor_board.setPositionIGains(kPositionIGains);
+  motor_board.begin();
+}
 void loop() { motor_board.tick(); }

@@ -29,8 +29,8 @@ TEST_F(ArmPlannerTest, ForwardUsesTheUrdfTcpInBaseCoordinates) {
   const auto pose = planner.forward(seed);
   EXPECT_EQ(pose.header.frame_id, "base_link");
   EXPECT_NEAR(pose.pose.position.x, 0.12765, 1e-9);
-  EXPECT_NEAR(pose.pose.position.y, 0.382878, 1e-9);
-  EXPECT_NEAR(pose.pose.position.z, 0.317133, 1e-9);
+  EXPECT_NEAR(pose.pose.position.y, 0.415477, 1e-9);  // TCP 0.118 (mid usable grip)
+  EXPECT_NEAR(pose.pose.position.z, 0.306837, 1e-9);  // shoulder axis 114 mm
 }
 
 TEST_F(ArmPlannerTest, SolvesAReachablePoseFromADifferentSeed) {
@@ -52,6 +52,18 @@ TEST_F(ArmPlannerTest, SolvesAReachablePoseFromADifferentSeed) {
   const auto &b = goal.pose.orientation;
   const double dot = std::abs(a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w);
   EXPECT_LT(2.0 * std::acos(std::clamp(dot, 0.0, 1.0)), 0.001);
+}
+
+TEST_F(ArmPlannerTest, PrefersTheBranchWithTheLeastElbowLoad) {
+  // Two in-limit branches reach this pose; the seed sits on the one that holds the distal links far
+  // out from the elbow (lever 0.516 m vs 0.007 m), so the planner must leave it for the other.
+  auto heavy = seed;
+  heavy.position = {0.0, 0.2251, 2.6189, -0.2694, 0.1};
+  const auto result = planner.plan(planner.forward(heavy), heavy);
+  ASSERT_TRUE(result.ok) << result.error;
+  EXPECT_NEAR(result.joints.position[1], 1.2142, 1e-3);
+  EXPECT_NEAR(result.joints.position[2], -0.7826, 1e-3);
+  EXPECT_NEAR(result.joints.position[3], 2.1430, 1e-3);
 }
 
 TEST_F(ArmPlannerTest, AcceptsReorderedNamedSeedAndReturnsControlOrder) {

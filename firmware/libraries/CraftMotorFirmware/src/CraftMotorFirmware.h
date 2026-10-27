@@ -16,7 +16,7 @@ struct AxisConfig {
   uint8_t id;
   bool velocity;                 // false: extended position, true: velocity
   double units_per_tick;        // radians/tick or (rad/s)/tick
-  int32_t zero_tick;            // motor radians = (raw - zero_tick)*units_per_tick
+  int32_t zero_tick;            // motor radians = (raw - zero_tick)*units_per_tick (+ whole turns, unwrapTurns)
   int8_t direction;             // physical motor sign, +1 or -1
   double minimum;
   double maximum;
@@ -37,10 +37,13 @@ public:
 
   // Optional: print ",v1,v2,..." after the state fields of every feedback line.
   void setFeedbackExtension(void (*extension)()) { extension_ = extension; }
+  // Optional, before begin(): Position I gain per axis (position axes; 0 keeps the motor default 0).
+  void setPositionIGains(const uint16_t (&gains)[N]) { i_gains_ = gains; }
 
   void begin() {
     Serial.begin(115200);
     // USB must not gate feedback: ControlMaster waits for the first sample.
+    for (unsigned i = 0; i < N; ++i) zero_[i] = axes_[i].velocity ? 0 : axes_[i].zero_tick;
     if (!validConfiguration() || !confirmed_) { fault_ = true; return; }
     pinMode(BDPIN_DXL_PWR_EN, OUTPUT);
     digitalWrite(BDPIN_DXL_PWR_EN, HIGH);
@@ -57,11 +60,14 @@ public:
           !statusOk() ||
           !write(ControlTableItem::DRIVE_MODE, i, 0) ||
           !write(ControlTableItem::PROFILE_ACCELERATION, i, a.profile_acceleration) ||
-          (!a.velocity && !write(ControlTableItem::PROFILE_VELOCITY, i, a.profile_velocity))) {
+          (!a.velocity && !write(ControlTableItem::PROFILE_VELOCITY, i, a.profile_velocity)) ||
+          (!a.velocity && i_gains_ && i_gains_[i] &&
+           !write(ControlTableItem::POSITION_I_GAIN, i, i_gains_[i]))) {
         tripFault(); return;
       }
     }
     if (!readFeedback()) { tripFault(); return; }
+    unwrapTurns();
     holdTargets();
     if (!writeTargets()) { tripFault(); return; }
     for (unsigned i = 0; i < N; ++i) {
@@ -77,8 +83,7 @@ public:
         bool valid = true;
         for (unsigned i = 0; i < N; ++i) {
           const auto &a = axes_[i];
-          const double raw = incoming[i] * a.direction / a.units_per_tick +
-                             (a.velocity ? 0 : a.zero_tick);
+          const double raw = incoming[i] * a.direction / a.units_per_tick + zero_[i];
           valid = valid && incoming[i] >= a.minimum && incoming[i] <= a.maximum &&
                   raw >= INT32_MIN && raw <= INT32_MAX;
         }
@@ -173,7 +178,7 @@ private:
           !read(axes_[i].velocity ? ControlTableItem::PRESENT_VELOCITY :
                                  ControlTableItem::PRESENT_POSITION, i, raw)) return false;
       // Subtract in double to avoid overflowing signed raw extended positions.
-      sample[i] = (static_cast<double>(raw) - (axes_[i].velocity ? 0 : axes_[i].zero_tick)) *
+      sample[i] = (static_cast<double>(raw) - zero_[i]) *
                   axes_[i].units_per_tick * axes_[i].direction;
       int32_t is_moving = 0;
       if (!axes_[i].velocity && !read(ControlTableItem::MOVING, i, is_moving)) return false;
@@ -192,6 +197,24 @@ private:
     return true;
   }
 
+  // Motors forget whole turns at power-up and report less than one turn. A position axis read
+  // outside its limits is shifted by the one whole turn that brings it inside; with none or
+  // several candidates (the multi-turn LM) it is left for the host checks (checkarm).
+  void unwrapTurns() {
+    for (unsigned i = 0; i < N; ++i) {
+      const auto &a = axes_[i];
+      if (a.velocity || (feedback_[i] >= a.minimum && feedback_[i] <= a.maximum)) continue;
+      int found = 0, turns = 0;
+      for (int k = -2; k <= 2; ++k) {
+        const double shifted = feedback_[i] + k * kTwoPi;
+        if (k != 0 && shifted >= a.minimum && shifted <= a.maximum) { ++found; turns = k; }
+      }
+      if (found != 1) continue;
+      zero_[i] -= turns * kTwoPi / a.units_per_tick * a.direction;
+      feedback_[i] += turns * kTwoPi;
+    }
+  }
+
   void holdTargets() {
     for (unsigned i = 0; i < N; ++i) target_[i] = axes_[i].velocity ? 0 : feedback_[i];
   }
@@ -199,8 +222,7 @@ private:
   bool writeTargets() {
     for (unsigned i = 0; i < N; ++i) {
       const auto &a = axes_[i];
-      const double raw = target_[i] * a.direction / a.units_per_tick +
-                         (a.velocity ? 0 : a.zero_tick);
+      const double raw = target_[i] * a.direction / a.units_per_tick + zero_[i];
       if (!isfinite(raw) || raw < INT32_MIN || raw > INT32_MAX ||
           !write(a.velocity ? ControlTableItem::GOAL_VELOCITY :
                              ControlTableItem::GOAL_POSITION, i, static_cast<int32_t>(llround(raw)))) {
@@ -261,6 +283,8 @@ private:
   const double current_scale_;
   CsvReceiver<N> receiver_;
   void (*extension_)() = nullptr;
+  const uint16_t *i_gains_ = nullptr;
+  double zero_[N] = {};  // runtime zero tick: zero_tick plus the boot unwrap
   double feedback_[N] = {};
   double target_[N] = {};
   bool moving_[N] = {};

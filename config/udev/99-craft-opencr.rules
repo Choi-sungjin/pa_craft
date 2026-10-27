@@ -1,4 +1,4 @@
-# 2026-10-26 hardware change: arm/LM (ttyACM1) moved to 2.1, wheel/clock (ttyACM0) to 2.2.2.
-# Names follow physical USB ports. Keep hub and cables in the same sockets.
-SUBSYSTEM=="tty", KERNEL=="ttyACM*", ENV{ID_VENDOR_ID}=="0483", ENV{ID_MODEL_ID}=="5740", ENV{ID_PATH}=="platform-3610000.usb-usb-0:2.2.2:1.0", SYMLINK+="opencr_wheel_clock"
-SUBSYSTEM=="tty", KERNEL=="ttyACM*", ENV{ID_VENDOR_ID}=="0483", ENV{ID_MODEL_ID}=="5740", ENV{ID_PATH}=="platform-3610000.usb-usb-0:2.1:1.0", SYMLINK+="opencr_arm_lm"
+# 2026-10-26 hardware change: arm/LM is the OpenCR on 2.2.2; any other OpenCR is wheel/clock.
+# Names follow physical USB ports. Keep the arm board's cable in the same socket.
+SUBSYSTEM=="tty", KERNEL=="ttyACM*", ENV{ID_VENDOR_ID}=="0483", ENV{ID_MODEL_ID}=="5740", ENV{ID_PATH}=="platform-3610000.usb-usb-0:2.2.2:1.0", SYMLINK+="opencr_arm_lm", ENV{ID_MM_DEVICE_IGNORE}="1"
+SUBSYSTEM=="tty", KERNEL=="ttyACM*", ENV{ID_VENDOR_ID}=="0483", ENV{ID_MODEL_ID}=="5740", ENV{ID_PATH}!="platform-3610000.usb-usb-0:2.2.2:1.0", SYMLINK+="opencr_wheel_clock", ENV{ID_MM_DEVICE_IGNORE}="1"
