@@ -1,6 +1,7 @@
 # 2D SLAM (slam_toolbox): sub /lidar/merged
-# map->odom is owned by robot_localization ekf_global (ekf.yaml), which fuses SLAM's pose
-# with wheel + IMU. Outputs are remapped in craft.launch.py: /perception/lidar/{pose,map,map_metadata}.
+# Owns map->odom. Its scan-matching prior is odom->base_link from ekf_local (wheel vx + IMU yaw
+# rate), so wheel and IMU data already enter SLAM; no second (global) EKF is needed.
+# Outputs are remapped in craft.launch.py: /perception/lidar/{pose,map,map_metadata}.
 slam_toolbox:
   ros__parameters:
     scan_topic: /lidar/merged
@@ -8,4 +9,11 @@ slam_toolbox:
     map_frame: map
     base_frame: base_link
     mode: mapping
-    transform_publish_period: 0.0  # do not publish map->odom
+    transform_publish_period: 0.05  # publish map->odom at 20 Hz
+    max_laser_range: 8.0  # lidar_processor merger caps ranges at 8 m
+    # Process scans on a time trigger (~5 Hz) while moving: the 0.5 m / 0.5 rad defaults gave ~9 s
+    # between corrections and 15-22 cm pose jumps. The tiny travel thresholds only stop identical
+    # scans from piling into the pose graph while the robot stands still.
+    minimum_time_interval: 0.2
+    minimum_travel_distance: 0.01
+    minimum_travel_heading: 0.01

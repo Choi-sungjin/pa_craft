@@ -63,10 +63,9 @@ def generate_launch_description():
                                  '--z', LaunchConfiguration('imu_z'), '--roll', str(math.pi),
                                  '--yaw', LaunchConfiguration('imu_yaw'),
                                  '--frame-id', 'base_link', '--child-frame-id', 'imu_link']))
-    # Dual EKF: local owns odom->base_link, global owns map->odom (see craft_perception/config/ekf.yaml).
-    for name, output in (('ekf_local', '/odometry/local'), ('ekf_global', '/odometry/global')):
-        nodes.append(Node(package='robot_localization', executable='ekf_node', name=name, output='screen',
-                          parameters=[ekf_yaml], remappings=[('odometry/filtered', output)]))
+    # ekf_local owns odom->base_link (wheel + IMU); slam_toolbox owns map->odom (see slam.yaml).
+    nodes.append(Node(package='robot_localization', executable='ekf_node', name='ekf_local', output='screen',
+                      parameters=[ekf_yaml], remappings=[('odometry/filtered', '/odometry/local')]))
     # 2D SLAM, started directly (online_async_launch.py takes no remaps and defaults to sim time).
     # LiDAR-derived outputs live under /perception/lidar/; input stays /lidar/merged (slam.yaml).
     slam = LifecycleNode(package='slam_toolbox', executable='async_slam_toolbox_node',

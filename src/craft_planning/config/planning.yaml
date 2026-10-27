@@ -20,12 +20,12 @@ planning_master:
     joint_state_topic: /control/arm_joints  # Measured URDF joints; requires calibrated control mappings.
     observation_min_confidence: 0.5
     cruise_speed: 0.12  # [m/s]; control also applies chassis/motor limits.
-    goal_tolerance: 0.03  # [m]
+    goal_tolerance: 0.10  # [m]; 0.03 is below cm-level localization noise (overshoot -> 180 deg turn back)
     fsm:
       initialization_timeout_s: 10.0
       ready_timeout_s: 5.0
       compute_timeout_s: 3.0
-      execution_timeout_s: 30.0
+      execution_timeout_s: 60.0  # 30 s timed out on ~3 m legs at the real (slipping) speed
       feedback_timeout_s: 0.5
       stop_timeout_s: 3.0
       max_compute_retries: 1  # Calculations only, never physical action retries.

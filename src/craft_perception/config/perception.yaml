@@ -4,7 +4,7 @@ perception_master:
     # C++ keeps no duplicate defaults. Startup fails on a missing or mistyped key.
     executor_threads: 6
     max_input_age_s: 0.5
-    odometry_source_topic: /odometry/global  # robot_localization ekf_global (wheel + IMU + SLAM)
+    odometry_source_topic: /odometry/local  # ekf_local (wheel + IMU) in odom; moved to map via SLAM's map->odom
     map_frame: map  # source already in map is relayed; other frames are moved here via TF
     tag_registry_file: config/tag_registry.yaml
 
