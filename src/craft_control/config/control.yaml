@@ -34,12 +34,8 @@ control_master:
     # Rough floor: wheels slip, so trust wheel speed loosely and wheel yaw rate barely (EKF ignores it).
     wheel_vx_variance: 0.0025      # [(m/s)^2] ~0.05 m/s std
     wheel_vyaw_variance: 0.25      # [(rad/s)^2]
-    # OpenCR on-board IMU (raw board frame). Mounting incl. upside-down is the bringup TF.
-    imu_frame: imu_link
-    imu_gyro_variance: 0.0001      # [(rad/s)^2] ~0.01 rad/s std; IMU yaw rate is the trusted source
-    # Residual gz offset left after the firmware's power-up zero calibration [rad/s], board frame.
-    # Measure: robot still, average /control/imu/data angular_velocity.z for ~30 s.
-    imu_gyro_z_bias: 0.0
+    # Both OpenCR on-board IMUs are relayed raw on /control/imu/{wheel_clock,lm_arm} (board frame,
+    # gyro offset included); craft_perception's imu_processor turns them into the chassis yaw rate.
     max_v: 0.26           # [m/s] nominal Waffle Pi maximum linear speed
     # Host limits target speed. OpenCR firmware must configure DYNAMIXEL Profile Acceleration(108)
     # and owns the motor velocity PID, feedforward, acceleration profile, and motor-level tracking.

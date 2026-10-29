@@ -44,7 +44,8 @@ def params():
 
 
 def newest(port, buf):
-    """Newest complete 7-field feedback line: wheel_l, wheel_r, clock, wheel_state, clock_state, imu_ok, gz."""
+    """Newest complete 12-field feedback line: wheel_l, wheel_r, clock, wheel_state, clock_state,
+    imu_ok, gx, gy, gz, ax, ay, az (gz: raw board-frame yaw rate, the wheel_clock board is upright)."""
     buf += port.read(port.in_waiting or 1)
     *lines, rest = buf.split(b'\n')
     for line in reversed(lines):
@@ -52,7 +53,7 @@ def newest(port, buf):
             v = [float(x) for x in line.decode(errors='replace').split(',')]
         except ValueError:
             continue
-        if len(v) == 7 and all(math.isfinite(x) for x in v):
+        if len(v) == 12 and all(math.isfinite(x) for x in v):
             return v, rest
     return None, rest
 
@@ -105,7 +106,7 @@ def run(args):
                 v_meas = r * (fb[0] + fb[1]) / 2
                 s += v_meas * dt
                 yaw_w += r * (fb[1] - fb[0]) / sep * dt
-                yaw_i += fb[6] * dt
+                yaw_i += fb[8] * dt
                 peak = max(peak, v_meas)
                 if 2 in (int(fb[3]), int(fb[4])):
                     print('[slip] board fault during the run'); aborted = True; break
@@ -123,7 +124,7 @@ def run(args):
                     break
             send(cmd)
             rows.append([round(t, 4), round(cmd, 4), fb[0], fb[1], round(s, 5), round(math.degrees(yaw_w), 3),
-                         round(math.degrees(yaw_i), 3), fb[6]])
+                         round(math.degrees(yaw_i), 3), fb[8]])
             if t > 30:
                 print('[slip] 30 s timeout'); aborted = True; break
             time.sleep(max(0.0, 1 / HZ - (time.monotonic() - now)))

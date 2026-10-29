@@ -190,13 +190,16 @@ command first, in the same order, then the board-specific state:
 ```text
 host -> OpenCR: wheel_l,wheel_r,clock_motor_angle
 OpenCR -> host: wheel_l_feedback,wheel_r_feedback,clock_motor_angle,wheel_state,clock_state,
-                imu_ok,gz
+                imu_ok,gx,gy,gz,ax,ay,az
 ```
 
-Each sample also publishes `/control/wheel/odom` (wheel dead reckoning with twist covariance) and,
-when `imu_ok=1`, `/control/imu/data` in `imu_link` (OpenCR board-frame yaw rate only, minus
-`imu_gyro_z_bias`; no orientation or acceleration). `odom->base_link` comes from robot_localization
-(`craft_perception/config/ekf.yaml`); set `publish_odom_tf: true` only when running without it.
+The arm/LM board appends the same seven IMU fields after `arm_lm_state,gripper_current_a`.
+Both boards are fixed to the chassis. Each sample also publishes `/control/wheel/odom` (wheel dead
+reckoning with twist covariance) and relays the board's IMU fields raw on `/control/imu/wheel_clock` /
+`/control/imu/lm_arm` (`sensor_msgs/Imu`, board frame, gyro offset included, accel in m/s^2; nothing
+while `imu_ok=0`). craft_perception's `imu_processor` turns both into the chassis yaw rate
+(`/perception/imu/data`). `odom->base_link` comes from robot_localization (`craft_perception/config/ekf.yaml`); set
+`publish_odom_tf: true` only when running without it.
 
 The control node reports on each new valid serial sample:
 

@@ -5,18 +5,20 @@ TODO를 실제 구현으로 교체했습니다. 호스트는 `src/craft_control/
 
 | 보드 / 스케치 | 명령 CSV | 피드백 CSV |
 | --- | --- | --- |
-| `wheel_clock/wheel_clock.ino` | `wheel_l,wheel_r,clock` | `wheel_l,wheel_r,clock,wheel_state,clock_state,imu_ok,gz` |
-| `lm_arm/lm_arm.ino` | `lm,shoulder,elbow,wrist_pitch,tool_roll,gripper` | 같은 6개 위치 + `arm_lm_state,gripper_current_a` |
+| `wheel_clock/wheel_clock.ino` | `wheel_l,wheel_r,clock` | `wheel_l,wheel_r,clock,wheel_state,clock_state` + IMU 7개 |
+| `lm_arm/lm_arm.ino` | `lm,shoulder,elbow,wrist_pitch,tool_roll,gripper` | 같은 6개 위치 + `arm_lm_state,gripper_current_a` + IMU 7개 |
 
 USB CDC `Serial`, 115200 설정, ASCII CSV, 줄 끝 `\n`입니다. `\r\n`도 받습니다.
 피드백은 명령을 받기 전부터 자체 송신하며 정상 버스에서는 약 50 Hz입니다.
 wheel 값은 **rad/s**, 나머지 축은 **모터 rad**, 그리퍼 전류는 **A**입니다.
 LM의 m→rad 변환과 IK 관절 매핑은 호스트가 담당합니다.
 
-`wheel_clock` 보드는 OpenCR 내장 IMU(2018년 보드: MPU9250, ±2000 dps)의 yaw 각속도 `gz`만 같은 줄 뒤에 붙입니다.
-EKF가 쓰는 값이 이것뿐이라서입니다. 단위는 **rad/s**, 값은 보드 좌표계 그대로이고 장착 방향(현재 뒤집힘)은
-호스트의 `base_link→imu_link` TF가 처리합니다. 전원 투입 후 최대 5초간 자이로 영점을 잡으므로
-**그동안 로봇을 움직이지 마세요.** IMU가 응답하지 않으면 `imu_ok=0`, `gz=0`을 보냅니다.
+두 보드 모두 차체에 고정돼 있고, OpenCR 내장 IMU(MPU9250 또는 ICM20648, ±2000 dps, ±2 g) 값을 줄 끝에
+`imu_ok,gx,gy,gz,ax,ay,az`로 붙입니다(`CraftImu.h`). 자이로는 **rad/s**, 가속도는 **g**, 모두 보드 좌표계
+그대로입니다. 가속도는 영점을 빼지 않아 중력이 남아 있고, 호스트가 정지 중에 이것으로 보드마다 위쪽 축과
+자이로 바이어스를 구해 차체 yaw 각속도로 바꿉니다. 그래서 보드를 뒤집거나 옮겨도 펌웨어·TF 설정을 바꿀
+필요가 없습니다(`craft_perception/README.md`의 IMU 처리). 전원 투입 후 최대 5초간 자이로 영점을 잡으므로(lm_arm은 토크를
+켠 뒤, 그동안 피드백 없음) **그동안 로봇을 움직이지 마세요.** IMU가 응답하지 않으면 `imu_ok=0`과 0을 보냅니다.
 
 ## 하드웨어 설정
 

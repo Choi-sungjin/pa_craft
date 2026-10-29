@@ -227,12 +227,6 @@ public:
     publish_odom_tf_ = declare_parameter<bool>("publish_odom_tf");
     wheel_vx_variance_ = positive_param("wheel_vx_variance");
     wheel_vyaw_variance_ = positive_param("wheel_vyaw_variance");
-    imu_frame_ = declare_parameter<std::string>("imu_frame");
-    imu_gyro_variance_ = positive_param("imu_gyro_variance");
-    imu_gyro_z_bias_ = declare_parameter<double>("imu_gyro_z_bias");
-    if (!std::isfinite(imu_gyro_z_bias_)) {
-      throw std::runtime_error("imu_gyro_z_bias must be finite [rad/s] (config/control.yaml)");
-    }
     const double serial_timeout = declare_parameter("serial_feedback_timeout_s", 0.5);
     serial_timeout_s_ = serial_timeout;
     if (!arm_feedback_watchdog_.configure(serial_timeout) ||
@@ -260,7 +254,9 @@ public:
     planning_held_pub_ = create_publisher<std_msgs::msg::Bool>("/control/planning_held", 10);
     arm_joint_feedback_pub_ = create_publisher<sensor_msgs::msg::JointState>("/control/arm_joints", 10);
     wheel_odom_pub_ = create_publisher<nav_msgs::msg::Odometry>("/control/wheel/odom", rclcpp::SensorDataQoS());
-    imu_pub_ = create_publisher<sensor_msgs::msg::Imu>("/control/imu/data", rclcpp::SensorDataQoS());
+    // Raw board IMUs; craft_perception's imu_processor turns them into the chassis yaw rate.
+    drive_imu_pub_ = create_publisher<sensor_msgs::msg::Imu>("/control/imu/wheel_clock", rclcpp::SensorDataQoS());
+    arm_imu_pub_ = create_publisher<sensor_msgs::msg::Imu>("/control/imu/lm_arm", rclcpp::SensorDataQoS());
     tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
     planning_hold_sub_ = create_subscription<std_msgs::msg::Bool>(
       "/planning/hold", 10,
@@ -330,7 +326,8 @@ private:
       std::vector<double> v;
 
       // Validate the line: must be CSV, correct number of values, all finite
-      if (!parse_csv(line, v) || v.size() != 8) // LM + four arm motors + gripper + state + current
+      // LM + four arm motors + gripper + state + current + imu_ok, gx, gy, gz, ax, ay, az
+      if (!parse_csv(line, v) || v.size() != 15)
       {
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "bad arm+LM OpenCR line: %s", line.c_str());
         continue;
@@ -352,6 +349,7 @@ private:
       gripper_angle_ = v[5];
       arm_lm_state_ = static_cast<int>(v[6]);
       gripper_current_a_ = v[7];
+      publish_board_imu(arm_imu_pub_, v, 8, "lm_arm_imu");
 
       have_arm_lm_feedback_ = true; // 정상 arm+LM 피드백을 한 번이라도 받은 적이 있는가
       return true;
@@ -367,9 +365,9 @@ private:
       const auto & line = *it;
       std::vector<double> v;
 
-      // Validate the line: must be CSV, contain five values, and contain only finite numbers.
-      // 7: wheel_l, wheel_r, clock, wheel_state, clock_state, imu_ok, gz
-      if (!parse_csv(line, v) || v.size() != 7) {
+      // Validate the line: must be CSV, contain twelve values, and contain only finite numbers.
+      // 12: wheel_l, wheel_r, clock, wheel_state, clock_state, imu_ok, gx, gy, gz, ax, ay, az
+      if (!parse_csv(line, v) || v.size() != 12) {
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "bad clock+wheel OpenCR line: %s", line.c_str());
         continue;
       }
@@ -389,10 +387,9 @@ private:
       clock_angle_ = v[2];
       wheel_state_ = static_cast<int>(v[3]);
       clock_state_ = static_cast<int>(v[4]);
-      imu_ok_ = v[5] != 0.0;
-      imu_gz_ = v[6];
 
       have_clock_wheel_feedback_ = true; // 정상 clock & wheel 피드백을 한 번이라도 받은 적이 있는가
+      publish_board_imu(drive_imu_pub_, v, 5, "wheel_clock_imu");
       return true;
     }
     return false;
@@ -556,23 +553,28 @@ private:
     tf_broadcaster_->sendTransform(tf);
   }
 
-  // OpenCR board-frame yaw rate in imu_frame; base_link->imu_link TF carries the mounting.
-  void publish_imu()
+  // One board's IMU fields from index first: imu_ok, gx, gy, gz [rad/s], ax, ay, az [g], raw board
+  // frame (gyro offset included). Published as received, accel in m/s^2; nothing when imu_ok=0.
+  void publish_board_imu(
+    const rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr & pub, const std::vector<double> & v,
+    std::size_t first, const char * frame)
   {
-    if (!imu_ok_) {
-      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "OpenCR IMU not connected: /control/imu/data off");
+    if (v[first] == 0.0) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "%s: OpenCR IMU not connected", frame);
       return;
     }
+    constexpr double kGravity = 9.80665;
     sensor_msgs::msg::Imu imu;
     imu.header.stamp = now();
-    imu.header.frame_id = imu_frame_;
-    // Yaw rate only: orientation and acceleration are not provided (covariance[0] = -1).
-    imu.orientation_covariance[0] = -1.0;
-    imu.linear_acceleration_covariance[0] = -1.0;
-    imu.angular_velocity.z = imu_gz_ - imu_gyro_z_bias_;
-    imu.angular_velocity_covariance[0] = imu.angular_velocity_covariance[4] = 1e6;  // unmeasured x/y
-    imu.angular_velocity_covariance[8] = imu_gyro_variance_;
-    imu_pub_->publish(imu);
+    imu.header.frame_id = frame;
+    imu.orientation_covariance[0] = -1.0;  // no orientation
+    imu.angular_velocity.x = v[first + 1];
+    imu.angular_velocity.y = v[first + 2];
+    imu.angular_velocity.z = v[first + 3];
+    imu.linear_acceleration.x = v[first + 4] * kGravity;
+    imu.linear_acceleration.y = v[first + 5] * kGravity;
+    imu.linear_acceleration.z = v[first + 6] * kGravity;
+    pub->publish(imu);
   }
 
   bool validate_odom(const nav_msgs::msg::Odometry & odom)
@@ -774,7 +776,6 @@ private:
     }
     if (clock_wheel_feedback_updated) {
       publish_wheel_odometry(now_s, serial_timeout_s_);
-      publish_imu();
       drive_received_at_ = now_s;
       update_settle(clock_anchor_, {clock_angle_}, clock_stable_at_, now_s);
     }
@@ -986,13 +987,10 @@ private:
   bool have_arm_lm_feedback_ = false;
   craft_control::WheelOdometry wheel_odometry_;
   std::optional<double> wheel_odom_at_;
-  std::string odom_frame_, base_frame_, imu_frame_;
+  std::string odom_frame_, base_frame_;
   bool publish_odom_tf_ = false;
   double wheel_vx_variance_ = 0.0, wheel_vyaw_variance_ = 0.0;
-  double imu_gyro_variance_ = 0.0, imu_gyro_z_bias_ = 0.0;
-  bool imu_ok_ = false;
-  double imu_gz_ = 0.0;  // board-frame yaw rate [rad/s]
-  rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr drive_imu_pub_, arm_imu_pub_;
   double serial_timeout_s_ = 0.5;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr wheel_odom_pub_;
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;

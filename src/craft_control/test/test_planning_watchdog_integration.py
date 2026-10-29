@@ -23,9 +23,10 @@ os.environ.setdefault('ROS_LOG_DIR', str(Path(tempfile.gettempdir()) / 'craft-co
 
 import rclpy
 from rclpy.parameter import Parameter
+from rclpy.qos import qos_profile_sensor_data
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Odometry, Path as RosPath
-from sensor_msgs.msg import JointState
+from sensor_msgs.msg import Imu, JointState
 from std_msgs.msg import Bool, Int32
 from craft_interfaces.msg import TaskCommand, TaskResult, ControlStatus
 
@@ -71,8 +72,9 @@ class FakeBoard:
 
 class Harness:
     def __init__(self, binary, calibrated=True):
-        self.arm = FakeBoard([0.05, 0.1, 0.2, 0.3, 0.4, 0.6, 0, 0])
-        self.drive = FakeBoard([0, 0, 0.7, 0, 0, 1, 0])  # + imu_ok, gz
+        # + imu_ok, gx, gy, gz [rad/s], ax, ay, az [g]: both boards still; lm_arm mounted upside down.
+        self.arm = FakeBoard([0.05, 0.1, 0.2, 0.3, 0.4, 0.6, 0, 0, 1, 0, 0, 0, 0, 0, -1])
+        self.drive = FakeBoard([0, 0, 0.7, 0, 0, 1, 0, 0, 0, 0, 0, 1])
         self.log = tempfile.TemporaryFile(mode='w+t')
         config = Path(__file__).resolve().parents[1] / 'config' / 'control.yaml'
         arguments = [str(binary), '--ros-args', '--params-file', str(config)]
@@ -86,6 +88,13 @@ class Harness:
             'gripper_mapping_confirmed': 'true',
             'gripper_open_angle': '0.2',
             'gripper_close_angle': '1.2',
+            # Logic test, not hardware calibration: identity arm/LM mapping with wide limits,
+            # so the fake feedback values stay valid whatever control.yaml measures.
+            'arm_min_angle': '[-3.0,-3.0,-3.0,-3.0]',
+            'arm_max_angle': '[3.0,3.0,3.0,3.0]',
+            'arm_joint_offsets': '[0.0,0.0,0.0,0.0]',
+            'arm_joint_directions': '[1.0,1.0,1.0,1.0]',
+            'lm_motor_offset': '0.0',
         }
         for name, value in overrides.items():
             arguments.extend(['-p', f'{name}:={value}'])
@@ -110,6 +119,10 @@ class Harness:
         self.node.create_subscription(ControlStatus, '/control/status', lambda m: setattr(self, 'status', m), 10)
         self.node.create_subscription(TaskResult, '/control/task_result',
                                       lambda m: self.results.update({m.task_id: m}), 10)
+        self.imu = {}
+        for board in ['wheel_clock', 'lm_arm']:
+            self.node.create_subscription(Imu, f'/control/imu/{board}',
+                                          lambda m, b=board: self.imu.update({b: m}), qos_profile_sensor_data)
 
     def _on_held(self, message):
         self.held = message.data
@@ -198,6 +211,14 @@ def main():
     try:
         h.pump(lambda: h.status is not None and h.status.ready and h.status.stopped, hold=True)
         assert h.node.get_clock().now().nanoseconds == 0
+        # Each board's IMU fields are relayed raw (board frame, accel g -> m/s^2) for perception.
+        h.drive.feedback[8], h.arm.feedback[11] = 0.3, -0.3
+        h.pump(lambda: len(h.imu) == 2 and h.imu['wheel_clock'].angular_velocity.z == 0.3 and
+               h.imu['lm_arm'].angular_velocity.z == -0.3, hold=True)
+        assert h.imu['wheel_clock'].header.frame_id == 'wheel_clock_imu'
+        assert abs(h.imu['wheel_clock'].linear_acceleration.z - 9.80665) < 1e-9
+        assert abs(h.imu['lm_arm'].linear_acceleration.z + 9.80665) < 1e-9
+        h.drive.feedback[8] = h.arm.feedback[11] = 0
         h.pump(lambda: h.status.held is False,hold=False)
         h.run_for(.1,hold=False,commands=True)
         c=h.nav(101)
@@ -254,8 +275,8 @@ def main():
         h.pump(lambda:h.status.held and h.all_axes_hold() and
                h.results[105].status in (TaskResult.STOPPING,TaskResult.STOPPED),commands=True,timeout=2)
         assert h.results[105].status in (TaskResult.STOPPING,TaskResult.STOPPED)
-        print('PASS: task IDs, deduplication, path revisions, per-controller matrix, measured stop, '
-              'serial timeout and planning watchdog with paused ROS clock')
+        print('PASS: raw board IMU relay, task IDs, deduplication, path revisions, per-controller matrix, '
+              'measured stop, serial timeout and planning watchdog with paused ROS clock')
     except Exception:
         print(h.close()); raise
     else:

@@ -1,6 +1,7 @@
 #include <assert.h>
 #include <iostream>
 #include <CraftMotorFirmware.h>
+#include <CraftImu.h>
 
 uint32_t test_time_ms = 0;
 HardwareSerial Serial3;
@@ -187,10 +188,38 @@ void bootUnwrap() {
   assert((bus.registers[{3, GOAL_POSITION}] == 6519 - 8192));
 }
 
+// Raw samples are averaged as floats over one feedback period: sub-LSB offsets survive, nothing is
+// zeroed, and a period without a new sample repeats the last mean.
+void imuFeedback() {
+  cIMU imu;
+  craft::ImuFeedback feedback;
+  const int16_t gz[] = {47, 48, 48, 48};  // mean 47.75 LSB: the library would keep 47 and zero the rest
+  for (int16_t z : gz) {
+    imu.SEN.gyroRAW[2] = z;
+    imu.SEN.accADC[2] = 16384;
+    feedback.add(imu);
+  }
+  Serial.output.clear();
+  feedback.print(imu);
+  char expected[96];
+  snprintf(expected, sizeof expected, ",1,0.000000,0.000000,%.6f,0.0000,0.0000,1.0000", 47.75 * craft::kGyroRadSPerLsb);
+  assert(Serial.output == expected);
+  Serial.output.clear();
+  feedback.print(imu);  // no new sample
+  assert(Serial.output == expected);
+  imu.bConnected = false;
+  imu.SEN.gyroRAW[2] = 0;
+  feedback.add(imu);
+  Serial.output.clear();
+  feedback.print(imu);
+  assert(Serial.output == ",0,0.000000,0.000000,0.000000,0.0000,0.0000,1.0000");
+}
+
 int main() {
   protocol();
+  imuFeedback();
   wheelClock();
   manipulator();
   bootUnwrap();
-  std::cout << "Firmware protocol, watchdog, fault, relax/hold and channel tests passed\n";
+  std::cout << "Firmware protocol, IMU feedback, watchdog, fault, relax/hold and channel tests passed\n";
 }
