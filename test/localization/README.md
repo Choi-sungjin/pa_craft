@@ -30,9 +30,9 @@ sim 수치는 `src/craft_perception/README.md`(IMU 처리, 위치추정 감시)�
   2번 결과로 `imu.max_disagreement_ratio`를 정한다.
 
 ## 4. 예비 IMU 전환
-- [ ] 주행 중에 wheel_clock IMU가 끊기는 상황을 만든다. 로그 `primary IMU wheel_clock unavailable: using
-  backup lm_arm`이 뜨고 위치가 유지되는지 본다. 방법은 아직 없다(펌웨어에서 imu_ok=0을 강제하는 디버그
-  옵션이 필요하다).
+- [ ] 주행 중에 wheel_clock IMU만 끊긴 상황을 만든다. 로그 `primary IMU wheel_clock unavailable: using
+  backup lm_arm`이 뜨고 위치가 유지되는지 본다. 전환 로직은 `imu_processor`(`ImuProcessor::select`)에 있다.
+  wheel_clock USB를 뽑으면 바퀴 제어도 끊기므로 IMU만 끊는 방법이 필요하다(방법은 미정).
 
 ## 5. 스캔-지도 점수 기준 (가장 중요)
 - [ ] 경기장을 정상적으로 몇 바퀴 돈다. 10초마다 찍히는 `scan-to-map score at the EKF pose`를 모아서
