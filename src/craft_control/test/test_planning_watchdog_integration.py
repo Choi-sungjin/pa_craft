@@ -72,7 +72,8 @@ class FakeBoard:
 
 class Harness:
     def __init__(self, binary, calibrated=True):
-        # + imu_ok, gx, gy, gz [rad/s], ax, ay, az [g]: both boards still; lm_arm mounted upside down.
+        # + imu_ok, gx, gy, gz [rad/s], ax, ay, az [g]: both boards still; lm_arm reads -1 g so
+        # the relay is checked per board.
         self.arm = FakeBoard([0.05, 0.1, 0.2, 0.3, 0.4, 0.6, 0, 0, 1, 0, 0, 0, 0, 0, -1])
         self.drive = FakeBoard([0, 0, 0.7, 0, 0, 1, 0, 0, 0, 0, 0, 1])
         self.log = tempfile.TemporaryFile(mode='w+t')

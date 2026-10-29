@@ -8,23 +8,22 @@ namespace craft_perception {
 
 using Vector3 = std::array<double, 3>;
 
-// One OpenCR on-board IMU, any mounting. While the robot stands still it takes the board's up axis
-// from gravity (accelerometer) and the gyro bias, then reports the chassis yaw rate
-// up . (gyro - bias): a tilted board needs no per-board setting, and the horizontal heading of the
-// board does not matter for a yaw rate.
+// One OpenCR on-board IMU, mounted upright (board z = chassis up; its horizontal heading does not
+// matter for a yaw rate). While the robot stands still it measures the gyro bias, then reports the
+// chassis yaw rate gz - bias_z.
 class BoardImu {
 public:
   // calibration_samples: consecutive still samples before the first estimate.
-  // tracking_gain: per still sample, how fast bias and up follow afterwards (0 freezes them).
+  // tracking_gain: per still sample, how fast the bias follows afterwards (0 freezes it).
   // still_rate: [rad/s] a sample further than this from the bias (before calibration: from the
   // window mean, since the raw gyro still carries the chip offset) is never taken as still.
   bool configure(int calibration_samples, double tracking_gain, double still_rate);
-  // gyro [rad/s] raw (chip offset included), accel [g], both board frame; still = wheels stopped.
+  // gyro [rad/s] raw (chip offset included), accel [g] (only to tell standing from accelerating),
+  // both board frame; still = wheels stopped.
   void update(const Vector3 &gyro, const Vector3 &accel, bool still);
   // Clears the calibration (sensor lost); the next still window calibrates again.
   void reset();
   bool calibrated() const { return calibrated_; }
-  const Vector3 &up() const { return up_; }
   const Vector3 &bias() const { return bias_; }
   // Chassis yaw rate [rad/s] from the newest sample, counter-clockwise positive; empty until calibrated.
   std::optional<double> yaw_rate() const;
@@ -33,8 +32,8 @@ private:
   int calibration_samples_ = 0;
   double tracking_gain_ = 0.0, still_rate_ = 0.0;
   int count_ = 0, outliers_ = 0;
-  Vector3 gyro_sum_{}, accel_sum_{};
-  Vector3 up_{}, bias_{}, gyro_{};
+  Vector3 gyro_sum_{};
+  Vector3 bias_{}, gyro_{};
   bool calibrated_ = false, have_sample_ = false;
 };
 
@@ -48,7 +47,7 @@ struct YawRate {
 struct ImuProcessorConfig {
   std::size_t primary;            // board used whenever it is available; the other is the backup
   int calibration_samples;        // unbroken still samples before a board reports
-  double tracking_gain;           // per still sample afterwards; 0 freezes bias and up
+  double tracking_gain;           // per still sample afterwards; 0 freezes the bias
   double still_rate;              // [rad/s]
   double variance;                // [(rad/s)^2] of one board
   double max_disagreement;        // [rad/s] boards further apart than this

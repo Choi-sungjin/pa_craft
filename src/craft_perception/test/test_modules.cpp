@@ -455,29 +455,21 @@ TEST(Lever, C310RejectsSegWithoutPrototypesOrLeverClass) {
   EXPECT_TRUE(C310Perception().configure(c310));
 }
 
-// Board frame of a board tilted by `tilt` about its x axis, then turned `heading` about the vertical:
-// returns the board-frame vector of chassis-frame v.
-static Vector3 to_board(const Vector3 &v, double heading, double tilt) {
-  const double ch = std::cos(heading), sh = std::sin(heading), ct = std::cos(tilt), st = std::sin(tilt);
-  const Vector3 h{ch * v[0] + sh * v[1], -sh * v[0] + ch * v[1], v[2]};
-  return {h[0], ct * h[1] + st * h[2], -st * h[1] + ct * h[2]};
-}
-
-TEST(BoardImu, UprightTurnedAndFlippedBoardsAllReportChassisYawRate) {
-  const Vector3 gravity{0.0, 0.0, 1.0};  // a still accelerometer reads +1 g up
-  // wheel_clock upright; lm_arm turned ~180 deg and tilted 4 deg; an upside-down board for the old mounting.
-  const std::pair<double, double> mountings[] = {{0.0, 0.0}, {3.05, 0.07}, {0.3, M_PI}};
-  for (const auto & [heading, tilt] : mountings) {
+TEST(BoardImu, UprightBoardsReportGzMinusBiasWhateverTheirHeading) {
+  // Both boards upright; lm_arm turned ~180 deg about the vertical, which leaves gz unchanged.
+  for (double heading : {0.0, 3.05}) {
     BoardImu imu;
     ASSERT_TRUE(imu.configure(10, 0.0, 0.05));
     const Vector3 bias{0.004, -0.003, 0.002};
+    const Vector3 gravity{0.0, 0.0, 1.0};  // a still accelerometer reads +1 g up
     for (int i = 0; i < 10; ++i) {
       EXPECT_FALSE(imu.yaw_rate());
-      imu.update(bias, to_board(gravity, heading, tilt), true);
+      imu.update(bias, gravity, true);
     }
     ASSERT_TRUE(imu.calibrated());
-    const auto rate = to_board({0.0, 0.0, 0.5}, heading, tilt);  // chassis turns left at 0.5 rad/s
-    imu.update({rate[0] + bias[0], rate[1] + bias[1], rate[2] + bias[2]}, to_board(gravity, heading, tilt), false);
+    // Chassis turns left at 0.5 rad/s; x and y gyro (here from the heading) do not enter the yaw rate.
+    imu.update({bias[0] + 0.01 * std::cos(heading), bias[1] + 0.01 * std::sin(heading), bias[2] + 0.5},
+               gravity, false);
     ASSERT_TRUE(imu.yaw_rate());
     EXPECT_NEAR(*imu.yaw_rate(), 0.5, 1e-9);
   }

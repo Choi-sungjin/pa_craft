@@ -3,8 +3,8 @@
 #   ekf_global: (localization:=ekf only) the same + slam_toolbox's scan-matched pose -> map->odom TF,
 #               /odometry/global. With localization:=slam, slam_toolbox owns map->odom itself.
 # Rough floor: wheels slip, so yaw rate comes from the IMU only; wheels give forward speed.
-# /perception/imu/data is already the chassis yaw rate in base_link (imu_processor fuses both OpenCR
-# IMUs and finds their mounting from gravity), so no IMU TF is needed.
+# /perception/imu/data is already the chassis yaw rate in base_link (imu_processor picks one of the two
+# upright OpenCR IMUs and removes its gyro offset), so no IMU TF is needed.
 #
 # *_config order: [x, y, z, roll, pitch, yaw, vx, vy, vz, vroll, vpitch, vyaw, ax, ay, az]
 

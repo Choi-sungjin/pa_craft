@@ -1,7 +1,7 @@
 // OpenCR #1. USB RX: wheel_l [rad/s],wheel_r [rad/s],clock [unwrapped rad]\n
 // USB TX: wheel_l,wheel_r,clock,wheel_state,clock_state,imu_ok,gx,gy,gz,ax,ay,az\n (50 Hz)
-// IMU values: raw board-frame means (CraftImu.h); the host removes the gyro offset and finds the
-// mounting from gravity while the robot stands still.
+// IMU values: raw board-frame means (CraftImu.h); the host removes the gyro offset while the robot
+// stands still.
 #include <CraftImu.h>
 #include "config.h"
 

@@ -702,11 +702,9 @@ void PerceptionMaster::receive_imu(std::size_t board, const sensor_msgs::msg::Im
   const auto &w = input.angular_velocity;
   const auto &a = input.linear_acceleration;
   if (imu_.update(board, t, {w.x, w.y, w.z}, {a.x / kGravity, a.y / kGravity, a.z / kGravity}, wheels_still)) {
-    const auto &up = imu_.board(board).up();
     const auto &bias = imu_.board(board).bias();
-    RCLCPP_INFO(get_logger(), "%s IMU calibrated: board up axis (%.3f, %.3f, %.3f), %.1f deg from vertical; "
-      "gyro offset (%.5f, %.5f, %.5f) rad/s", kNames[board], up[0], up[1], up[2],
-      std::acos(std::min(1.0, std::fabs(up[2]))) * 180.0 / M_PI, bias[0], bias[1], bias[2]);
+    RCLCPP_INFO(get_logger(), "%s IMU calibrated: gyro offset (%.5f, %.5f, %.5f) rad/s", kNames[board],
+      bias[0], bias[1], bias[2]);
   }
   // One output per primary sample; the backup drives it only while the primary is unavailable.
   if (board != imu_.primary() && imu_.available(imu_.primary(), t)) return;

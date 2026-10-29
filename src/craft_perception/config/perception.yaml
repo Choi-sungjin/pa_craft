@@ -12,8 +12,8 @@ perception_master:
 
     # imu_processor: both chassis-fixed OpenCR IMUs (raw, /control/imu/{wheel_clock,lm_arm}) ->
     # /perception/imu/data, the chassis yaw rate in base_link for robot_localization (ekf.yaml).
-    # Each board's up axis and gyro offset come from gravity while the wheels stand still, so a
-    # mounting change needs no setting. Boards: 2018 OpenCR, MPU-9250.
+    # Both boards are upright (board z = chassis up), so the yaw rate is gz minus its gyro offset,
+    # measured while the wheels stand still. Boards: 2018 OpenCR, MPU-9250.
     imu:
       enabled: true
       output_frame: base_link

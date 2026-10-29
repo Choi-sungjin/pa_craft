@@ -15,8 +15,8 @@ constexpr double kAccelGPerLsb = 1.0 / 16384.0;  // 32768 LSB / 2 g
 // Not the library's gyroADC: that one keeps its power-up zero in whole LSBs and zeroes |x| <= 3 LSB,
 // so up to ~1 LSB of bias (0.0011 rad/s, ~3.7 deg/min) stays hidden at standstill and leaks in
 // while driving. The gyro here still carries the chip's zero-rate offset; the host measures and
-// removes it while the robot stands still (craft_control imu_fusion). The accelerometer is never
-// zeroed either, so it holds gravity: the host takes each board's up axis from it.
+// removes it while the robot stands still (craft_perception imu_processor). The accelerometer is
+// never zeroed either, so it holds gravity: the host uses it to tell standing from accelerating.
 // gyroRAW and accADC share the axes (the library's orientation maps x, y, z to indices 0, 1, 2).
 class ImuFeedback {
 public:

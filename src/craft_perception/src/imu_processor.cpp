@@ -18,11 +18,6 @@ bool gravity_only(const Vector3 &accel) {
   const double g = norm(accel);
   return g > 0.9 && g < 1.1;
 }
-
-Vector3 unit(const Vector3 &v) {
-  const double n = norm(v);
-  return {v[0] / n, v[1] / n, v[2] / n};
-}
 }  // namespace
 
 bool BoardImu::configure(int calibration_samples, double tracking_gain, double still_rate) {
@@ -39,7 +34,7 @@ bool BoardImu::configure(int calibration_samples, double tracking_gain, double s
 
 void BoardImu::reset() {
   count_ = outliers_ = 0;
-  gyro_sum_ = accel_sum_ = up_ = bias_ = gyro_ = Vector3{};
+  gyro_sum_ = bias_ = gyro_ = Vector3{};
   calibrated_ = have_sample_ = false;
 }
 
@@ -65,36 +60,24 @@ void BoardImu::update(const Vector3 &gyro, const Vector3 &accel, bool still) {
       // With the wheels still, a few outliers in a row are spikes: skip them, keep the window.
       if (still && gravity_only(accel) && ++outliers_ < kCalibrationOutliers) return;
       count_ = outliers_ = 0;  // the wheels moved or the gyro keeps turning: restart the window
-      gyro_sum_ = accel_sum_ = Vector3{};
+      gyro_sum_ = Vector3{};
       return;
     }
     outliers_ = 0;
-    for (int i = 0; i < 3; ++i) {
-      gyro_sum_[i] += gyro[i];
-      accel_sum_[i] += accel[i];
-    }
+    for (int i = 0; i < 3; ++i) gyro_sum_[i] += gyro[i];
     if (++count_ < calibration_samples_) return;
     for (int i = 0; i < 3; ++i) bias_[i] = gyro_sum_[i] / count_;
-    up_ = unit(accel_sum_);
     calibrated_ = true;
     return;
   }
   if (usable && tracking_gain_ > 0.0) {
-    const Vector3 measured_up = unit(accel);
-    Vector3 up;
-    for (int i = 0; i < 3; ++i) {
-      bias_[i] += tracking_gain_ * (gyro[i] - bias_[i]);
-      up[i] = up_[i] + tracking_gain_ * (measured_up[i] - up_[i]);
-    }
-    up_ = unit(up);
+    for (int i = 0; i < 3; ++i) bias_[i] += tracking_gain_ * (gyro[i] - bias_[i]);
   }
 }
 
 std::optional<double> BoardImu::yaw_rate() const {
   if (!calibrated_ || !have_sample_) return std::nullopt;
-  double rate = 0.0;
-  for (int i = 0; i < 3; ++i) rate += up_[i] * (gyro_[i] - bias_[i]);
-  return rate;
+  return gyro_[2] - bias_[2];
 }
 
 bool ImuProcessor::configure(const ImuProcessorConfig &config) {
