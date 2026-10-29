@@ -4,7 +4,7 @@
 #include <string>
 
 namespace craft_perception {
-// Re-express the fused odometry (robot_localization ekf_global) in the map frame; relay if already there.
+// Re-express ekf_local odometry (odom frame) in the map frame via slam_toolbox's map->odom; relay if already in map.
 class StateEstimator {
 public:
   bool is_valid_input(const nav_msgs::msg::Odometry &input) const;

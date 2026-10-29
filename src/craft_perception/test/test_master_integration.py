@@ -57,7 +57,7 @@ def main():
     from geometry_msgs.msg import PoseArray
     node.create_subscription(Odometry, '/perception/state/odom', odometry_results.append, 10)
     node.create_subscription(PoseArray, '/perception/lidar/obstacle', obstacle_results.append, 10)
-    odometry_pub = node.create_publisher(Odometry, '/odometry/global', 1)
+    odometry_pub = node.create_publisher(Odometry, '/odometry/local', 1)
     from geometry_msgs.msg import TransformStamped
     from rclpy.qos import DurabilityPolicy, QoSProfile
     from tf2_msgs.msg import TFMessage
