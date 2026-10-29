@@ -1,10 +1,10 @@
-# robot_localization EKF (launched by craft_bringup).
-#   ekf_local: /control/wheel/odom + /control/imu/data -> odom->base_link TF, /odometry/local
-# slam_toolbox owns map->odom (slam.yaml) and uses odom->base_link as its scan-matching prior;
-# perception_master's StateEstimator composes both into /perception/state/odom in map.
+# robot_localization EKFs (launched by craft_bringup; craft.launch.py localization:=slam|ekf).
+#   ekf_local : /control/wheel/odom + /perception/imu/data -> odom->base_link TF, /odometry/local
+#   ekf_global: (localization:=ekf only) the same + slam_toolbox's scan-matched pose -> map->odom TF,
+#               /odometry/global. With localization:=slam, slam_toolbox owns map->odom itself.
 # Rough floor: wheels slip, so yaw rate comes from the IMU only; wheels give forward speed.
-# The IMU is mounted upside down: base_link->imu_link TF (roll = pi) in craft.launch.py
-# rotates it, so these configs stay in base_link terms.
+# /perception/imu/data is already the chassis yaw rate in base_link (imu_processor fuses both OpenCR
+# IMUs and finds their mounting from gravity), so no IMU TF is needed.
 #
 # *_config order: [x, y, z, roll, pitch, yaw, vx, vy, vz, vroll, vpitch, vyaw, ax, ay, az]
 
@@ -28,8 +28,52 @@ ekf_local:
                    false, false, false]
     odom0_queue_size: 10
 
-    imu0: /control/imu/data
+    imu0: /perception/imu/data
     imu0_config: [false, false, false, false, false, false,
                   false, false, false, false, false, true,
                   false, false, false]
     imu0_queue_size: 20
+
+# SLAM pose fused as one more sensor. Sim (2026-10-29, vs localization:=slam): same accuracy in
+# normal runs (0.7-1.0 cm mean), garbage scans 8-11 cm / 5-7 deg at most. Kept as an option for the
+# real robot, where SLAM yaw noise is unknown: tune trust with slam_toolbox yaw_covariance_scale
+# (craft.launch.py sets 10 here, so the IMU leads yaw) and pose0_rejection_threshold.
+ekf_global:
+  ros__parameters:
+    frequency: 50.0
+    sensor_timeout: 0.2
+    two_d_mode: true
+    publish_tf: true
+    transform_time_offset: 0.05  # same reason as ekf_local
+    smooth_lagged_data: true     # SLAM poses arrive late, stamped at their scan: correct at that time
+    history_length: 1.0          # [s]
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_link
+    world_frame: map
+
+    odom0: /control/wheel/odom
+    odom0_config: [false, false, false, false, false, false,
+                   true,  true,  false, false, false, false,
+                   false, false, false]
+    odom0_queue_size: 10
+
+    imu0: /perception/imu/data
+    imu0_config: [false, false, false, false, false, false,
+                  false, false, false, false, false, true,
+                  false, false, false]
+    imu0_queue_size: 20
+
+    pose0: /perception/lidar/pose  # slam_toolbox, scan-matched pose in map
+    pose0_config: [true,  true,  false, false, false, true,
+                   false, false, false, false, false, false,
+                   false, false, false]
+    pose0_queue_size: 10
+    pose0_rejection_threshold: 3.0  # [sigma] Mahalanobis; drops scan-match jumps
+
+    # perception's wide relocalization after 0.3 m of dead reckoning: always taken (no rejection).
+    pose1: /perception/localization/relocalized
+    pose1_config: [true,  true,  false, false, false, true,
+                   false, false, false, false, false, false,
+                   false, false, false]
+    pose1_queue_size: 2

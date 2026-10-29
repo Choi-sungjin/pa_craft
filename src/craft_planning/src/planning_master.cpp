@@ -110,6 +110,7 @@ struct PlanningMaster::Impl
     std::optional<PlanningStep> step;
     std::deque<PlanningStep> remaining;
     std::string last_mission, readiness_reason;
+    std::string localization_state = "ok";  // perception's localization monitor (localization:=ekf)
     std::deque<std::string> request_keys;
     std::future<Computation> worker;
     std::optional<Computation> result;
@@ -534,6 +535,8 @@ void PlanningMaster::connect()
             << ':' << msg.pose.orientation.w;
         p.accept(step, {}, key.str());
     });
+    p.subscribe<std_msgs::msg::String>("/perception/localization/state",
+      [&p](const std_msgs::msg::String &msg) {p.localization_state = msg.data;});
     p.subscribe<Odom>("/perception/state/odom", [&p](const Odom &msg) {
         Pose pose;
         pose.header = msg.header;
@@ -653,6 +656,11 @@ void PlanningMaster::planning_loop() {
     input.feedback_fresh = p.control_fresh(now);
     input.error = p.readiness_reason;
     if (!input.healthy) input.error = "control unavailable: " + p.control.value.reason;
+    if (input.healthy && p.localization_state == "lost") {
+      // Dead reckoning past its budget and the wide relocalization failed: no trustworthy pose.
+      input.healthy = false;
+      input.error = "localization lost (dead reckoning and relocalization failed)";
+    }
     if (phase == RunPhase::Execute) {
       input.feedback_fresh = input.feedback_fresh && p.sensors_fresh(now) &&
         (now - p.command_at <= p.config.fsm.feedback_timeout_s ||

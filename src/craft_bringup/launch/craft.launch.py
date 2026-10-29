@@ -1,4 +1,3 @@
-import math
 import os
 
 from ament_index_python.packages import get_package_share_directory
@@ -22,6 +21,10 @@ SLAM_TOPICS = ['pose', 'map', 'map_metadata', 'slam_toolbox/graph_visualization'
                'slam_toolbox/loop_closure_event', 'slam_toolbox/new_node_event']
 
 
+def localization_is(mode):
+    return PythonExpression(["'", LaunchConfiguration('localization'), f"' == '{mode}'"])
+
+
 def in_group(name):
     return IfCondition(PythonExpression(
         ["'", LaunchConfiguration('group'), f"' in ('all', '{name}')"]))
@@ -30,12 +33,16 @@ def in_group(name):
 def generate_launch_description():
     ekf_yaml = os.path.join(get_package_share_directory('craft_perception'), 'config', 'ekf.yaml')
     slam_yaml = os.path.join(get_package_share_directory('craft_perception'), 'config', 'slam.yaml')
+    slam_ekf_yaml = os.path.join(get_package_share_directory('craft_perception'), 'config', 'slam_ekf.yaml')
     camera_yaml = os.path.join(get_package_share_directory('craft_sensors'), 'config', 'camera.yaml')
     control_yaml = os.path.join(get_package_share_directory('craft_control'), 'config', 'control.yaml')
     planning_yaml = os.path.join(get_package_share_directory('craft_planning'), 'config', 'planning.yaml')
     perception_yaml = os.path.join(get_package_share_directory('craft_perception'), 'config', 'perception.yaml')
     perception_params = [perception_yaml, {
         'lidar.input_mode': LaunchConfiguration('lidar_input_mode'),
+        'odometry_source_topic': PythonExpression(
+            ["'/odometry/global' if '", LaunchConfiguration('localization'), "' == 'ekf' else '/odometry/local'"]),
+        'localization.enabled': localization_is('ekf'),
         'd435.yolo.model_dir': LaunchConfiguration('d435_model_dir'),
         'c310.yolo.model_dir': LaunchConfiguration('c310_model_dir')}]
 
@@ -49,7 +56,7 @@ def generate_launch_description():
              parameters=[control_yaml], condition=in_group('control')),
     ]
 
-    # Everything that is not a master: camera drivers, LiDAR, IMU TF, EKF, SLAM.
+    # Everything that is not a master: camera drivers, LiDAR, EKF, SLAM.
     nodes = [Node(package='craft_sensors', executable=exe, output='screen', parameters=[camera_yaml])
              for exe in ('realsense_processor', 'c310_processor')]
     nodes.append(IncludeLaunchDescription(
@@ -57,20 +64,20 @@ def generate_launch_description():
                      'lidar_processor.launch.py'),
         launch_arguments={'start_processor': 'false'}.items(),
         condition=IfCondition(LaunchConfiguration('start_lidar'))))
-    # OpenCR on-board IMU is mounted upside down: roll = pi. Offsets are launch args (measure them).
-    nodes.append(Node(package='tf2_ros', executable='static_transform_publisher', name='tf_imu',
-                      arguments=['--x', LaunchConfiguration('imu_x'), '--y', LaunchConfiguration('imu_y'),
-                                 '--z', LaunchConfiguration('imu_z'), '--roll', str(math.pi),
-                                 '--yaw', LaunchConfiguration('imu_yaw'),
-                                 '--frame-id', 'base_link', '--child-frame-id', 'imu_link']))
-    # ekf_local owns odom->base_link (wheel + IMU); slam_toolbox owns map->odom (see slam.yaml).
+    # ekf_local owns odom->base_link (wheel + IMU). map->odom: slam_toolbox (localization:=slam, slam.yaml)
+    # or ekf_global fusing slam_toolbox's pose (localization:=ekf, ekf.yaml + slam_ekf.yaml).
     nodes.append(Node(package='robot_localization', executable='ekf_node', name='ekf_local', output='screen',
                       parameters=[ekf_yaml], remappings=[('odometry/filtered', '/odometry/local')]))
+    nodes.append(Node(package='robot_localization', executable='ekf_node', name='ekf_global', output='screen',
+                      parameters=[ekf_yaml], remappings=[('odometry/filtered', '/odometry/global')],
+                      condition=IfCondition(localization_is('ekf'))))
     # 2D SLAM, started directly (online_async_launch.py takes no remaps and defaults to sim time).
     # LiDAR-derived outputs live under /perception/lidar/; input stays /lidar/merged (slam.yaml).
     slam = LifecycleNode(package='slam_toolbox', executable='async_slam_toolbox_node',
                          name='slam_toolbox', namespace='', output='screen',
-                         parameters=[slam_yaml, {'use_sim_time': False}],
+                         parameters=[slam_yaml, PythonExpression(  # ekf: overlay slam_ekf.yaml
+                             ["'", slam_ekf_yaml, "' if '", LaunchConfiguration('localization'),
+                              "' == 'ekf' else '", slam_yaml, "'"]), {'use_sim_time': False}],
                          remappings=[(t, f'/perception/lidar/{t}') for t in SLAM_TOPICS])
     nodes += [slam,
               EmitEvent(event=ChangeState(lifecycle_node_matcher=matches_action(slam),
@@ -83,7 +90,10 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('group', default_value='all', choices=GROUPS,
                               description='all, one master (perception/planning/control) '
-                                          'or infra (sensors, LiDAR, TF, EKF, SLAM)'),
+                                          'or infra (sensors, LiDAR, EKF, SLAM)'),
+        DeclareLaunchArgument('localization', default_value='ekf', choices=['slam', 'ekf'],
+                              description='map->odom from slam_toolbox (slam) or from ekf_global fusing the '
+                                          'SLAM pose (ekf); give the same value to the infra and perception groups'),
         DeclareLaunchArgument('start_lidar', default_value='true',
                               description='Start dual LiDAR drivers and static TF; '
                                           'set false when already running on the Pi'),
@@ -97,11 +107,6 @@ def generate_launch_description():
                               description='D435 YOLO NCNN model; relative to craft_perception share'),
         DeclareLaunchArgument('c310_model_dir', default_value='models/knob_sign',
                               description='C310 YOLO NCNN model (knob_lever); relative to craft_perception share'),
-        DeclareLaunchArgument('imu_x', default_value='0.0', description='IMU offset from base_link [m]'),
-        DeclareLaunchArgument('imu_y', default_value='0.0', description='IMU offset from base_link [m]'),
-        DeclareLaunchArgument('imu_z', default_value='0.0', description='IMU offset from base_link [m]'),
-        DeclareLaunchArgument('imu_yaw', default_value='0.0',
-                              description='IMU yaw misalignment after the upside-down flip [rad]'),
         *masters,
         GroupAction(nodes, scoped=False, condition=in_group('infra')),
     ])

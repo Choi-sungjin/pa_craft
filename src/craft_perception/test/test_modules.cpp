@@ -8,6 +8,9 @@
 #include "craft_perception/knob_lever.hpp"
 #include "craft_perception/shared_frame.hpp"
 #include "craft_perception/state_estimator.hpp"
+#include "craft_perception/imu_processor.hpp"
+#include "craft_perception/localization_monitor.hpp"
+#include "craft_perception/scan_relocalizer.hpp"
 #include "craft_perception/obstacle_detector.hpp"
 #include "craft_perception/lidar_obstacle_detector.hpp"
 #include "craft_perception/lidar_perception.hpp"
@@ -451,3 +454,330 @@ TEST(Lever, C310RejectsSegWithoutPrototypesOrLeverClass) {
   c310.lever_source = "hsv";
   EXPECT_TRUE(C310Perception().configure(c310));
 }
+
+// Board frame of a board tilted by `tilt` about its x axis, then turned `heading` about the vertical:
+// returns the board-frame vector of chassis-frame v.
+static Vector3 to_board(const Vector3 &v, double heading, double tilt) {
+  const double ch = std::cos(heading), sh = std::sin(heading), ct = std::cos(tilt), st = std::sin(tilt);
+  const Vector3 h{ch * v[0] + sh * v[1], -sh * v[0] + ch * v[1], v[2]};
+  return {h[0], ct * h[1] + st * h[2], -st * h[1] + ct * h[2]};
+}
+
+TEST(BoardImu, UprightTurnedAndFlippedBoardsAllReportChassisYawRate) {
+  const Vector3 gravity{0.0, 0.0, 1.0};  // a still accelerometer reads +1 g up
+  // wheel_clock upright; lm_arm turned ~180 deg and tilted 4 deg; an upside-down board for the old mounting.
+  const std::pair<double, double> mountings[] = {{0.0, 0.0}, {3.05, 0.07}, {0.3, M_PI}};
+  for (const auto & [heading, tilt] : mountings) {
+    BoardImu imu;
+    ASSERT_TRUE(imu.configure(10, 0.0, 0.05));
+    const Vector3 bias{0.004, -0.003, 0.002};
+    for (int i = 0; i < 10; ++i) {
+      EXPECT_FALSE(imu.yaw_rate());
+      imu.update(bias, to_board(gravity, heading, tilt), true);
+    }
+    ASSERT_TRUE(imu.calibrated());
+    const auto rate = to_board({0.0, 0.0, 0.5}, heading, tilt);  // chassis turns left at 0.5 rad/s
+    imu.update({rate[0] + bias[0], rate[1] + bias[1], rate[2] + bias[2]}, to_board(gravity, heading, tilt), false);
+    ASSERT_TRUE(imu.yaw_rate());
+    EXPECT_NEAR(*imu.yaw_rate(), 0.5, 1e-9);
+  }
+}
+
+TEST(BoardImu, CalibratesRawGyroWithLargeChipOffset) {
+  // The firmware sends the raw gyro: a 0.08 rad/s zero-rate offset is larger than still_rate.
+  BoardImu imu;
+  ASSERT_TRUE(imu.configure(4, 0.0, 0.05));
+  const Vector3 up{0.0, 0.0, 1.0};
+  for (double noise : {0.002, -0.001, 0.001, -0.002}) {
+    imu.update({0.01, -0.03, 0.08 + noise}, up, true);
+  }
+  ASSERT_TRUE(imu.calibrated());
+  EXPECT_NEAR(imu.bias()[2], 0.08, 1e-12);
+  imu.update({0.01, -0.03, 0.08 + 0.5}, up, false);
+  EXPECT_NEAR(*imu.yaw_rate(), 0.5, 1e-12);
+}
+
+TEST(BoardImu, CalibrationNeedsAnUnbrokenStillWindowAndRejectsMotion) {
+  BoardImu imu;
+  ASSERT_TRUE(imu.configure(3, 0.0, 0.05));
+  const Vector3 up{0.0, 0.0, 1.0};
+  imu.update({0, 0, 0}, up, true);
+  imu.update({0, 0, 0}, up, true);
+  imu.update({0, 0, 0}, up, false);   // wheels moved: window restarts
+  imu.update({0, 0, 0.2}, up, true);  // turning while the wheels report still (carried): not still
+  imu.update({0, 0, 0}, {0, 0, 1.3}, true);  // accelerating: not gravity alone
+  imu.update({0, 0, 0}, up, true);
+  imu.update({0, 0, 0}, up, true);
+  EXPECT_FALSE(imu.calibrated());
+  imu.update({0, 0, 0}, up, true);
+  EXPECT_TRUE(imu.calibrated());
+  imu.reset();
+  EXPECT_FALSE(imu.calibrated());
+  EXPECT_FALSE(imu.yaw_rate());
+}
+
+TEST(BoardImu, TracksBiasOnlyWhileStill) {
+  BoardImu imu;
+  ASSERT_TRUE(imu.configure(1, 0.1, 0.05));
+  const Vector3 up{0.0, 0.0, 1.0};
+  imu.update({0, 0, 0}, up, true);
+  for (int i = 0; i < 200; ++i) {
+    imu.update({0, 0, 0.01}, up, true);  // bias drifted to 0.01 rad/s
+  }
+  EXPECT_NEAR(imu.bias()[2], 0.01, 1e-6);
+  EXPECT_NEAR(*imu.yaw_rate(), 0.0, 1e-6);
+  for (int i = 0; i < 200; ++i) {
+    imu.update({0, 0, 0.3}, up, false);  // turning: bias must not follow
+  }
+  EXPECT_NEAR(imu.bias()[2], 0.01, 1e-6);
+  EXPECT_NEAR(*imu.yaw_rate(), 0.29, 1e-6);
+}
+
+TEST(BoardImu, RejectsInvalidConfigurationAndNonFiniteSamples) {
+  BoardImu imu;
+  EXPECT_FALSE(imu.configure(0, 0.0, 0.05));
+  EXPECT_FALSE(imu.configure(10, 1.0, 0.05));
+  EXPECT_FALSE(imu.configure(10, -0.1, 0.05));
+  EXPECT_FALSE(imu.configure(10, 0.0, 0.0));
+  ASSERT_TRUE(imu.configure(1, 0.0, 0.05));
+  imu.update({std::nan(""), 0, 0}, {0, 0, 1}, true);
+  EXPECT_FALSE(imu.calibrated());
+}
+
+// max_yaw_rate 2.5, max_yaw_accel 3.2, jump_noise 0.1: at 20 ms a sample may move 0.164 rad/s.
+static ImuProcessorConfig imu_config(int disagreement_samples) {
+  return {0, 1, 0.0, 0.05, 1e-4, 0.02, 0.08, 0.1, 2.5, 3.2, 0.1, disagreement_samples};
+}
+
+TEST(ImuProcessor, PrimaryUnlessUnavailableAndZeroVelocityUpdate) {
+  ImuProcessor imu;
+  auto bad = imu_config(1);
+  bad.primary = 2;
+  EXPECT_FALSE(imu.configure(bad));
+  bad = imu_config(0);
+  EXPECT_FALSE(imu.configure(bad));
+  ASSERT_TRUE(imu.configure(imu_config(1)));
+  const Vector3 up{0.0, 0.0, 1.0};
+  EXPECT_FALSE(imu.select(0.0, true));                        // nothing calibrated yet
+  EXPECT_TRUE(imu.update(0, 0.0, {0, 0, 0.01}, up, true));    // calibrates on its first still sample
+  EXPECT_TRUE(imu.update(1, 0.0, {0, 0, -0.02}, up, true));
+  imu.update(0, 0.02, {0, 0, 0.03}, up, true);
+  imu.update(1, 0.02, {0, 0, -0.02}, up, true);
+  EXPECT_EQ(imu.select(0.02, true)->value, 0.0);              // wheels still: 0.02 residual -> 0
+  const auto moving = imu.select(0.02, false);
+  EXPECT_NEAR(moving->value, 0.02, 1e-12);                    // the primary alone, never a mean
+  EXPECT_EQ(moving->board, 0u);
+  EXPECT_NEAR(moving->variance, 1e-4, 1e-12);
+  imu.update(1, 0.5, {0, 0, 0.08}, up, false);                // primary silent for 0.48 s
+  const auto backup = imu.select(0.5, false);
+  EXPECT_EQ(backup->board, 1u);
+  EXPECT_NEAR(backup->value, 0.1, 1e-12);
+  imu.update(0, 0.52, {0, 0, 0.11}, up, false);               // primary back
+  EXPECT_EQ(imu.select(0.52, false)->board, 0u);
+  EXPECT_FALSE(imu.select(5.0, false));                       // both stale
+}
+
+TEST(ImuProcessor, DisagreementIsReportedButNeverSwitchesBoards) {
+  // Backup stuck at a constant 0.033 rad/s while the primary reads 0: reported after 3 outputs.
+  ImuProcessor imu;
+  ASSERT_TRUE(imu.configure(imu_config(3)));
+  const Vector3 up{0.0, 0.0, 1.0};
+  imu.update(0, 0.0, {0, 0, 0}, up, true);
+  imu.update(1, 0.0, {0, 0, 0}, up, true);
+  for (int i = 1; i <= 5; ++i) {
+    const double t = i * 0.02;
+    imu.update(0, t, {0, 0, 0}, up, false);
+    imu.update(1, t, {0, 0, 0.033}, up, false);
+    const auto rate = imu.select(t, false);
+    EXPECT_EQ(rate->board, 0u);
+    EXPECT_EQ(rate->value, 0.0);
+    EXPECT_EQ(rate->disagree, i >= 3);
+  }
+}
+
+TEST(ImuProcessor, DropsImpossibleRatesAndOneSampleSpikes) {
+  ImuProcessor imu;
+  ASSERT_TRUE(imu.configure(imu_config(3)));
+  const Vector3 up{0.0, 0.0, 1.0};
+  imu.update(0, 0.0, {0, 0, 0}, up, true);
+  imu.update(0, 0.02, {0, 0, 0.05}, up, false);
+  EXPECT_NEAR(*imu.accepted(0), 0.05, 1e-12);
+  imu.update(0, 0.04, {0, 0, 3.0}, up, false);      // beyond max_yaw_rate
+  imu.update(0, 0.06, {0, 0, 0.05}, up, false);
+  imu.update(0, 0.08, {0, 0, 1.5}, up, false);      // one-sample spike: +1.45 in 20 ms
+  EXPECT_NEAR(*imu.accepted(0), 0.05, 1e-12);
+  imu.update(0, 0.10, {0, 0, 0.06}, up, false);     // back: continuous with the last accepted
+  EXPECT_NEAR(*imu.accepted(0), 0.06, 1e-12);
+  EXPECT_EQ(imu.dropped(0), 2u);
+}
+
+TEST(ImuProcessor, AcceptsARealFastChangeOneSampleLate) {
+  ImuProcessor imu;
+  ASSERT_TRUE(imu.configure(imu_config(3)));
+  const Vector3 up{0.0, 0.0, 1.0};
+  imu.update(0, 0.0, {0, 0, 0}, up, true);
+  imu.update(0, 0.02, {0, 0, 0.6}, up, false);      // faster than the Waffle Pi limit: held once
+  EXPECT_NEAR(*imu.accepted(0), 0.0, 1e-12);
+  imu.update(0, 0.04, {0, 0, 0.6}, up, false);      // repeated: real, accepted
+  EXPECT_NEAR(*imu.accepted(0), 0.6, 1e-12);
+}
+
+TEST(BoardImu, CalibrationSkipsSpikesButRestartsOnMotion) {
+  BoardImu imu;
+  ASSERT_TRUE(imu.configure(4, 0.0, 0.05));
+  const Vector3 up{0.0, 0.0, 1.0};
+  imu.update({0, 0, 0.08}, up, true);
+  imu.update({0, 0, 2.0}, up, true);   // one spike: skipped
+  imu.update({0, 0, 0.08}, up, true);
+  imu.update({0, 0, 0.08}, up, true);
+  imu.update({0, 0, 0.08}, up, true);
+  ASSERT_TRUE(imu.calibrated());
+  EXPECT_NEAR(imu.bias()[2], 0.08, 1e-12);  // the spike never entered the mean
+  BoardImu turning;
+  ASSERT_TRUE(turning.configure(4, 0.0, 0.05));
+  turning.update({0, 0, 0.08}, up, true);
+  for (int i = 0; i < 3; ++i) turning.update({0, 0, 0.5}, up, true);  // keeps turning: restart
+  for (int i = 0; i < 3; ++i) turning.update({0, 0, 0.5}, up, true);
+  EXPECT_FALSE(turning.calibrated());
+}
+
+TEST(ImuProcessor, BoardsAreComparedAtTheSameTime) {
+  // Ramping at 3.2 rad/s^2, lm_arm's newest sample is 20 ms older (0.336 vs wheel_clock's 0.40).
+  // Carried along its slope it is 0.40 too: no disagreement, although 0.064 > 0.02 + 8 % of 0.37.
+  ImuProcessor imu;
+  ASSERT_TRUE(imu.configure(imu_config(1)));
+  const Vector3 up{0.0, 0.0, 1.0};
+  imu.update(0, 0.0, {0, 0, 0}, up, true);
+  imu.update(1, 0.0, {0, 0, 0}, up, true);
+  imu.update(1, 0.96, {0, 0, 0.272}, up, false);
+  imu.update(0, 0.98, {0, 0, 0.336}, up, false);
+  imu.update(1, 0.98, {0, 0, 0.336}, up, false);
+  imu.update(0, 1.0, {0, 0, 0.40}, up, false);
+  const auto aligned = imu.select(1.0, false);
+  EXPECT_FALSE(aligned->disagree);
+  EXPECT_NEAR(aligned->value, 0.40, 1e-9);
+}
+
+static LocalizationMonitorConfig monitor_config() {
+  return {3.0, 0.3, 3.0, 20.0, 0.005, 0.3, 0.05, 0.5, 2.0, 0.05, 0.2, 2.0, 2};
+}
+
+TEST(LocalizationMonitor, RejectionDeadReckoningRelocalizationAndLost) {
+  LocalizationMonitor m;
+  ASSERT_TRUE(m.configure(monitor_config()));
+  const Covariance3 cov{0.0001, 0, 0, 0, 0.0001, 0, 0, 0, 0.0001};  // 1 cm, 1 cm, 0.57 deg each
+  EXPECT_TRUE(m.slam(0.0, {1.0, 1.0, 0.0}, cov, {1.02, 1.0, 0.0}, cov));   // 2 cm: 1.4 sigma
+  EXPECT_FALSE(m.slam(0.2, {1.0, 1.0, 0.0}, cov, {1.10, 1.0, 0.0}, cov));  // 10 cm: 7 sigma
+  EXPECT_EQ(m.state(), LocalizationState::kDeadReckoning);
+  m.moved(0.2);
+  EXPECT_EQ(m.state(), LocalizationState::kDeadReckoning);
+  m.moved(0.15);  // 0.35 m > 0.3 m
+  EXPECT_EQ(m.state(), LocalizationState::kRelocalize);
+  m.relocalized(true);
+  EXPECT_EQ(m.state(), LocalizationState::kDeadReckoning);
+  EXPECT_EQ(m.dead_reckoning(), 0.0);
+  m.moved(0.31);
+  m.relocalized(false);
+  EXPECT_EQ(m.state(), LocalizationState::kLost);
+  EXPECT_TRUE(m.slam(9.0, {1.0, 1.0, 0.0}, cov, {1.0, 1.0, 0.0}, cov));    // SLAM and EKF agree again
+  EXPECT_EQ(m.state(), LocalizationState::kOk);
+  // Both wrong together: they agree, but the scan no longer fits the map twice in a row.
+  m.scan_fits(false);
+  EXPECT_EQ(m.state(), LocalizationState::kOk);
+  m.scan_fits(false);
+  EXPECT_EQ(m.state(), LocalizationState::kDeadReckoning);
+  EXPECT_FALSE(m.slam(10.0, {1.0, 1.0, 0.0}, cov, {1.0, 1.0, 0.0}, cov));  // agreeing is not enough now
+  m.scan_fits(true);
+  EXPECT_TRUE(m.slam(11.0, {1.0, 1.0, 0.0}, cov, {1.0, 1.0, 0.0}, cov));
+}
+
+TEST(LocalizationMonitor, LearnsImuBiasAndScaleFromSlamYawOnlyWhenStable) {
+  LocalizationMonitor m;
+  ASSERT_TRUE(m.configure(monitor_config()));
+  const Covariance3 cov{0.0001, 0, 0, 0, 0.0001, 0, 0, 0, 0.0001};
+  m.slam(0.0, {0, 0, 0}, cov, {0, 0, 0}, cov);
+  // Straight for 20 s while SLAM adds 0.002 rad/s on top of the IMU: learning starts after 3 s.
+  double t = 0.0, mo = 0.0;
+  for (; t < 20.0; t += 0.02) {
+    mo += 0.002 * 0.02;
+    m.yaw(t, mo, 0.0, 0.0, 0);
+  }
+  EXPECT_GT(m.bias(0), 0.0005);
+  EXPECT_LT(m.bias(0), 0.002);
+  EXPECT_EQ(m.bias(1), 0.0);  // only the board in use
+  // A 90 deg turn the IMU under-reports by 3 %: SLAM adds 0.047 rad; scale moves 30 % of the way.
+  double odom = 0.0;
+  for (int i = 0; i < 157; ++i, t += 0.02) {
+    odom += 0.5 * 0.02;
+    mo += 0.03 * 0.5 * 0.02;
+    m.yaw(t, mo, odom, 0.5, 0);
+  }
+  for (int i = 0; i < 150; ++i, t += 0.02) m.yaw(t, mo, odom, 0.0, 0);
+  EXPECT_NEAR(m.scale(0), 1.009, 0.001);
+  // Rejected SLAM: no learning.
+  const double before = m.scale(0);
+  m.slam(t, {1, 0, 0}, cov, {0, 0, 0}, cov);
+  for (int i = 0; i < 157; ++i, t += 0.02) {
+    odom += 0.01;
+    mo += 0.001;
+    m.yaw(t, mo, odom, 0.5, 0);
+  }
+  for (int i = 0; i < 150; ++i, t += 0.02) m.yaw(t, mo, odom, 0.0, 0);
+  EXPECT_EQ(m.scale(0), before);
+}
+
+// 4 x 3 m room, 5 cm cells, with a box so the scan has a unique fit.
+static std::vector<int8_t> room(int &w, int &h) {
+  w = 80;
+  h = 60;
+  std::vector<int8_t> grid(w * h, 0);
+  for (int u = 0; u < w; ++u) grid[u] = grid[(h - 1) * w + u] = 100;
+  for (int v = 0; v < h; ++v) grid[v * w] = grid[v * w + w - 1] = 100;
+  for (int u = 34; u < 50; ++u) {
+    for (int v = 24; v < 36; ++v) grid[v * w + u] = 100;
+  }
+  return grid;
+}
+
+static std::vector<std::pair<double, double>> cast(const std::vector<int8_t> &grid, int w, int h, const Pose2 &pose) {
+  std::vector<std::pair<double, double>> points;
+  for (int k = 0; k < 360; ++k) {
+    const double a = k * M_PI / 180.0;
+    for (double r = 0.1; r < 8.0; r += 0.01) {
+      const double x = pose.x + r * std::cos(pose.yaw + a), y = pose.y + r * std::sin(pose.yaw + a);
+      const int u = static_cast<int>(x / 0.05), v = static_cast<int>(y / 0.05);
+      if (u < 0 || v < 0 || u >= w || v >= h) break;
+      if (grid[v * w + u] >= 65) {
+        points.emplace_back(r * std::cos(a), r * std::sin(a));
+        break;
+      }
+    }
+  }
+  return points;
+}
+
+TEST(ScanRelocalizer, FindsThePoseInAWideWindowOrFails) {
+  ScanRelocalizer r;
+  const ScanRelocalizerConfig config{0.3, 15.0 * M_PI / 180.0, 0.02, M_PI / 180.0, 0.05, 0.5, 180, 65};
+  ASSERT_TRUE(r.configure(config));
+  int w = 0, h = 0;
+  const auto grid = room(w, h);
+  ASSERT_TRUE(r.set_map(w, h, 0.05, 0.0, 0.0, grid));
+  const Pose2 truth{1.2, 1.0, 0.1};
+  const auto points = cast(grid, w, h, truth);
+  const auto found = r.match(points, {truth.x + 0.2, truth.y - 0.15, truth.yaw - 0.14});  // 25 cm, 8 deg off
+  ASSERT_TRUE(found);
+  EXPECT_NEAR(found->pose.x, truth.x, 0.03);
+  EXPECT_NEAR(found->pose.y, truth.y, 0.03);
+  EXPECT_NEAR(found->pose.yaw, truth.yaw, 0.02);
+  EXPECT_GT(found->score, 0.8);
+  EXPECT_GT(*r.score(points, truth), 0.8);
+  // 60 cm off along x: walls parallel to x still fit, so the score drops but not to zero.
+  EXPECT_LT(*r.score(points, {truth.x + 0.6, truth.y, truth.yaw}), *r.score(points, truth) - 0.2);
+  // A scan that fits nowhere (the robot is really elsewhere, out of the window): failure.
+  std::vector<std::pair<double, double>> wrong;
+  for (int k = 0; k < 360; ++k) wrong.emplace_back(0.4 * std::cos(k * M_PI / 180.0), 0.4 * std::sin(k * M_PI / 180.0));
+  EXPECT_FALSE(r.match(wrong, truth));
+  EXPECT_FALSE(r.set_map(w, h, 0.05, 0.0, 0.0, std::vector<int8_t>(w * h, 0)));  // no wall
+}
+

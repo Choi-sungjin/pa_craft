@@ -21,3 +21,16 @@ slam_toolbox:
     # (~25 cm), so matching chains scan-to-scan and drifts (sim: 15-20 cm / 8 deg after 2 laps);
     # 100 (~20 s) keeps it anchored (sim: ~1 cm mean, 3 cm max, same CPU).
     scan_buffer_size: 100
+    # The IMU yaw rate is near ground truth, so scan matching only searches +-5 deg around the predicted
+    # heading (default +-20), on a 0.5 deg grid that contains the prediction itself (2 deg on +-5 would
+    # skip it). Sim with garbage scans: yaw spikes 23-27 deg -> 5-7 deg, normal runs unchanged.
+    # The angle penalty stays default: it anchors to SLAM's previous heading, not the IMU's, so a strong
+    # one locks in any small match error (sim: 24 deg drift after 2 laps with a perfect IMU).
+    coarse_search_angle_offset: 0.0873  # [rad] 5 deg
+    coarse_angle_resolution: 0.00873    # [rad] 0.5 deg
+    # Same for position: the prediction is SLAM's last pose + odometry over 0.2 s (<= 2.4 cm of travel,
+    # < 1 cm of slip error), so search +-5 cm instead of +-25 cm. With no match, keep the prediction
+    # instead of widening the angle search by 20 deg steps. Sim with garbage scans (5 seeds): max error
+    # 12-24 cm / 5-19 deg -> 8-11 cm / 5-6 deg; normal runs unchanged.
+    correlation_search_space_dimension: 0.1  # [m] full width
+    use_response_expansion: false

@@ -48,6 +48,7 @@ PerceptionMaster  (rclcpp::Node, perception_master.cpp)
 craft_perception/
 ├── config/perception.yaml          # 모든 값 필수, C++ 기본값 없음
 ├── config/tag_registry.yaml        # tag ID → mission 또는 puck 번호 공용 해시 테이블
+├── config/ekf.yaml, slam.yaml, slam_ekf.yaml  # 위치추정 (craft_bringup이 실행)
 ├── include/craft_perception/
 │   ├── perception_master.hpp
 │   ├── d435_perception.hpp         # D435Config, D435Perception
@@ -61,6 +62,7 @@ craft_perception/
 │   ├── puck_axis.hpp               # puck_axis_live.py 이식
 │   ├── lidar_obstacle_detector.hpp # 구 ObstacleDetector (LaserScan)
 │   ├── state_estimator.hpp         # 대기 (odometry 전달만)
+│   ├── imu_processor.hpp           # OpenCR IMU 2개 → 차체 yaw rate
 │   ├── shared_frame.hpp
 │   └── perception_types.hpp
 ├── models/knob_sign/
@@ -187,7 +189,49 @@ YOLO_CONFIG_DIR=/tmp/craft-yolo-config custom_yolo26/.venv/bin/python \
 | `/perception/vision/d435/puck_observations` | `craft_perception/PuckObservationArray` | 태그로 확정한 `puck_id`, 중심·축·선반 법선·standing, optical frame |
 | `/perception/lidar/obstacle` | `geometry_msgs/PoseArray` | LaserScan 원래 frame의 유효 점 |
 | `/perception/state/odom` | `nav_msgs/Odometry` | 지정한 입력 odometry 전달 |
+| `/perception/imu/data` | `sensor_msgs/Imu` | 주(예비) OpenCR IMU의 차체 yaw rate, `base_link` (robot_localization 입력) |
+| `/perception/localization/state` | `std_msgs/String` | `ok` / `dead_reckoning` / `relocalize` / `lost` (localization:=ekf). planning은 `lost`면 Fault |
+| `/perception/localization/relocalized` | `geometry_msgs/PoseWithCovarianceStamped` | 넓은 탐색 재위치 결과 (ekf_global `pose1`) |
 | `/perception/diagnostics` | `diagnostic_msgs/DiagnosticArray` | 실제 처리 Hz, 실행 시간, skip/error/overrun, 카메라별 복사 횟수·바이트 |
+
+### IMU 처리 (`imu_processor`, `imu.*`)
+
+control_master는 두 OpenCR(wheel_clock, lm_arm, 모두 차체 고정)의 IMU를 원본 그대로
+`/control/imu/wheel_clock`, `/control/imu/lm_arm`으로 보냅니다(보드 좌표계, 칩 영점 오프셋 포함).
+`imu_processor`는 샘플마다 바로 처리합니다(타이머 작업이 아님).
+
+- **보드별 보정**: 바퀴가 멈춘 동안(`/control/wheel/odom`) 가속도계로 중력 방향(보드의 위쪽 축)을,
+  자이로 평균으로 칩 오프셋을 잽니다. 처음 `calibration_samples`개를 끊김 없이 모으고, 그 뒤에도 멈출
+  때마다 `bias_tracking_gain`으로 따라갑니다(켠 뒤 온도 변화). 차체 yaw rate = 위쪽 축 · (자이로 − 오프셋).
+  보드를 기울이거나 수평 방향을 바꿔도 설정이 필요 없습니다. 로그에 보드별 기울기와 오프셋이 한 번 찍힙니다.
+- **주/예비**: `primary` 보드(기본 wheel_clock)를 쓸 수 있으면 항상 그 값만 씁니다. 예비 보드는 주 보드가
+  안 들어오거나(끊김, `imu_ok=0`) 아직 보정되지 않았을 때만 씁니다. 두 값을 섞지 않습니다. 센서가 두 개면
+  다르다는 건 알아도 어느 쪽이 틀렸는지는 알 수 없어서입니다.
+- **불일치 감시 (경고만)**: 두 보드는 최대 20 ms 어긋나게 샘플링하므로 각자의 직전 기울기로 같은 시각 값을
+  맞춘 뒤 비교합니다. `max_disagreement + max_disagreement_ratio × |yaw rate|`보다 다른 출력이
+  `disagreement_samples`번 이어지면 경고합니다. 쓰는 보드는 바꾸지 않습니다.
+- **튀는 값 거르기 (보드별)**: |yaw rate|가 `max_yaw_rate`를 넘거나, 직전에 받아들인 값에서
+  `max_yaw_accel × 시간간격 + jump_noise`보다 크게 바뀐 샘플은 버립니다. 다음 샘플이 같은 값이면 실제 변화로
+  보고 받아들입니다(빠른 실제 변화는 한 샘플 늦게, 한 샘플짜리 튐은 끝까지 안 들어옴). 기준은 TurtleBot3
+  Waffle Pi 값(최대 회전 1.82 rad/s, 회전 가속 3.2 rad/s²)입니다. 보정 중의 튐은 건너뛰고, 3개 이상 이어지면
+  실제 움직임으로 보고 다시 시작합니다.
+- **정지 중 0**: 바퀴가 멈춰 있고 yaw rate가 `still_rate`보다 작으면 0으로 냅니다(바이어스가 쌓이지 않음).
+- 출력은 주 보드 샘플마다, 주 보드가 끊기면 예비 보드 샘플마다 냅니다. 보드가 모두 보정되기 전에는
+  내지 않으니 켠 뒤 로봇을 2초 이상 멈춰 두세요.
+
+### 위치추정 감시 (`localization.*`, localization:=ekf에서만)
+
+- **SLAM 수락 판정**: SLAM 위치를 같은 시각의 ekf_global 위치와 Mahalanobis로 비교합니다(`rejection_sigma`,
+  ekf.yaml `pose0_rejection_threshold`와 같은 값). 거부되면 IMU+바퀴만으로 가는 추측 항법(`dead_reckoning`)입니다.
+- **스캔-지도 일치**: SLAM과 EKF가 함께 틀릴 수 있어서(밀렸을 때 slam_toolbox도 odom 예측 근처만 찾음), 1초마다
+  최신 스캔을 EKF 위치에서 SLAM 지도에 대 점수를 냅니다. `misfit_checks`번 연속 `relocalize.min_score` 미만이면
+  SLAM이 맞다고 해도 추측 항법으로 봅니다. 점수는 10초마다 로그에 찍히니 실물에서 이 값으로 기준을 조정하세요.
+- **넓은 탐색 재위치**: 추측 항법이 `dead_reckoning_m`(0.3 m)를 넘으면 SLAM 지도에서 EKF 위치 ±`window_m`,
+  ±`window_deg` 안을 다 찾습니다(sim 약 40 ms). 찾으면 `/perception/localization/relocalized`로 ekf_global에 넣고
+  추측 항법을 다시 셉니다. 못 찾으면 `lost` → planning Fault. 외부 기준점 없이 SLAM 지도 자체가 기준입니다.
+- **IMU 되먹임**: SLAM이 `imu_learning.stable_s` 이상 계속 받아들여지면 map→odom yaw(SLAM이 IMU 위에 더한 회전)를
+  IMU의 남은 오차로 보고, 직진 구간의 변화율로 바이어스를, 회전 한 번의 비율로 배율을 쓰고 있는 보드에 천천히
+  보정합니다(상한 `bias_limit`, `scale_limit`). sim에서 넣은 바이어스 +0.003 rad/s·배율 1.03을 −0.0029·0.971로 배웠습니다.
 
 ### LiDAR 연결
 

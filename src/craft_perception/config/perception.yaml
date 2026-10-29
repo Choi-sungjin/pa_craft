@@ -4,9 +4,86 @@ perception_master:
     # C++ keeps no duplicate defaults. Startup fails on a missing or mistyped key.
     executor_threads: 6
     max_input_age_s: 0.5
-    odometry_source_topic: /odometry/local  # ekf_local (wheel + IMU) in odom; moved to map via SLAM's map->odom
+    # ekf_local (wheel + IMU) in odom, moved to map via SLAM's map->odom. craft.launch.py overrides it:
+    # /odometry/local (localization:=slam) or ekf_global's /odometry/global in map (localization:=ekf).
+    odometry_source_topic: /odometry/local
     map_frame: map  # source already in map is relayed; other frames are moved here via TF
     tag_registry_file: config/tag_registry.yaml
+
+    # imu_processor: both chassis-fixed OpenCR IMUs (raw, /control/imu/{wheel_clock,lm_arm}) ->
+    # /perception/imu/data, the chassis yaw rate in base_link for robot_localization (ekf.yaml).
+    # Each board's up axis and gyro offset come from gravity while the wheels stand still, so a
+    # mounting change needs no setting. Boards: 2018 OpenCR, MPU-9250.
+    imu:
+      enabled: true
+      output_frame: base_link
+      # Used whenever it is available; the other board is the backup while it is not (absent,
+      # imu_ok=0, not calibrated yet). The two are never mixed: a disagreement is only reported.
+      primary: wheel_clock         # wheel_clock | lm_arm
+      gyro_variance: 0.0001        # [(rad/s)^2] one board, ~0.01 rad/s std
+      calibration_samples: 100     # still samples before a board reports (~2 s at 50 Hz); spikes skipped
+      bias_tracking_gain: 0.002    # per still sample afterwards (~10 s time constant); 0 freezes
+      still_rate: 0.05             # [rad/s] above it a sample is never still; below it, wheels still -> 0
+      max_age_s: 0.1               # no accepted sample this recent: board unavailable (~5 samples at 50 Hz)
+      # Disagreement monitor (warning only): boards compared at the same time (each carried along its
+      # own last slope: they sample up to 20 ms apart) further apart than max_disagreement + ratio *
+      # |rate| for disagreement_samples outputs in a row. The ratio covers the chips' scale factor
+      # (+-3 % each, MPU-9250 datasheet: up to 6 % apart).
+      max_disagreement: 0.02       # [rad/s]
+      max_disagreement_ratio: 0.08
+      disagreement_samples: 3
+      # Per-board spike filter, TurtleBot3 Waffle Pi limits (our driving profile is not set yet; raise
+      # these if control turns faster): max rotational velocity 1.82 rad/s (ROBOTIS e-manual) and
+      # acc_lim_theta 3.2 rad/s^2 (turtlebot3_navigation2 waffle_pi.yaml). A sample beyond max_yaw_rate,
+      # or one changing faster than max_yaw_accel * dt + jump_noise unless the next sample repeats it,
+      # is dropped. jump_noise: real 10/27 slip logs changed at most 0.084 rad/s between samples.
+      max_yaw_rate: 2.5            # [rad/s] 1.82 + margin
+      max_yaw_accel: 3.2           # [rad/s^2]
+      jump_noise: 0.1              # [rad/s]
+      # Wheels count as still below these /control/wheel/odom speeds: control's wheel_stop_tolerance
+      # 0.02 rad/s per wheel is 0.00066 m/s and 0.0046 rad/s for 0.033 m wheels 0.288 m apart.
+      wheel_still_linear: 0.001    # [m/s]
+      wheel_still_angular: 0.005   # [rad/s]
+
+    # Localization monitor, localization:=ekf only (craft.launch.py sets enabled). Publishes
+    # /perception/localization/state: ok | dead_reckoning | relocalize | lost; planning faults on lost.
+    localization:
+      enabled: false
+      rejection_sigma: 3.0         # SLAM pose vs ekf_global, Mahalanobis; same as ekf.yaml pose0
+      dead_reckoning_m: 0.3        # travel on IMU + wheels alone (SLAM rejected) before relocalizing
+      # SLAM and the EKF can be wrong together (slam_toolbox searches only near the odometry): every
+      # second the scan is scored against SLAM's map at the EKF pose; this many low scores (below
+      # relocalize.min_score) in a row count as SLAM rejected too.
+      misfit_checks: 2
+      # Wide scan-to-map match around ekf_global's pose on SLAM's own map (no external landmark).
+      # Success -> /perception/localization/relocalized into ekf_global (pose1); failure -> lost.
+      relocalize:
+        window_m: 0.3              # +-[m] in x and y
+        window_deg: 15.0           # +-[deg]
+        step_m: 0.02               # coarse grid, refined to a quarter
+        step_deg: 1.0
+        sigma_m: 0.05              # scan point score exp(-d^2 / 2 sigma^2), d = distance to the nearest wall
+        # Mean point score to accept a relocalization and below which a scan "misfits" the map. Sim
+        # (2026-10-29): normal driving 0.55-0.95 (median 0.85), pushed 20 cm 0.32-0.43, 60 cm 0.14-0.17.
+        # Thin margin: on the robot, read "scan-to-map score at the EKF pose" in the log and retune.
+        min_score: 0.5
+        max_points: 180            # scan points used
+        occupied_threshold: 65     # slam_toolbox map: 100 occupied, 0 free, -1 unknown
+        pose_variance: [0.0004, 0.0004, 0.0003]  # x, y [m^2], yaw [rad^2]: 2 cm, 2 cm, 1 deg
+      # While SLAM has been accepted for stable_s, map->odom yaw (what SLAM adds on top of the IMU) is
+      # the IMU's remaining error: its rate on straight segments corrects the bias, its share of a turn
+      # the scale, for the IMU board in use. Slow and capped so a SLAM error cannot steer the IMU far.
+      imu_learning:
+        stable_s: 3.0
+        bias_time_constant_s: 20.0
+        bias_limit: 0.005          # [rad/s] (~5 LSB; the startup calibration leaves far less)
+        scale_gain: 0.3            # share of one turn's scale error taken
+        scale_limit: 0.05          # MPU-9250 scale factor +-3 % (datasheet) + margin
+        min_turn: 0.5              # [rad] shorter turns do not update the scale
+        settle_s: 2.0              # after a turn, for SLAM to settle
+        straight_rate: 0.05        # [rad/s] below: straight (bias segments)
+        turn_rate: 0.2             # [rad/s] above: turning (scale segments)
+        min_bias_segment_s: 2.0
 
     d435:
       frame: camera_color_optical_frame

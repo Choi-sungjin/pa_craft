@@ -1,0 +1,8 @@
+# Overlay on slam.yaml for craft.launch.py localization:=ekf: ekf_global (ekf.yaml) fuses the
+# scan-matched pose and owns map->odom, so slam_toolbox only publishes /perception/lidar/pose.
+slam_toolbox:
+  ros__parameters:
+    transform_publish_period: 0.0  # do not publish map->odom
+    # Scales the pose covariance ekf_global sees: SLAM yaw counts 10x less certain than scan matching
+    # claims, so the IMU leads yaw and SLAM corrects its drift (sim 2026-10-29, fE3).
+    yaw_covariance_scale: 10.0

@@ -41,7 +41,8 @@ class Fake:
                            ('/perception/lidar/obstacle', PoseArray), ('/planning/command', String),
                            ('/planning/mission', String), ('/planning/target_base_pose', PoseStamped),
                            ('/planning/target_tcp_pose', PoseStamped), ('/perception/vision/object_pose', PoseStamped),
-                           ('/perception/vision/d435/apriltag', Int32MultiArray)]:
+                           ('/perception/vision/d435/apriltag', Int32MultiArray),
+                           ('/perception/localization/state', String)]:
             self.pubs[topic] = node.create_publisher(cls, topic, 10)
         node.create_subscription(String, '/planning/state', self.on_state, 10)
         node.create_subscription(Bool, '/planning/hold', lambda m: setattr(self, 'hold', m.data), 10)
@@ -159,7 +160,9 @@ def fake(tmp_path, monkeypatch, request):
             helper = Path(__file__).resolve().parents[2] / 'craft_control/test/test_planning_watchdog_integration.py'
             spec = importlib.util.spec_from_file_location('pty_helpers', helper)
             module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
-            boards = [module.FakeBoard([0.,0.,0.,0.,0.,.2,0,0]), module.FakeBoard([0.,0.,0.,0,0,1,0])]
+            # Firmware CSV: positions/states, then imu_ok, gx, gy, gz [rad/s], ax, ay, az [g] (still, upright).
+            imu = [1, 0., 0., 0., 0., 0., 1.]
+            boards = [module.FakeBoard([0.,0.,0.,0.,0.,.2,0,0] + imu), module.FakeBoard([0.,0.,0.,0,0] + imu)]
             control_binary = Path(get_package_prefix('craft_control'))/'lib/craft_control/control_master'
             control_config = Path(get_package_share_directory('craft_control'))/'config/control.yaml'
             args = [str(control_binary),'--ros-args','--params-file',str(control_config)]
@@ -236,6 +239,13 @@ def test_replan_route_failure_retries_and_invalid_request_is_rejected(fake):
 def test_control_feedback_timeout(fake):
     f=fake; f.goal(); f.wait(lambda:f.state=='Run.Execute')
     f.feedback=False; f.wait(lambda:f.state=='Fault',2)
+
+def test_localization_lost_faults_but_dead_reckoning_does_not(fake):
+    f=fake; f.goal(); f.wait(lambda:f.state=='Run.Execute')
+    f.pubs['/perception/localization/state'].publish(String(data='dead_reckoning')); f.run_for(.15)
+    assert f.state=='Run.Execute'
+    f.pubs['/perception/localization/state'].publish(String(data='lost'))
+    f.wait(lambda:f.state=='Fault',2)
 
 def test_mission_native_ik_and_all_task_types(fake):
     f=fake; f.auto_complete=True
