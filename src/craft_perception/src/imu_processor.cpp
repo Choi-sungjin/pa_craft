@@ -104,7 +104,8 @@ bool ImuProcessor::configure(const ImuProcessorConfig &config) {
       !std::isfinite(config.max_age_s) || config.max_age_s <= 0.0 ||
       !std::isfinite(config.max_yaw_rate) || config.max_yaw_rate <= 0.0 ||
       !std::isfinite(config.max_yaw_accel) || config.max_yaw_accel <= 0.0 ||
-      !std::isfinite(config.jump_noise) || config.jump_noise < 0.0 || config.disagreement_samples < 1) {
+      !std::isfinite(config.jump_noise) || config.jump_noise < 0.0 || config.disagreement_samples < 1 ||
+      config.frozen_samples < 2) {
     return false;
   }
   for (auto &board : boards_) {
@@ -114,6 +115,9 @@ bool ImuProcessor::configure(const ImuProcessorConfig &config) {
   accepted_ = accepted_at_ = raw_ = raw_at_ = {};
   dropped_ = {};
   slope_ = {};
+  last_raw_ = {};
+  repeats_ = changes_ = {};
+  frozen_ = {};
   disagreements_ = 0;
   return true;
 }
@@ -121,6 +125,13 @@ bool ImuProcessor::configure(const ImuProcessorConfig &config) {
 bool ImuProcessor::update(std::size_t board, double t, const Vector3 &gyro, const Vector3 &accel,
                           bool wheels_still) {
   const bool was_calibrated = boards_.at(board).calibrated();
+  const bool repeated = last_raw_[board] && *last_raw_[board] == gyro;
+  last_raw_[board] = gyro;
+  repeats_[board] = repeated ? repeats_[board] + 1 : 0;
+  changes_[board] = repeated ? 0 : changes_[board] + 1;
+  if (repeats_[board] + 1 >= config_.frozen_samples) frozen_[board] = true;
+  if (frozen_[board] && changes_[board] >= config_.frozen_samples) frozen_[board] = false;
+  if (frozen_[board]) return false;  // no calibration, tracking or acceptance from a stuck sensor
   boards_[board].update(gyro, accel, wheels_still);
   const auto rate = boards_[board].yaw_rate();
   if (!rate) return false;
@@ -151,7 +162,7 @@ void ImuProcessor::set_correction(std::size_t board, double bias, double scale) 
 }
 
 bool ImuProcessor::available(std::size_t board, double t) const {
-  return accepted_at_.at(board) && t - *accepted_at_[board] <= config_.max_age_s;
+  return !frozen_.at(board) && accepted_at_.at(board) && t - *accepted_at_[board] <= config_.max_age_s;
 }
 
 std::optional<YawRate> ImuProcessor::select(double t, bool wheels_still) {

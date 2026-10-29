@@ -546,7 +546,7 @@ TEST(BoardImu, RejectsInvalidConfigurationAndNonFiniteSamples) {
 
 // max_yaw_rate 2.5, max_yaw_accel 3.2, jump_noise 0.1: at 20 ms a sample may move 0.164 rad/s.
 static ImuProcessorConfig imu_config(int disagreement_samples) {
-  return {0, 1, 0.0, 0.05, 1e-4, 0.02, 0.08, 0.1, 2.5, 3.2, 0.1, disagreement_samples};
+  return {0, 1, 0.0, 0.05, 1e-4, 0.02, 0.08, 0.1, 2.5, 3.2, 0.1, disagreement_samples, 10};
 }
 
 TEST(ImuProcessor, PrimaryUnlessUnavailableAndZeroVelocityUpdate) {
@@ -781,3 +781,33 @@ TEST(ScanRelocalizer, FindsThePoseInAWideWindowOrFails) {
   EXPECT_FALSE(r.set_map(w, h, 0.05, 0.0, 0.0, std::vector<int8_t>(w * h, 0)));  // no wall
 }
 
+TEST(ImuProcessor, FrozenPrimaryHandsOverToTheBackupAndComesBack) {
+  ImuProcessor imu;
+  ASSERT_TRUE(imu.configure(imu_config(3)));
+  const Vector3 up{0.0, 0.0, 1.0};
+  imu.update(0, 0.0, {0, 0, 0.01}, up, true);
+  imu.update(1, 0.0, {0, 0, -0.02}, up, true);
+  double t = 0.0;
+  auto step = [&](double primary_z, double backup_z) {
+    t += 0.02;
+    imu.update(0, t, {0.001, 0.002, primary_z}, up, false);
+    imu.update(1, t, {0.001, 0.002, backup_z}, up, false);
+    return imu.select(t, false);
+  };
+  // Live and noisy: never frozen, the primary is used.
+  for (int i = 0; i < 20; ++i) EXPECT_EQ(step(0.31 + 0.001 * (i % 3), 0.28 + 0.001 * (i % 2))->board, 0u);
+  // The primary repeats its raw sample exactly: frozen after 10, the backup takes over.
+  std::optional<YawRate> rate;
+  for (int i = 0; i < 9; ++i) rate = step(0.5, 0.28 + 0.001 * (i % 2));
+  EXPECT_EQ(rate->board, 0u);
+  rate = step(0.5, 0.28);
+  EXPECT_TRUE(imu.frozen(0));
+  EXPECT_EQ(rate->board, 1u);
+  EXPECT_NEAR(rate->value, 0.30, 1e-9);
+  // Changing again: back after 10 changing samples.
+  for (int i = 0; i < 9; ++i) rate = step(0.31 + 0.001 * (i % 3), 0.28 + 0.001 * (i % 2));
+  EXPECT_EQ(rate->board, 1u);
+  rate = step(0.315, 0.281);  // differs from the 0.312 before it
+  EXPECT_FALSE(imu.frozen(0));
+  EXPECT_EQ(rate->board, 0u);
+}

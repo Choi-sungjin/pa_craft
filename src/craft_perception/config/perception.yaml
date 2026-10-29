@@ -32,6 +32,10 @@ perception_master:
       max_disagreement: 0.02       # [rad/s]
       max_disagreement_ratio: 0.08
       disagreement_samples: 3
+      # Frozen board (stuck chip or library): the raw gyro is a noisy 4-sample float mean, so a live
+      # sensor never repeats it exactly; this many identical samples in a row (0.2 s) make the board
+      # unavailable (backup takes over) until as many changing samples come back.
+      frozen_samples: 10
       # Per-board spike filter, TurtleBot3 Waffle Pi limits (our driving profile is not set yet; raise
       # these if control turns faster): max rotational velocity 1.82 rad/s (ROBOTIS e-manual) and
       # acc_lim_theta 3.2 rad/s^2 (turtlebot3_navigation2 waffle_pi.yaml). A sample beyond max_yaw_rate,

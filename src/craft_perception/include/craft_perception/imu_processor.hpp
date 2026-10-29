@@ -58,6 +58,8 @@ struct ImuProcessorConfig {
   double max_yaw_accel;           // [rad/s^2] with jump_noise: largest change between two samples
   double jump_noise;              // [rad/s]
   int disagreement_samples;       // outputs in a row before a disagreement is reported
+  int frozen_samples;             // identical raw gyro samples in a row: board frozen (and as many
+                                  // changing ones to come back)
 };
 
 // Both chassis-fixed OpenCR IMUs (0 = wheel_clock, 1 = lm_arm) -> one chassis yaw rate.
@@ -69,6 +71,9 @@ struct ImuProcessorConfig {
 // last accepted one by more than max_yaw_accel * dt + jump_noise unless the previous raw sample
 // already showed the same level (a real fast change is then accepted one sample late, a one-sample
 // spike never). With the wheels still, a rate below still_rate is reported as 0 (zero-velocity update).
+// A board whose raw gyro repeats exactly for frozen_samples samples is frozen (stuck chip or IMU library:
+// the firmware sends a noisy 4-sample float mean, which never repeats on a live sensor): it is
+// unavailable, so the backup takes over, and it does not feed its own bias tracking.
 class ImuProcessor {
 public:
   static constexpr std::size_t kBoards = 2;
@@ -87,6 +92,7 @@ public:
   std::optional<double> accepted(std::size_t board) const { return accepted_.at(board); }
   // Samples dropped by the range or jump check, per board.
   std::size_t dropped(std::size_t board) const { return dropped_.at(board); }
+  bool frozen(std::size_t board) const { return frozen_.at(board); }
 
 private:
   ImuProcessorConfig config_{};
@@ -95,6 +101,9 @@ private:
   std::array<double, kBoards> slope_{};  // [rad/s^2] between the last two accepted samples
   std::array<double, kBoards> correction_bias_{}, correction_scale_{1.0, 1.0};
   std::array<std::size_t, kBoards> dropped_{};
+  std::array<std::optional<Vector3>, kBoards> last_raw_;
+  std::array<int, kBoards> repeats_{}, changes_{};
+  std::array<bool, kBoards> frozen_{};
   int disagreements_ = 0;
 };
 

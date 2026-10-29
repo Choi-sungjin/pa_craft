@@ -280,7 +280,8 @@ void PerceptionMaster::configure() {
     positive_param("imu.still_rate"), positive_param("imu.gyro_variance"), param<double>("imu.max_disagreement"),
     param<double>("imu.max_disagreement_ratio"), positive_param("imu.max_age_s"),
     positive_param("imu.max_yaw_rate"), positive_param("imu.max_yaw_accel"), param<double>("imu.jump_noise"),
-    static_cast<int>(param<int64_t>("imu.disagreement_samples"))};
+    static_cast<int>(param<int64_t>("imu.disagreement_samples")),
+    static_cast<int>(param<int64_t>("imu.frozen_samples"))};
   if (!imu_.configure(imu)) throw std::invalid_argument("invalid imu configuration");
 
   localization_enabled_ = param<bool>("localization.enabled");
@@ -727,8 +728,9 @@ void PerceptionMaster::receive_imu(std::size_t board, const sensor_msgs::msg::Im
       "wheel_clock %zu, lm_arm %zu", imu_.dropped(0), imu_.dropped(1));
   }
   if (rate->board != imu_.primary()) {
-    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "primary IMU %s unavailable: using backup %s",
-      kNames[imu_.primary()], kNames[rate->board]);
+    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "primary IMU %s %s: using backup %s",
+      kNames[imu_.primary()], imu_.frozen(imu_.primary()) ? "frozen (raw gyro repeating)" : "unavailable",
+      kNames[rate->board]);
   }
   if (rate->disagree) {
     RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
