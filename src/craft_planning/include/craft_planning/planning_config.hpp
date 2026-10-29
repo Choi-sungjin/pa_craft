@@ -36,7 +36,7 @@ struct PlanningConfig {
   double observation_timeout_s = 0.5;
   double obstacle_timeout_s = 0.5;
   double cruise_speed = 0.12;
-  double goal_tolerance = 0.03;
+  double goal_tolerance = 0.10;
   double observation_min_confidence = 0.5;
   bool require_lidar = true;
   bool goal_heading_required = false;

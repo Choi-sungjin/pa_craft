@@ -10,7 +10,7 @@ control_master:
     settle_time_s: 0.1
     stop_position_tolerance_rad: 0.002
     wheel_stop_tolerance_rad_s: 0.02
-    task_timeout_s: 30.0
+    task_timeout_s: 60.0  # [s] matches planning fsm.execution_timeout_s (was 30: timed out on ~3 m legs at the real, slipping speed)
     odom_timeout_s: 0.5
     arm_lm_port: /dev/opencr_arm_lm    # LM + four rotational arm motors + gripper OpenCR
     clock_wheel_port: /dev/opencr_wheel_clock  # clock + wheel x2 OpenCR
@@ -48,7 +48,7 @@ control_master:
     max_wheel: 7.8        # [rad/s] wheel output-shaft speed cap
     # Pure Pursuit tuning: path and odometry must use the same frame, at the axle center.
     lookahead_distance: 0.3  # [m] starting value; tune on the robot
-    wheel_goal_tolerance: 0.03  # [m] stop when the path endpoint is within this distance
+    wheel_goal_tolerance: 0.10  # [m] stop when the path endpoint is within this distance, matches planning goal_tolerance (was 0.03: below SLAM pose noise, overshoot -> 180 deg turn back)
     # Incoming straight path segments are subdivided at path_spacing without changing geometry
     # and republished on /control/tracking_path. Keep it well below lookahead.
     path_spacing: 0.02  # [m]
