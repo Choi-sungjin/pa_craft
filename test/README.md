@@ -17,6 +17,16 @@ Wizard 창이 열려 있는 동안은 그 보드의 `reset*` / `check*` / `relax
 사다리꼴 가속 기울기별로 1 m 직진 슬립을 잰다. 방법과 조건은 [slip/README.md](slip/README.md),
 실행은 `slip plan` / `slip run --speed high|low --accel <m/s²>` / `slip summary`(`~/.bashrc`).
 
+## 위치추정·IMU 실물 확인 (TODO)
+
+두 IMU 처리, 튀는 값 필터, SLAM 감시와 재위치, IMU 되먹임을 실물에서 확인하는 순서와 기준은
+[localization/README.md](localization/README.md)에 있다. 2026-10-29에 sim으로만 검증했다.
+
+## 자이로 배율 실험 (TODO)
+
+두 OpenCR(MPU-9250)의 자이로 배율 오차를 제자리 회전으로 보드별로 잰다. 데이터시트 허용 범위는 ±3%다.
+주행 시나리오를 마친 뒤에 할 예정이다. 사전 작업과 절차는 [gyro_scale/README.md](gyro_scale/README.md)에 있다.
+
 ## 하드웨어 없는 자동 테스트
 
 저장소 루트에서 실행합니다. C++11 컴파일러만 필요합니다.
