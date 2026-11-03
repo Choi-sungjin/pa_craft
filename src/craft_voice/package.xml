@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>craft_voice</name>
+  <version>0.0.0</version>
+  <description>Voice narration: camera + planning state machine -> GPT (OpenAI) -> speech</description>
+  <maintainer email="sssgggjjj4895@gmail.com">pa29</maintainer>
+  <license>TODO</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>diagnostic_msgs</exec_depend>
+  <exec_depend>craft_interfaces</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
+  <!-- openai (Python SDK) has no rosdep key: pip install -r requirements.txt (see README) -->
+
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

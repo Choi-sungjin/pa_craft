@@ -1,0 +1,56 @@
+# craft_voice voice_node. Types are fixed by the node: keep the decimal point on floats (10.0, not 10).
+# The OpenAI key is read from the OPENAI_API_KEY environment variable only; never put it in this file.
+voice_node:
+  ros__parameters:
+    # ---- camera -------------------------------------------------------------------------------
+    camera: d435                  # d435 | c310 (craft_sensors shared memory, same machine) | topic | none
+    image_topic: /camera/image_raw   # camera: topic (stock TurtleBot camera, bag, another machine)
+    image_transport: raw          # raw (sensor_msgs/Image) | compressed (sensor_msgs/CompressedImage)
+    camera_description: 로봇 앞쪽 D435 카메라   # told to GPT so it knows where the picture comes from
+    use_image: true
+    frame_max_age_s: 2.0          # older frames are not sent
+    image_max_side: 512           # longer side after resizing, before JPEG
+    jpeg_quality: 80
+
+    # ---- state machine ------------------------------------------------------------------------
+    planning_state_topic: /planning/state
+    planning_diagnostics_topic: /planning/diagnostics
+    control_status_topic: /control/status
+    context_topics: /perception/localization/state   # comma separated std_msgs/String topics, context only
+    # Labels that are announced when /planning/state changes to them (Fault is never rate limited).
+    # All labels: Idle, Ready, Run.AwaitRequest, Run.PrepareTask, Run.Compute, Run.Execute,
+    #             Run.Complete, Run.Stopping, Fault
+    announce_states: Ready,Run.Execute,Run.Complete,Run.Stopping,Fault
+    step_names: ""                # spoken names of mission step ids, e.g. "approach:접근,grasp_pose:잡기 자세"
+    state_cooldown_s: 10.0        # the same label is announced at most once per cooldown
+    state_mode: gpt               # gpt: GPT phrases it (with the image) | template: fixed sentence, faster
+    fault_reason_wait_s: 1.2      # wait this long for the diagnostics fault reason before speaking
+
+    # ---- when to talk ---------------------------------------------------------------------------
+    scene_period_s: 0.0           # describe the surroundings every N s while quiet, 0 = off (try 30.0)
+    min_interval_s: 5.0           # quiet time needed before a periodic scene
+    max_gpt_calls_per_min: 12     # cost guard; over it state changes fall back to templates
+    repeat_window_s: 30.0
+    interrupt_on_fault: true
+
+    # ---- GPT (OpenAI Responses API) -----------------------------------------------------------
+    language: ko
+    persona: ""                   # extra style instructions, e.g. "반말로 친구처럼 말해."
+    max_chars: 150
+    model: gpt-5.5
+    reasoning_effort: low         # "" = not sent (models without reasoning); low keeps latency down
+    image_detail: low             # low | high | auto | original
+    max_output_tokens: 400        # includes reasoning tokens; too small gives an empty answer
+    request_timeout_s: 15.0
+    api_base_url: ""              # "" = api.openai.com; any OpenAI-compatible endpoint otherwise
+
+    # ---- speech ---------------------------------------------------------------------------------
+    # OpenAI announced shutdown of tts-1, tts-1-hd and gpt-4o-mini-tts(-2025-12-15) on 2027-01-06
+    # (openai SDK 3.42.1). Put the replacement model name here when it is announced.
+    tts_model: gpt-4o-mini-tts
+    tts_voice: coral              # alloy ash ballad coral echo fable onyx nova sage shimmer verse marin cedar
+    tts_instructions: 밝고 또렷한 한국어 안내 로봇 목소리로, 조금 빠르게 말해.
+    tts_speed: 1.0                # 0.25 ~ 4.0
+    tts_sample_rate: 24000        # raw PCM rate of the speech endpoint (16-bit mono)
+    player_command: aplay -q {file}          # or: paplay {file}  /  aplay -q -D plughw:1,0 {file}
+    fallback_tts_command: ""      # offline speech when OpenAI is unreachable, e.g. espeak-ng -v ko --stdout {text}
