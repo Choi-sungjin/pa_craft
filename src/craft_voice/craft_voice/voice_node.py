@@ -282,6 +282,8 @@ class VoiceNode(Node):
 
 
 def main(args=None):
+    from .envfile import load_env_file
+    load_env_file()  # OPENAI_API_KEY from env/openai.env or ~/.config/craft_voice/openai.env, if not already set
     rclpy.init(args=args)
     node = None
     try:

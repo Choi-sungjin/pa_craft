@@ -35,12 +35,16 @@ colcon build --packages-select craft_interfaces craft_voice && source install/se
 aplay -l                                              # 스피커 장치 확인
 ```
 
-API key는 환경 변수로만 받는다(파라미터 파일·저장소에 넣지 말 것):
+API key는 환경 변수 `OPENAI_API_KEY`로 받는다(파라미터 파일·launch·채팅에 넣지 말 것). 환경 변수가 없으면
+키 파일을 이 순서로 찾는다: `$CRAFT_VOICE_ENV` → `src/craft_voice/env/openai.env` → `~/.config/craft_voice/openai.env`.
+`env/openai.env`는 git에서 제외된다(`env/openai.env.example`만 저장소에 있다).
 
 ```bash
-install -m 600 /dev/null ~/.openai_key && nano ~/.openai_key   # 한 줄: export OPENAI_API_KEY=sk-...
-echo 'source ~/.openai_key' >> ~/.bashrc
+cd ~/craft/src/craft_voice && cp env/openai.env.example env/openai.env && chmod 600 env/openai.env && nano env/openai.env
 ```
+
+로봇에서 colcon으로 설치해 돌릴 때는 설치 위치가 바뀌므로 `~/.config/craft_voice/openai.env`에 두거나
+`export CRAFT_VOICE_ENV=~/craft/src/craft_voice/env/openai.env`.
 
 ## 실행
 
@@ -158,6 +162,27 @@ cd craft\src\craft_voice; $env:OPENAI_API_KEY="sk-..."; python -m craft_voice.de
 | `--model`, `--voice`, `--base-url` | `gpt-5.5`, `coral`, `""` | 로봇 설정과 같은 의미 |
 
 키가 없으면 고정 문장만 말한다(`--fallback-tts`가 있으면 그 음성으로).
+
+## 시간 재기 (`python -m craft_voice.bench`)
+
+"GPT 응답을 받은 뒤 음성을 만들어 스피커가 시작할 때까지"를 로봇과 같은 코드 경로로 잰다.
+
+```bash
+cd ~/craft/src/craft_voice && python -m craft_voice.bench                       # OpenAI TTS (키 필요)
+python -m craft_voice.bench --gpt --camera photo.jpg                             # GPT 응답 + 사건→소리 전체
+python -m craft_voice.bench --fallback-tts "espeak-ng -v ko --stdout -- {text}"   # 오프라인 TTS
+```
+
+| 항목 | 뜻 |
+| --- | --- |
+| `tts` | 문장 → WAV (OpenAI TTS 또는 fallback) |
+| `to_play` | 문장 넘김 → 플레이어 시작 (대기열 + TTS + WAV + 프로세스 실행) |
+| `audio` | 말 길이 |
+| `gpt`, `event->play` | `--gpt`일 때: GPT 응답 시간, 상태 변화 → 플레이어 시작 |
+
+이 저장소의 개발 컨테이너(Xeon 2.8 GHz, 사운드 카드 없이 `aplay -D null`)에서 잰 값, 10회 중앙값:
+코드 자체 오버헤드(TTS 0 s로 둠) `to_play` 0.00 s, espeak-ng `tts` 0.02 s·`to_play` 0.01 s, 말 길이 2.5~5.0 s.
+OpenAI TTS·GPT 시간은 키와 네트워크가 있는 곳에서 재야 한다(아직 측정값 없음). Jetson은 CPU가 달라 다시 재야 한다.
 
 ## 테스트
 

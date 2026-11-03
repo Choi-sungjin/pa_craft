@@ -261,8 +261,12 @@ def main(argv=None) -> int:
     except (AttributeError, ValueError):
         pass
     args = parser().parse_args(argv)
+    from .envfile import load_env_file
+    used, names = load_env_file()
     logging.basicConfig(level=args.log_level.upper(), format='%(asctime)s %(levelname)s %(message)s',
                         datefmt='%H:%M:%S')
+    if names:
+        log.info(f'loaded {", ".join(names)} from {used}')
     return run(args)
 
 
