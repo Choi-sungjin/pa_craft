@@ -84,6 +84,8 @@ PARAMETERS = {
     'request_timeout_s': 15.0,
     'fault_tts_timeout_s': 4.0,
     'gpt_state_deadline_s': 6.0,
+    'gpt_narrate_deadline_s': 10.0,
+    'gpt_ask_deadline_s': 15.0,
     'tts_deadline_s': 8.0,
     'player_command': 'aplay -q {file}',
     'fallback_tts_command': '',
@@ -109,7 +111,8 @@ class VoiceNode(Node):
             repeat_window_s=p['repeat_window_s'], use_image=p['use_image'] and p['camera'] != 'none',
             image_max_side=p['image_max_side'], jpeg_quality=p['jpeg_quality'],
             interrupt_on_fault=p['interrupt_on_fault'], fault_tts_deadline_s=p['fault_tts_timeout_s'] + 1.0,
-            gpt_state_deadline_s=p['gpt_state_deadline_s'], tts_deadline_s=p['tts_deadline_s'])
+            gpt_state_deadline_s=p['gpt_state_deadline_s'], tts_deadline_s=p['tts_deadline_s'],
+            gpt_narrate_deadline_s=p['gpt_narrate_deadline_s'], gpt_ask_deadline_s=p['gpt_ask_deadline_s'])
         if p['state_mode'] not in ('gpt', 'template'):
             raise ValueError("state_mode must be 'gpt' or 'template'")
 

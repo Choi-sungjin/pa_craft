@@ -759,3 +759,142 @@ def test_fixed_narration_keeps_its_period_without_gpt():
         narrator.tick()
         run(narrator)
     assert sum(1 for kind, _ in texts if kind == 'scene') == 6
+
+
+# ---- QA round 2 on narration (6a76917) ----------------------------------------------------------------
+class SlowAnswers(Backend):
+    """GPT where describe/status/ask answers take `delay` s; state sentences are quick."""
+
+    def __init__(self, delay, **kwargs):
+        super().__init__(**kwargs)
+        self.delay = delay
+
+    def generate(self, instructions, prompt, jpeg=None):
+        self.calls.append((instructions, prompt, jpeg))
+        if '바뀌었어' in prompt:
+            return '이제 멈출게요.'
+        time.sleep(self.delay)
+        return '오래 걸린 답이에요.'
+
+
+def wait_for(texts, item, seconds=3.0):
+    deadline = time.monotonic() + seconds
+    while item not in texts and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return item in texts
+
+
+@pytest.mark.parametrize('command', ['describe', 'status'])
+def test_threads_requested_answer_does_not_block_state_announcement(command):
+    clock = Clock()
+    narrator, texts = make(SlowAnswers(delay=12.0), player=Player(), clock=clock, start=True)
+    try:
+        narrator.planning_state('Run.Execute')
+        assert wait_for(texts, ('state', '이제 멈출게요.'))
+        texts.clear()
+        narrator.command(command)                             # GPT hangs 12 s on it
+        time.sleep(0.3)
+        started = time.monotonic()
+        narrator.planning_state('Run.Stopping')
+        assert wait_for(texts, ('state', '이제 멈출게요.'), 1.5)
+        kind = 'scene' if command == 'describe' else 'status'
+        assert (kind, '멈추는 중이에요.') in texts               # answered right away with the new situation
+        assert time.monotonic() - started < 1.5 and ('scene', '오래 걸린 답이에요.') not in texts
+    finally:
+        narrator.close()
+
+
+def test_threads_question_in_gpt_does_not_hold_the_announcement():
+    clock = Clock()
+    narrator, texts = make(SlowAnswers(delay=1.5), player=Player(), clock=clock, start=True)
+    try:
+        narrator.ask('앞에 뭐 있어?')
+        time.sleep(0.2)
+        narrator.planning_state('Run.Stopping')               # think thread busy with the question
+        assert wait_for(texts, ('state', '멈추는 중이에요.'), 1.0)  # fixed words at once
+        assert wait_for(texts, ('ask', '오래 걸린 답이에요.'), 3.0)   # the question is still answered
+    finally:
+        narrator.close()
+
+
+def test_question_deadline():
+    narrator, texts = make(SlowAnswers(delay=3.0), clock=time.monotonic, gpt_ask_deadline_s=0.3)
+    started = time.monotonic()
+    narrator.ask('앞에 뭐 있어?')
+    run(narrator)
+    assert time.monotonic() - started < 1.5
+    assert texts == [('ask', '지금은 그 질문에 답하기 어려워요. 아직 제 작업 상태를 받지 못했어요.')]
+
+
+def test_threads_stop_discards_what_gpt_is_writing():
+    narrator, texts = make(SlowAnswers(delay=0.8), player=Player(), start=True)
+    try:
+        narrator.command('describe')
+        time.sleep(0.2)
+        narrator.command('stop')
+        time.sleep(1.5)
+        assert texts == []
+    finally:
+        narrator.close()
+
+
+def test_refreshed_answer_respects_mute():
+    """The status answer is in TTS when the person mutes and the situation changes: no refresh is said."""
+    class MuteDuringTts(Backend):
+        def synthesize(self, text, urgent=False):
+            narrator.command('mute')
+            narrator.planning_state('Run.Complete')
+            return super().synthesize(text, urgent)
+
+    narrator, texts = make(MuteDuringTts(), state_mode='template')
+    narrator.tracker.announce = ()
+    narrator.planning_state('Run.Execute')
+    narrator.command('status')
+    run(narrator)
+    assert texts == [] and narrator.player.played == []
+
+
+def test_state_sentence_is_written_before_waiting_answers():
+    backend = Backend('답')
+    narrator, texts = make(backend)
+    narrator.tracker.announce = ('Ready',)
+    narrator.command('status')                                # queued first
+    narrator.planning_state('Ready')                          # but the announcement expires: GPT does it first
+    narrator.think_once()
+    assert '바뀌었어' in backend.calls[0][1]
+
+
+def test_status_answer_survives_quick_state_changes():
+    """Run.Complete -> AwaitRequest -> PrepareTask in 100 ms must not leave the asker without an answer."""
+    class Moving(Backend):
+        def synthesize(self, text, urgent=False):
+            for label in ('Run.Complete', 'Run.AwaitRequest', 'Run.PrepareTask', 'Run.Compute'):
+                narrator.planning_state(label)
+            return super().synthesize(text, urgent)
+
+    narrator, texts = make(Moving(), state_mode='template')
+    narrator.tracker.announce = ()
+    narrator.planning_state('Run.Execute')
+    narrator.command('status')
+    run(narrator)
+    assert texts and texts[-1][0] == 'status'
+
+
+def test_refreshed_answer_tells_the_situation_at_the_moment_it_is_said():
+    class OnceMoving(Backend):
+        moved = False
+
+        def synthesize(self, text, urgent=False):
+            if not self.moved:
+                self.moved = True
+                narrator.planning_state('Run.Complete')        # the first answer goes stale in TTS
+            return super().synthesize(text, urgent)
+
+    narrator, texts = make(OnceMoving(), state_mode='template')
+    narrator.tracker.announce = ()
+    narrator.planning_state('Run.Execute')
+    narrator.command('status')
+    narrator.speak_once()                                     # stale after TTS -> refresh queued
+    narrator.planning_state('Run.Stopping')                   # changes again before the refresh is said
+    run(narrator)
+    assert texts == [('status', '멈추는 중이에요.')]
