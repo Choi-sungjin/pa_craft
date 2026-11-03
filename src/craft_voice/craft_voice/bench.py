@@ -4,7 +4,7 @@
     python -m craft_voice.bench --fallback-tts "espeak-ng -v ko --stdout -- {text}"
     python -m craft_voice.bench --gpt --camera photo.jpg # also time the GPT answer (picture + facts)
     python -m craft_voice.bench --engine instant          # only this code's own overhead (no TTS at all)
-    python -m craft_voice.bench --compare "gpt-6-luna,gpt-5.4-mini,gpt-5.5" --efforts none,low
+    python -m craft_voice.bench --compare "gpt-5.4-mini,gpt-6-luna,gpt-5.5" --efforts none,low
                                                           # GPT models side by side: the robot's real narration
                                                           # prompt + a picture (--camera, else a drawn scene)
 
@@ -77,7 +77,7 @@ def main(argv=None) -> int:
     p.add_argument('--player', default='aplay -q {file}', help="command with {file}; 'none' to skip playback")
     p.add_argument('--gpt', action='store_true', help='also time GPT (needs OPENAI_API_KEY)')
     p.add_argument('--camera', default='', help='picture for --gpt (none = text only)')
-    p.add_argument('--model', default='gpt-6-luna,gpt-5.4-mini,gpt-5.5')
+    p.add_argument('--model', default='gpt-5.4-mini,gpt-6-luna,gpt-5.5')
     p.add_argument('--reasoning-effort', default='none')
     p.add_argument('--tts-model', default='gpt-4o-mini-tts')
     p.add_argument('--voice', default='coral')

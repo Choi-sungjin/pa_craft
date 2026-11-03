@@ -107,7 +107,7 @@ ros2 topic echo /voice/utterance                                              # 
 | 이름 | 기본값 | 설명 |
 | --- | --- | --- |
 | `camera` | `d435` | `d435`, `c310`(공유 메모리), `topic`, `none` |
-| `model` | `gpt-6-luna,gpt-5.4-mini,gpt-5.5` | 빠른 것부터, 쉼표로 대체 모델. 키에 없는 모델이거나 이미지를 못 받으면 다음 모델을 쓰고 계속 그 모델 |
+| `model` | `gpt-5.4-mini,gpt-6-luna,gpt-5.5` | 빠른 것부터, 쉼표로 대체 모델. 키에 없는 모델이거나 이미지를 못 받으면 다음 모델을 쓰고 계속 그 모델 |
 | `reasoning_effort` | `none` | 추론 시간을 없애 빠르게. 모델이 거부하면 none → minimal → low → 안 보냄 순으로 낮춤 |
 | `image_detail` | `low` | `low`/`high`/`auto`/`original`. 이미지는 긴 변 `image_max_side`(512) px로 줄여 보냄 |
 | `tts_model` / `tts_voice` | `gpt-4o-mini-tts` / `coral` | `tts_instructions`로 말투 지정(tts-1 계열은 무시) |
@@ -162,7 +162,7 @@ cd craft\src\craft_voice; $env:OPENAI_API_KEY="sk-..."; python -m craft_voice.de
 | `--narrate-period` / `--narrate-idle-period` | `20` / `0` | 일하는 동안 / 대기 중 상황 중계 주기 (가상 이동 속도도 넣어 줌) |
 | `--player` | `auto` | Linux paplay→aplay→ffplay, macOS afplay, Windows winsound. 또는 `{file}`이 든 명령 |
 | `--fallback-tts` | `""` | 예: `espeak-ng -v ko --stdout -- {text}` (Linux) |
-| `--model`, `--voice`, `--base-url` | `gpt-6-luna,gpt-5.4-mini,gpt-5.5`, `coral`, `""` | 로봇 설정과 같은 의미 |
+| `--model`, `--voice`, `--base-url` | `gpt-5.4-mini,gpt-6-luna,gpt-5.5`, `coral`, `""` | 로봇 설정과 같은 의미 |
 
 키가 없으면 고정 문장만 말한다(`--fallback-tts`가 있으면 그 음성으로).
 
@@ -186,7 +186,7 @@ python -m craft_voice.bench --fallback-tts "espeak-ng -v ko --stdout -- {text}" 
 GPT 모델 고르기: 로봇의 실제 중계 프롬프트와 사진(없으면 그린 장면)으로 모델 × reasoning을 나란히 잰다.
 
 ```bash
-python -m craft_voice.bench --compare "gpt-6-luna,gpt-5.4-mini,gpt-5.5,gpt-5.6-luna" --efforts none,low --runs 3 --camera test/images
+python -m craft_voice.bench --compare "gpt-5.4-mini,gpt-6-luna,gpt-5.5,gpt-5.6-luna" --efforts none,low --runs 3 --camera test/images
 ```
 
 `--camera`에 폴더를 주면 실행마다 사진을 돌려 쓴다. `test/images/`에는 OpenCV `samples/data`의 사진 3장
@@ -194,7 +194,21 @@ python -m craft_voice.bench --compare "gpt-6-luna,gpt-5.4-mini,gpt-5.5,gpt-5.6-l
 
 이 저장소의 개발 컨테이너(Xeon 2.8 GHz, 사운드 카드 없이 `aplay -D null`)에서 잰 값, 10회 중앙값:
 코드 자체 오버헤드(TTS 0 s로 둠) `to_play` 0.00 s, espeak-ng `tts` 0.02 s·`to_play` 0.01 s, 말 길이 2.5~5.0 s.
-OpenAI TTS·GPT 시간은 키와 네트워크가 있는 곳에서 재야 한다(아직 측정값 없음). Jetson은 CPU가 달라 다시 재야 한다.
+Jetson·경기장 Wi-Fi에서는 네트워크가 달라 다시 재야 한다.
+
+실측 2026-11-03, Claude Code 클라우드 컨테이너에서 Network secret(프록시가 키를 넣음)으로 OpenAI 직접 호출,
+로봇의 실제 중계 프롬프트 + `test/images` 사진 3장, 중앙값:
+
+| 모델 (reasoning none) | GPT 응답 | 비고 |
+| --- | --- | --- |
+| **gpt-5.4-mini** | **1.02 s** (0.99~1.80, n=6) | 기본값. 문장 자연스러움, 사진 묘사는 짧은 편 |
+| gpt-6-luna | 1.59 s (1.31~2.08, n=6) | 사진 묘사가 더 구체적(책상·의자 등) |
+| gpt-5.6-luna | 1.60 s (1.36~1.94, n=6) | 반말·존댓말이 섞임 |
+| gpt-5.5 | 2.47 s (n=3) | reasoning low가 1.93 s로 오히려 빠름 |
+
+같은 조건에서 reasoning low는 none보다 0.3~0.5 s 느렸다. 기본값(gpt-5.4-mini, none)으로 상태 변화 → 플레이어 시작
+(GPT 문장 + 사진 + OpenAI TTS) **2.89 s** (2.38~3.15, n=5), 그중 TTS(문장 → 플레이어 시작) 1.25 s.
+같은 측정을 노트북(이전 기본값 gpt-5.5·low, 사진 없음)에서 했을 때는 3.67 s였다(네트워크가 달라 직접 비교는 참고만).
 
 ## 테스트
 

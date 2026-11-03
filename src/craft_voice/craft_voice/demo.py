@@ -233,7 +233,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument('--cooldown', type=float, default=10.0)
     p.add_argument('--step-names', default='approach:접근,grasp_pose:잡기 자세')
     p.add_argument('--persona', default='')
-    p.add_argument('--model', default='gpt-6-luna,gpt-5.4-mini,gpt-5.5',
+    p.add_argument('--model', default='gpt-5.4-mini,gpt-6-luna,gpt-5.5',
                    help='fastest first, comma separated fallbacks')
     p.add_argument('--reasoning-effort', default='none')
     p.add_argument('--image-detail', default='low')

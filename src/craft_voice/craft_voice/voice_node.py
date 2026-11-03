@@ -70,7 +70,7 @@ PARAMETERS = {
     'language': 'ko',
     'persona': '',
     'max_chars': 150,
-    'model': 'gpt-6-luna,gpt-5.4-mini,gpt-5.5',
+    'model': 'gpt-5.4-mini,gpt-6-luna,gpt-5.5',
     'reasoning_effort': 'none',
     'image_detail': 'low',
     'max_output_tokens': 400,
