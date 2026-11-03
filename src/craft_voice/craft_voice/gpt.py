@@ -9,25 +9,12 @@ with an announced shutdown date of 2027-01-06.
 from __future__ import annotations
 
 import base64
-import io
-import wave
+
+from .audio import pcm_to_wav  # noqa: F401  (re-exported)
 
 
 class EmptyResponse(RuntimeError):
     """The model answered without text (e.g. max_output_tokens spent on reasoning)."""
-
-
-def pcm_to_wav(pcm: bytes, sample_rate: int, channels: int = 1, sample_width: int = 2) -> bytes:
-    """Raw little-endian PCM -> WAV with a correct header (any player accepts it)."""
-    frame = channels * sample_width
-    pcm = pcm[:len(pcm) - len(pcm) % frame]
-    out = io.BytesIO()
-    with wave.open(out, 'wb') as wav:
-        wav.setnchannels(channels)
-        wav.setsampwidth(sample_width)
-        wav.setframerate(sample_rate)
-        wav.writeframes(pcm)
-    return out.getvalue()
 
 
 class OpenAIBackend:

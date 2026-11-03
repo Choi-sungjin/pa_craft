@@ -17,7 +17,6 @@ converted by image_to_bgr / compressed_to_bgr.
 
 from __future__ import annotations
 
-import fcntl
 import mmap
 import os
 import sys
@@ -90,6 +89,7 @@ class ShmFrameReader:
                 self._fd = os.open(self.path, os.O_RDONLY)
             except OSError:
                 return None
+        import fcntl  # POSIX only; the rest of this module (encode_jpeg, conversions) also runs on Windows
         try:
             fcntl.flock(self._fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
         except OSError:

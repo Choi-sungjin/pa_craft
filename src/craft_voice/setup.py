@@ -21,5 +21,6 @@ setup(
     description='Voice narration: camera + planning state machine -> GPT (OpenAI) -> speech',
     license='TODO',
     tests_require=['pytest'],
-    entry_points={'console_scripts': ['voice_node = craft_voice.voice_node:main']},
+    entry_points={'console_scripts': ['voice_node = craft_voice.voice_node:main',
+                                      'voice_demo = craft_voice.demo:main']},
 )

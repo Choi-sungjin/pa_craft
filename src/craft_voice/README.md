@@ -109,6 +109,41 @@ float 파라미터는 소수점을 붙인다(`10.0`). 리스트는 쉼표로 구
 - 지연 시간은 아직 실측하지 않았다(GPT 응답 + TTS 두 번의 왕복). 너무 느리면 `state_mode: template`, 더 작은 모델, `reasoning_effort: low`.
 - 음성 TTS는 raw PCM(24 kHz, 16-bit mono)으로 받아 WAV 헤더를 직접 붙인다. 소리가 빠르거나 느리면 `tts_sample_rate` 확인.
 
+## 노트북에서 시험 (ROS·로봇 없이, Python 가상환경만)
+
+로봇이 쓰는 것과 같은 판단 코드(Narrator, StateTracker)에 **가상 상태머신**(`craft_voice/sim.py`, planning_master와
+같은 label·diagnostics 형식)과 **노트북 웹캠**을 붙인다. `/planning/state`와 공유 메모리 대신 쓴다는 것만 다르다.
+
+Linux / macOS:
+
+```bash
+python3 -m venv ~/voice-venv && . ~/voice-venv/bin/activate && pip install openai==3.42.1 opencv-python numpy
+cd ~/craft/src/craft_voice && export OPENAI_API_KEY=sk-... && python -m craft_voice.demo
+```
+
+Windows (PowerShell, 스피커는 winsound 사용 — Windows에서는 아직 실행해 보지 않았다):
+
+```powershell
+py -m venv $HOME\voice-venv; & $HOME\voice-venv\Scripts\Activate.ps1; pip install openai==3.42.1 opencv-python numpy
+cd craft\src\craft_voice; $env:OPENAI_API_KEY="sk-..."; python -m craft_voice.demo
+```
+
+기본 시나리오(반복): Idle 3 s → Ready 6 s → base_goal 실행 10 s → 완료 → approach 실행 8 s → Fault(실행 시간 초과) 12 s.
+실행 중 입력: 그냥 문장 = 질문, `/describe`, `/status`, `/state Run.Execute@approach`, `/fault localization lost`,
+`/resume`(시나리오로 복귀), `/say 안녕`, `/mute`, `/unmute`, `/stop`, `/quit`. GPT 응답 시간은 로그 `GPT state 1.8s ...`로 나온다.
+
+| 옵션 | 기본값 | 설명 |
+| --- | --- | --- |
+| `--camera` | `0` | 웹캠 번호, 사진·동영상 경로, `none` |
+| `--scenario` | 위 시나리오 | `Label[@step][!reason]:초, ...` (reason에 `:`가 있어도 됨) |
+| `--template` | 끔 | 상태 안내는 고정 문장(GPT는 질문·장면만) |
+| `--scene-period` | `0` | 조용할 때 N초마다 주변 설명 |
+| `--player` | `auto` | Linux paplay→aplay→ffplay, macOS afplay, Windows winsound. 또는 `{file}`이 든 명령 |
+| `--fallback-tts` | `""` | 예: `espeak-ng -v ko --stdout -- {text}` (Linux) |
+| `--model`, `--voice`, `--base-url` | `gpt-5.5`, `coral`, `""` | 로봇 설정과 같은 의미 |
+
+키가 없으면 고정 문장만 말한다(`--fallback-tts`가 있으면 그 음성으로).
+
 ## 테스트
 
 ROS 없이 돈다(rclpy 불필요, `test_gpt_http.py`만 openai SDK 필요 — 로컬 가짜 서버라 key·인터넷 불필요):
@@ -124,3 +159,4 @@ cd ~/craft/src/craft_voice && python3 -m pytest -q test
 | `test_narrator.py` | GPT 경로, 템플릿 폴백, Fault 우선·끊기(재생 중·TTS 합성 중·TTS가 멈춘 네트워크, 실제 스레드), Fault 음성 마감 후 fallback, 죽은 네트워크에서도 상태 안내(GPT·TTS 마감), 지난 상태·status 문장 버리기/바꾸기(TTS 뒤 재확인 포함), 종료 중 발행 안 함, 호출 상한, 주기 장면, mute/stop |
 | `test_gpt_http.py` | 실제 openai SDK가 보내는 `/v1/responses`·`/v1/audio/speech` 요청 내용, reasoning 거부 시 재시도, WAV, 응답 없는 서버에서 Fault 음성이 빨리 포기 |
 | `test_audio.py` | 플레이어 명령(`{file}`), stop으로 끊기, 시작 전 취소, 오류, shell 없이 `{text}` 전달, 문장이 옵션(`-w` 등)이 되지 않음 |
+| `test_sim.py`, `test_demo.py` | 가상 상태머신 형식(planning_master와 같은 diagnostics), 데모를 실제 프로세스로 띄워 가짜 OpenAI 서버와 끝까지(질문·장면·상태·Fault·재생) |
