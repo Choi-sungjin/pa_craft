@@ -41,7 +41,8 @@ voice_node:
     reasoning_effort: low         # "" = not sent (models without reasoning); low keeps latency down
     image_detail: low             # low | high | auto | original
     max_output_tokens: 400        # includes reasoning tokens; too small gives an empty answer
-    request_timeout_s: 15.0
+    request_timeout_s: 15.0       # GPT and normal speech requests (one retry)
+    fault_tts_timeout_s: 4.0      # fault sentence speech: no retry, then fallback_tts_command
     api_base_url: ""              # "" = api.openai.com; any OpenAI-compatible endpoint otherwise
 
     # ---- speech ---------------------------------------------------------------------------------
@@ -53,4 +54,4 @@ voice_node:
     tts_speed: 1.0                # 0.25 ~ 4.0
     tts_sample_rate: 24000        # raw PCM rate of the speech endpoint (16-bit mono)
     player_command: aplay -q {file}          # or: paplay {file}  /  aplay -q -D plughw:1,0 {file}
-    fallback_tts_command: ""      # offline speech when OpenAI is unreachable, e.g. espeak-ng -v ko --stdout {text}
+    fallback_tts_command: ""      # offline speech when OpenAI is unreachable, e.g. espeak-ng -v ko --stdout -- {text}

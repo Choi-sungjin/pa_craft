@@ -130,3 +130,21 @@ def test_tts1_gets_no_instructions_and_speed_is_sent(server):
 def test_pcm_to_wav_drops_half_sample():
     with wave.open(io.BytesIO(pcm_to_wav(b'\x01\x02\x03', 16000))) as w:
         assert w.getnframes() == 1 and w.getframerate() == 16000
+
+
+def test_urgent_speech_gives_up_fast(monkeypatch):
+    """Fault speech on a dead network: one attempt with urgent_timeout_s, no retry."""
+    import socket
+    monkeypatch.setenv('OPENAI_API_KEY', 'test-key-not-real')
+    silent = socket.socket()
+    silent.bind(('127.0.0.1', 0))
+    silent.listen(8)                                          # accepts, never answers
+    url = f'http://127.0.0.1:{silent.getsockname()[1]}/v1'
+    b = OpenAIBackend(model='m', tts_model='gpt-4o-mini-tts', voice='coral', timeout_s=30.0,
+                      urgent_timeout_s=0.5, base_url=url)
+    import time
+    started = time.monotonic()
+    with pytest.raises(openai.APITimeoutError):
+        b.synthesize('문제가 생겨서 멈췄어요.', urgent=True)
+    assert time.monotonic() - started < 2.0
+    silent.close()

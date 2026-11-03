@@ -22,6 +22,7 @@ from .frames import encode_jpeg
 from .robot_state import STATE_KO, StateEvent, StateTracker
 
 PRIORITY = {'scene': 0, 'state': 1, 'status': 2, 'ask': 2, 'say': 2, 'fault': 3}
+EVENT_LABELS = ('Run.Complete',)  # still true after the state moved on; other labels describe "now"
 LANGUAGE = {'ko': '한국어', 'en': 'English', 'ja': '日本語'}
 
 
@@ -64,6 +65,8 @@ class Utterance:
     text: str
     created: float
     generation: int = 0
+    label: str = ''            # state label a 'state' sentence is about
+    cancelled: bool = False    # preempted by a fault or 'stop' (possibly before playback started)
 
     @property
     def priority(self) -> int:
@@ -178,8 +181,7 @@ class Narrator:
         elif command == 'stop':
             with self._lock:
                 self._drop_pending(lambda kind: True)
-            if self.player:
-                self.player.stop()
+                self._cancel_current()
         else:
             return f'unknown command {command!r} (describe, status, mute, unmute, stop)'
         return command
@@ -223,7 +225,8 @@ class Narrator:
         elif self.muted:
             return
         elif self.backend is None or self.config.state_mode == 'template':
-            self._enqueue(Utterance('state', self.tracker.template(event), event.stamp, event.generation))
+            self._enqueue(Utterance('state', self.tracker.template(event), event.stamp, event.generation,
+                                    label=event.label))
         else:
             self._submit(Job('state', event.stamp, event=event))
 
@@ -254,13 +257,19 @@ class Narrator:
             if utterance.kind == 'fault':
                 self._drop_pending(lambda kind: kind in ('state', 'scene', 'status'))
                 current = self._current
-                if (self.config.interrupt_on_fault and self.player and current is not None and
-                        current.priority < PRIORITY['fault']):
-                    self.player.stop()
+                if self.config.interrupt_on_fault and current is not None and current.priority < PRIORITY['fault']:
+                    self._cancel_current()
             elif utterance.kind in ('state', 'scene'):
                 self._utterances = [u for u in self._utterances if u.kind != utterance.kind]
             self._utterances.append(utterance)
             self._speak_cv.notify()
+
+    def _cancel_current(self):
+        """Cut off the sentence being synthesized or played (call with the lock held)."""
+        if self._current is not None:
+            self._current.cancelled = True  # checked after TTS and by the player right before it starts
+        if self.player:
+            self.player.stop()
 
     @staticmethod
     def _pop_best(items):
@@ -290,8 +299,9 @@ class Narrator:
             with self._lock:
                 self._thinking = False
         if text:
-            generation = job.event.generation if job.event else 0
-            self._enqueue(Utterance(job.kind, text, job.created, generation))
+            event = job.event
+            self._enqueue(Utterance(job.kind, text, job.created, event.generation if event else 0,
+                                    label=event.label if event else ''))
         return True
 
     def _fallback(self, job: Job, why: str) -> str | None:
@@ -387,6 +397,8 @@ class Narrator:
         if u.kind == 'state':
             if u.generation != self._latest_state_generation:
                 return 'newer state'
+            if u.label not in EVENT_LABELS and self.tracker.label != u.label:
+                return 'state moved on'
             if now - u.created > cfg.state_max_age_s:
                 return 'too late'
         if u.kind == 'scene' and now - u.created > cfg.scene_max_age_s:
@@ -421,12 +433,14 @@ class Narrator:
                 self._last_activity = self._last_text_at
         return True
 
-    def _synthesize(self, text: str) -> bytes | None:
+    def _synthesize(self, text: str, urgent: bool) -> bytes | None:
         for name, engine in (('openai', self.backend), ('fallback', self.fallback_tts)):
             if engine is None:
                 continue
             try:
-                return engine.synthesize(text)
+                # urgent: short timeout and no retry, so a dead network reaches the fallback quickly
+                return engine.synthesize(text, urgent=True) if urgent and engine is self.backend \
+                    else engine.synthesize(text)
             except Exception as error:
                 self.stats['tts_errors'] += 1
                 self.log.error(f'TTS ({name}) failed: {type(error).__name__}: {error}')
@@ -436,13 +450,13 @@ class Narrator:
         self.log.info(f'say [{utterance.kind}] {utterance.text}')
         if self.on_text:
             self.on_text(utterance.kind, utterance.text)
-        wav = self._synthesize(utterance.text)
-        if wav is None or self.player is None:
+        wav = self._synthesize(utterance.text, urgent=utterance.kind == 'fault')
+        if wav is None or self.player is None or utterance.cancelled:
             return
         if self.on_speaking:
             self.on_speaking(True)
         try:
-            if self.player.play(wav):
+            if self.player.play(wav, cancelled=lambda: utterance.cancelled):
                 self.stats['spoken'] += 1
         except Exception as error:
             self.log.error(f'audio playback failed: {error}')

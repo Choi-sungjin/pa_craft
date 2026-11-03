@@ -34,7 +34,7 @@ class OpenAIBackend:
     def __init__(self, model: str, tts_model: str, voice: str, tts_instructions: str = '',
                  image_detail: str = 'low', max_output_tokens: int = 400, reasoning_effort: str = '',
                  tts_speed: float = 1.0, sample_rate: int = 24000, timeout_s: float = 15.0,
-                 base_url: str = '', client=None):
+                 urgent_timeout_s: float = 4.0, base_url: str = '', client=None):
         if client is None:
             from openai import OpenAI  # imported here so tests and template-only runs need no SDK
             client = OpenAI(base_url=base_url or None, timeout=timeout_s, max_retries=1)
@@ -48,6 +48,7 @@ class OpenAIBackend:
         self.reasoning_effort = reasoning_effort
         self.tts_speed = tts_speed
         self.sample_rate = sample_rate
+        self.urgent_timeout_s = urgent_timeout_s
 
     def generate(self, instructions: str, text: str, jpeg: bytes | None = None) -> str:
         content = [{'type': 'input_text', 'text': text}]
@@ -74,14 +75,18 @@ class OpenAIBackend:
                                 f'{getattr(response, "incomplete_details", None)})')
         return text
 
-    def synthesize(self, text: str) -> bytes:
-        """Text -> WAV bytes. Asks for raw PCM and writes the header itself."""
+    def synthesize(self, text: str, urgent: bool = False) -> bytes:
+        """Text -> WAV bytes. Asks for raw PCM and writes the header itself.
+
+        urgent (fault sentences): urgent_timeout_s and no retry instead of timeout_s with one retry.
+        """
         request = {'model': self.tts_model, 'voice': self.voice, 'input': text, 'response_format': 'pcm'}
         if self.tts_instructions and not self.tts_model.startswith('tts-1'):
             request['instructions'] = self.tts_instructions  # tts-1 / tts-1-hd do not take instructions
         if self.tts_speed != 1.0:
             request['speed'] = self.tts_speed
-        response = self.client.audio.speech.create(**request)
+        client = self.client.with_options(timeout=self.urgent_timeout_s, max_retries=0) if urgent else self.client
+        response = client.audio.speech.create(**request)
         pcm = response.content if hasattr(response, 'content') else response.read()
         if not pcm:
             raise EmptyResponse('speech response had no audio')

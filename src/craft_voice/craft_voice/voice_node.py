@@ -72,6 +72,7 @@ PARAMETERS = {
     'tts_sample_rate': 24000,
     'api_base_url': '',
     'request_timeout_s': 15.0,
+    'fault_tts_timeout_s': 4.0,
     'player_command': 'aplay -q {file}',
     'fallback_tts_command': '',
 }
@@ -107,7 +108,8 @@ class VoiceNode(Node):
                     tts_instructions=p['tts_instructions'], image_detail=p['image_detail'],
                     max_output_tokens=p['max_output_tokens'], reasoning_effort=p['reasoning_effort'],
                     tts_speed=p['tts_speed'], sample_rate=p['tts_sample_rate'],
-                    timeout_s=p['request_timeout_s'], base_url=p['api_base_url'])
+                    timeout_s=p['request_timeout_s'], urgent_timeout_s=p['fault_tts_timeout_s'],
+                    base_url=p['api_base_url'])
             except Exception as error:  # e.g. openai package missing
                 log.error(f'OpenAI backend unavailable ({type(error).__name__}: {error}); templates only')
         else:

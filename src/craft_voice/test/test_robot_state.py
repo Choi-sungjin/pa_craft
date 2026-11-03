@@ -82,6 +82,21 @@ def test_step_names_in_templates():
     assert t.current_template(20.2) == '접근 작업을 마쳤어요.'
 
 
+def test_step_from_previous_step_is_not_used():
+    """Diagnostics are 1 Hz: the next step's Run.Execute can come before any diagnostics naming it."""
+    t = StateTracker(step_names=parse_mapping('approach:접근'), cooldown_s=0.0)
+    t.update_planning('Run.Execute', 5.0)
+    diag(t, 'Run.Execute: ', 9.98, step='approach')
+    assert t.template(t.update_planning('Run.Complete', 10.0)) == '접근 작업을 마쳤어요.'
+    for at, label in ((10.05, 'Run.AwaitRequest'), (10.10, 'Run.PrepareTask'), (10.15, 'Run.Compute')):
+        t.update_planning(label, at)
+    event = t.update_planning('Run.Execute', 10.4)
+    assert event.step == '' and t.template(event) == '작업을 시작할게요.'
+    assert '현재 단계' not in t.context_text(10.5)
+    diag(t, 'Run.Execute: ', 10.98, step='grasp')
+    assert t.step_name() == 'grasp' and '현재 단계: grasp' in t.context_text(11.0)
+
+
 def test_context_text():
     t = StateTracker()
     assert '데이터 없음' in t.context_text(0.0)

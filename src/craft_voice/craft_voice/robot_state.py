@@ -112,6 +112,7 @@ class StateTracker:
         self.diag_message = ''
         self.diag_level = 0
         self.diag_at = -math.inf
+        self.step_started_at = -math.inf  # last Run.PrepareTask: diagnostics older than this name the previous step
         self.fault_reason = ''
         self.fault_reason_at = -math.inf
         self.control = ControlSnapshot()
@@ -131,6 +132,8 @@ class StateTracker:
         if label == self.label:
             return None
         previous, self.label, self.label_since = self.label, label, now
+        if label == 'Run.PrepareTask':
+            self.step_started_at = now
         self.history.append((now, label))
         self.generation += 1
         if label != 'Fault':
@@ -179,8 +182,12 @@ class StateTracker:
         return StateEvent(event.label, event.previous, event.stamp, event.step, reason, event.generation)
 
     # ---- outputs ------------------------------------------------------------------------
+    def step_known(self) -> bool:
+        """Diagnostics (1 Hz) arrived after the current step began, so 'step' is this step."""
+        return self.diag_at >= self.step_started_at
+
     def step_name(self) -> str:
-        step = self.diag.get('step', '')
+        step = self.diag.get('step', '') if self.step_known() else ''
         return self.step_names.get(step, STEP_KO.get(step, step))
 
     def planning_fresh(self, now: float) -> bool:
@@ -222,7 +229,7 @@ class StateTracker:
             if self.label == 'Fault' and self.fault_reason:
                 lines.append(f'- 고장 원인: {self.fault_reason} ({reason_ko(self.fault_reason)})')
         if now - self.diag_at <= self.stale_s:
-            step = self.diag.get('step', '')
+            step = self.diag.get('step', '') if self.step_known() else ''
             if step:
                 lines.append(f'- 현재 단계: {step} ({self.step_name()}), task {self.diag.get("task_id", "?")}, '
                              f'남은 단계 {self.diag.get("queued", "?")}개')

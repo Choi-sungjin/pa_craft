@@ -17,9 +17,9 @@ class Clock:
 
 
 class Backend:
-    def __init__(self, reply='앞에 상자가 보여요.', fail=False, tts_fail=False):
-        self.reply, self.fail, self.tts_fail = reply, fail, tts_fail
-        self.calls, self.spoken = [], []
+    def __init__(self, reply='앞에 상자가 보여요.', fail=False, tts_fail=False, tts_delay=0.0):
+        self.reply, self.fail, self.tts_fail, self.tts_delay = reply, fail, tts_fail, tts_delay
+        self.calls, self.spoken, self.urgent = [], [], []
 
     def generate(self, instructions, prompt, jpeg=None):
         self.calls.append((instructions, prompt, jpeg))
@@ -27,7 +27,9 @@ class Backend:
             raise ConnectionError('offline')
         return self.reply
 
-    def synthesize(self, text):
+    def synthesize(self, text, urgent=False):
+        self.urgent.append(urgent)
+        time.sleep(self.tts_delay)
         if self.tts_fail:
             raise ConnectionError('tts offline')
         self.spoken.append(text)
@@ -35,23 +37,40 @@ class Backend:
 
 
 class Player:
+    """Same contract as CommandPlayer: stop() only ends a playback that is running."""
+
     def __init__(self, block=False):
         self.played, self.stops, self.block = [], 0, block
         self.started = threading.Event()
-        self._release = threading.Event()
+        self._lock = threading.Lock()
+        self._running = None
 
-    def play(self, wav):
+    def play(self, wav, cancelled=None):
+        with self._lock:
+            if cancelled is not None and cancelled():
+                return False
+            running = self._running = threading.Event()
         self.played.append(wav)
         self.started.set()
-        if self.block:
-            stopped = self._release.wait(5.0)
-            self._release.clear()
-            return not stopped
-        return True
+        stopped = running.wait(5.0) if self.block else False
+        with self._lock:
+            self._running = None
+        return not stopped
 
     def stop(self):
-        self.stops += 1
-        self._release.set()
+        with self._lock:
+            self.stops += 1
+            if self._running is not None:
+                self._running.set()
+
+    def wait_playing(self, count, timeout=3.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self._lock:
+                if len(self.played) >= count and self._running is not None:
+                    return True
+            time.sleep(0.01)
+        return False
 
 
 def frame():
@@ -184,6 +203,30 @@ def test_gpt_call_in_flight_when_fault_arrives():
     assert texts == [('fault', '문제가 생겨서 멈췄어요.')]
 
 
+def test_state_sentence_dropped_when_state_moved_on_unannounced():
+    clock = Clock()
+    narrator, texts = make(Backend('정지하는 중이에요.'), clock=clock)
+    narrator.planning_state('Run.Stopping')
+    narrator.think_once()
+    for label in ('Run.AwaitRequest', 'Run.PrepareTask', 'Run.Compute'):  # none announced
+        narrator.planning_state(label)
+    run(narrator)
+    assert texts == []
+
+
+def test_complete_is_spoken_after_the_state_moved_on():
+    backend = Backend('출발!')
+    narrator, texts = make(backend)
+    narrator.planning_state('Run.Execute')
+    run(narrator)
+    backend.reply = '작업 끝!'
+    narrator.planning_state('Run.Complete')
+    narrator.think_once()
+    narrator.planning_state('Run.AwaitRequest')               # one loop later
+    run(narrator)
+    assert texts == [('state', '출발!'), ('state', '작업 끝!')]
+
+
 def test_late_state_sentence_dropped():
     clock = Clock()
     narrator, texts = make(Backend(), clock=clock, state_max_age_s=8.0)
@@ -306,16 +349,50 @@ def test_threads_fault_interrupts_playback():
     narrator, texts = make(Backend('주변이 넓은 경기장이에요.'), player=player, clock=clock, start=True)
     try:
         narrator.command('describe')
-        assert player.started.wait(2.0)
+        assert player.wait_playing(1)
         narrator.planning_state('Fault')
         clock.now += 2.0
         narrator.tick()
-        deadline = time.monotonic() + 3.0
-        while len(player.played) < 2 and time.monotonic() < deadline:
-            time.sleep(0.01)
+        assert player.wait_playing(2)                         # scene was cut, fault is playing
         player.stop()                                         # let the fault sentence finish
-        assert player.stops >= 1
         assert [kind for kind, _ in texts] == ['scene', 'fault']
+        assert narrator.backend.urgent == [False, True]       # fault speech: short timeout, no retry
+    finally:
+        narrator.close()
+
+
+def test_threads_fault_during_speech_synthesis():
+    """The scene sentence is still in TTS (no player process yet) when the fault comes: never played."""
+    clock = Clock()
+    player = Player(block=True)
+    backend = Backend('주변이 넓은 경기장이에요.', tts_delay=0.5)
+    narrator, texts = make(backend, player=player, clock=clock, start=True)
+    try:
+        narrator.command('describe')
+        deadline = time.monotonic() + 3.0
+        while not texts and time.monotonic() < deadline:        # on_text fires right before TTS
+            time.sleep(0.01)
+        narrator.planning_state('Fault')
+        clock.now += 2.0
+        narrator.tick()
+        assert player.wait_playing(1)
+        player.stop()
+        assert player.played == [b'RIFF' + '문제가 생겨서 멈췄어요.'.encode()]
+    finally:
+        narrator.close()
+
+
+def test_threads_stop_command_during_synthesis():
+    player = Player(block=True)
+    narrator, texts = make(Backend('길게 설명할게요.', tts_delay=0.5), player=player, start=True)
+    try:
+        narrator.command('describe')
+        deadline = time.monotonic() + 3.0
+        while not texts and time.monotonic() < deadline:
+            time.sleep(0.01)
+        narrator.command('stop')
+        time.sleep(1.0)
+        assert player.played == []
     finally:
         narrator.close()
 

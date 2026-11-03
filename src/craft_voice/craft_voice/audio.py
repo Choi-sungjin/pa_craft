@@ -7,6 +7,7 @@ Commands are argv lists; '{file}' is replaced by a temporary WAV path and
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import subprocess
 import tempfile
@@ -34,8 +35,8 @@ class CommandPlayer:
         with self._lock:
             return self._process is not None and self._process.poll() is None
 
-    def play(self, wav: bytes) -> bool:
-        """Blocks until playback ends. False if it failed or was stopped."""
+    def play(self, wav: bytes, cancelled=None) -> bool:
+        """Blocks until playback ends. False if it was stopped (or cancelled() before it began)."""
         handle, path = tempfile.mkstemp(prefix='craft_voice_', suffix='.wav')
         try:
             with os.fdopen(handle, 'wb') as out:
@@ -44,6 +45,10 @@ class CommandPlayer:
             if '{file}' not in self.command:
                 argv.append(path)
             with self._lock:
+                # Checked under the same lock stop() takes: a stop() that came before this point
+                # found no process, so the caller's cancel flag is what tells us not to start.
+                if cancelled is not None and cancelled():
+                    return False
                 self._stopped = False
                 try:
                     self._process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -89,6 +94,10 @@ class CommandTts:
         self.timeout_s = timeout_s
 
     def synthesize(self, text: str) -> bytes:
+        # Leading dashes would turn the sentence into an option of the TTS program (-w FILE ...).
+        text = re.sub(r'^[\s\-\u2010-\u2015]+', '', text)
+        if not text:
+            raise ValueError('nothing to say')
         argv = [text if arg == '{text}' else arg for arg in self.command]
         result = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, timeout=self.timeout_s)
         if result.returncode != 0 or not result.stdout:
