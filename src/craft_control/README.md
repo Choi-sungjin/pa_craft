@@ -78,9 +78,9 @@ These arm signs were inferred from the reported physical motions at the referenc
 pose and still require hardware validation with calibrated offsets. Arm firmware
 preserves raw motor signs; apply the URDF sign correction only in host YAML.
 Wheel signs are applied in firmware: left `+1`, right `-1`. Clock uses firmware
-`+1`, host `clock_direction: +1`, and host zero angle 165.5 degrees (slot 12, at the loading guide; 2026-11-03 after reassembly, was 210.0, 314.6).
+`+1`, host `clock_direction: +1`, and host zero angle 166.4 degrees (slot 12, at the loading guide; 2026-11-03 after reassembly, was 165.5, 210.0, 314.6).
 Gripper closes toward 229 degrees (5 degrees inside the 234-degree hard stop) from its
-94-degree open pose; its opposite closed endpoint is -53.1 degrees (limit -48.1).
+94-degree open pose (an open task may name a smaller opening: joints {gripper: motor rad}); its opposite closed endpoint is -53.1 degrees (limit -48.1).
 Grasp is detected by current (0.1 A for 0.1 s), not by reaching the close target. It uses open/close targets rather than an IK sign.
 
 Arm zero offsets and wrist pitch limits remain uncalibrated. Mapping confirmation

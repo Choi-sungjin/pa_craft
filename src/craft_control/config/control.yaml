@@ -91,14 +91,14 @@ control_master:
     # wheel_l ID 1 direction=+1, wheel_r ID 2 direction=-1; hardware Reverse OFF.
     # Both host wheel commands/feedback are positive for forward travel.
 
-    # 12-slot puck storage: slot 12 = 165.5 raw motor degrees, aligned with the loading guide
-    # (2026-11-03 after hardware reassembly; was 210.0, 314.6 before 2026-10-26).
+    # 12-slot puck storage: slot 12 = 166.4 raw motor degrees, aligned with the loading guide
+    # (2026-11-03 after hardware reassembly, rechecked; was 165.5, 210.0, 314.6 before 2026-10-26).
     # Positive motor rotation is CCW viewed from above.
     # Adjacent slots are 30 motor degrees (pi/6 rad); shortest rotation is chosen.
     # OpenCR must accept/report unwrapped motor radians (e.g. 12 -> 7 commands -5*pi/6).
     clock_slot_count: 12
     clock_slot_angle: 0.5235987755982988  # [motor rad/slot] 30 degrees
-    clock_zero_angle: 2.8885199120506155  # [motor rad] 165.5 degrees, slot 12 at the loading guide
+    clock_zero_angle: 2.9042278753185644  # [motor rad] 166.4 degrees, slot 12 at the loading guide
     # Firmware clock zero_tick stays 0: apply this offset here only.
     # Recheck physical alignment after a motor power cycle/multi-turn reset.
     clock_direction: 1.0  # +1: CCW motor rotation increases slot numbers; -1: reverse
@@ -159,7 +159,8 @@ control_master:
     # max/close 4.084070449666731 [rad].
     gripper_min_angle: -0.8395  # -48.1 degrees, 4 decimals rounded inward
     gripper_max_angle: 3.9968  # 229 degrees, 4 decimals rounded inward
-    gripper_open_angle: 1.6406  # 94 degrees
+    gripper_open_angle: 1.6406  # 94 degrees, full open. A GRIPPER open task may carry joints {gripper: rad} to open
+                                # less (sis1 clock release 147.9 deg, demo/puck_pick/execute.py)
     gripper_close_angle: 3.9968  # 229 degrees (= gripper_max_angle)
     # Confirmed raw + closes/grasps; raw - opens.
     gripper_mapping_confirmed: true

@@ -32,7 +32,7 @@ python3 demo/puck_pick/execute.py            # --dry-run: 단계만 출력
   - **`bro`**: 남은 단계를 한 번에 실행
   - **`q`**: 중단(복귀할지 물어봄)
   - **Ctrl+C**: 비상 정지
-- `sis1` 단계 (2026-11-03, 한 단계 = 한 동작): 이동 1(LM 퍽 라인 + shoulder 뺀 팔) → 이동 2(shoulder) → open gripper(내려가기 전) → descend → close gripper → ascend(접근 높이로 수직) → 적재 1(LM·elbow·wrist·roll 적재 자세, shoulder는 수직 **10° 전**까지, `LOAD_SHOULDER_SHORT`) → clock 12(완료 보고 받고 다음으로) → 적재 2(shoulder 마저) → open gripper(clock에 넣기) → 복귀 1(LM 그대로, shoulder 수직까지, 나머지 시작 자세) → 복귀 2(LM·shoulder 시작 자세)
+- `sis1` 단계 (2026-11-03, 한 단계 = 한 동작, 적재는 손으로 맞춘 자세, 복귀는 실측 자세): 이동 1(LM 퍽 라인 + shoulder 뺀 팔, 동시에 그리퍼 94° 끝까지 열기) → 이동 2(shoulder) → descend → close gripper → ascend → 적재 1(wrist_pitch 먼저 229.2: elbow와 같이 접으면 퍽 박스에 긁힘) → 적재 2(elbow 122.7 + LM −151.8(clock 12 가운데), shoulder는 ascend 그대로, roll은 잡은 각도 90.9 그대로) → clock 12(완료 보고 받고 다음으로) → 적재 3(shoulder 87.3) (적재 자세는 손으로 35초 잡은 bag final_1103_1432 평균) → open gripper(147.9°까지만, clock에 넣기. 잡기 전 열기는 94° 끝까지) → 복귀 1(tool_roll 0.0°) → 복귀 2(LM·shoulder·roll 그대로, elbow·wrist 시작 자세까지 절반) → 복귀 3(나머지 절반 + LM·shoulder·roll 시작 자세로)
   - shoulder 수직 = URDF 24.0°(적재 자세 23.95°)
   - control은 작업을 하나씩만 받음(실행 중이면 `busy` 거부, 새 작업이 clock 목표를 지움). clock을 팔과 동시에 돌리려면 control_master 수정 필요
   - `sis2`·`--lying`·복귀(go_home)는 예전 방식(elbow 먼저, shoulder 나중 `stage()`) 그대로

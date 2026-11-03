@@ -1,5 +1,7 @@
 #pragma once
 
+#include <optional>
+
 namespace craft_control
 {
 
@@ -11,7 +13,10 @@ public:
     double grasp_current_threshold_a, double grasp_current_debounce, double tolerance,
     double grasp_squeeze_angle = 0.0);
   // Store open/close after ControlMaster validation; configure() must have succeeded.
-  void set_target(bool close);
+  // open_angle: open only this far (e.g. a short release inside the clock) instead of the configured open angle.
+  void set_target(bool close, std::optional<double> open_angle = std::nullopt);
+  // A partial open angle must be finite and inside the gripper limits.
+  bool is_valid_open_angle(double angle) const;
   // Release the target and current-based grasp estimate; commands hold current feedback.
   void clear_target();
   double compute_command(double current_angle) const;

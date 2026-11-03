@@ -28,19 +28,30 @@ import plan  # URDF joint limits
 HERE = Path(__file__).resolve().parent
 ARM = ['slide_joint', 'shoulder_joint', 'elbow_joint', 'wrist_pitch_joint', 'tool_roll_joint']
 STATUS = {0: 'RUNNING', 1: 'SUCCEEDED', 2: 'FAILED', 3: 'STOPPING', 4: 'STOPPED', 5: 'REJECTED'}
-# Loading pose measured with DYNAMIXEL Wizard (2026-10-26) as raw motor degrees [90, 140, 333, 92], kept as URDF
-# joint degrees (shoulder, elbow, wrist_pitch, tool_roll) through the 2026-10-26 offsets so it survives re-zeroing
-# (2026-11-02: new offsets, wrist bracket replaced). LM on the old (LiDAR-centre) grasp line, LOAD_SLIDE.
+# Loading pose set by hand (2026-11-03 14:32, arm relaxed and held there 35 s, ~/bags/final_1103_1432 mean),
+# raw motor degrees through that day's offsets, kept as URDF joint degrees shoulder, elbow, wrist_pitch, tool_roll
+# so they survive re-zeroing:
+#   LM -151.7, shoulder 87.3 (+-0.9 by hand), elbow 122.7, wrist_pitch 229.2, tool_roll 88.6 (not used, below)
+# Load 1 folds wrist_pitch there, load 2 the elbow and LM (shoulder stays where the ascend left it), load 3 the shoulder.
+# The roll keeps its grasp angle until the drop, then turns 90 deg (back 1).
+# (Before: 14:29 bag 92.8 / 108.9 / 219.0; a 13:55 reading elbow 317.9 / shoulder 54.1, wrong; measured load 1
+# [48.85, 15.91, -115.5, -1.1] then load 2 [14.55, 18.71, -114.7, -2.2] + wrist 3 deg.)
 # Clock slot 12 sits at the loading guide.
-LOAD_URDF_DEG = [23.95, 14.61, -123.04, 2.0]
-LOAD_SLIDE = -0.00035  # [m] before LM_BACKLASH
+LOAD_URDF_DEG = [15.68, 4.85, -107.42, 0.0]  # tool_roll 0 = raw 90.9, as at the grasp
+# LM at the clock: raw -151.8 deg puts the puck in the middle of slot 12 (2026-11-03, with the hand-set loading pose;
+# was -99.9, before that 0.00296 = raw -28.6 measured with the arm). The commanded value is what it reaches here.
+LOAD_SLIDE = -0.01287  # [m] before LM_BACKLASH; commanded slide -0.01087 m = raw -151.8 deg
+# In the clock the jaws open only to this gripper motor angle (measured; full open 94 deg would hit the slot).
+RELEASE_GRIPPER_DEG = 147.9
+# After the drop: tool_roll to raw 0.0 deg (URDF, offset 90.9 deg); then elbow and wrist half way to the start pose
+# with the LM, shoulder and roll held, then everything to the start (2026-11-03: going straight to the start, the LM
+# ran while the elbow was still low and the arm jammed on the clock. Was wrist alone to raw 220.8, ~8 deg; then
+# elbow, wrist, roll all the way before the LM and shoulder).
+BACK_ROLL_URDF_DEG = -90.9
 LOAD_SLOT = 12
 # The LM stops ~2 mm short of the puck line (backlash): aim this much further toward the LM motor
 # (+slide; the motor end is about +0.063). Applies to every plan pose and to LOAD_SLIDE.
 LM_BACKLASH = 0.002  # [m]
-# Load 1 stops the shoulder this far before vertical (the arm leaning to the front): with it at vertical the held
-# puck passed the storage close while the elbow swung (2026-11-03).
-LOAD_SHOULDER_SHORT = math.radians(10.0)
 # Unload: the puck sits this far below where the loading pose lets it go.
 UNLOAD_DEPTH = 0.03  # [m] straight down from the loading pose
 # The plain swing to the loading pose ends by sliding in from behind ~2 cm over the loading height and the
@@ -208,47 +219,41 @@ def load_tail(lift, start):
     return s
 
 
-def shoulder_vertical():
-    """URDF shoulder angle with the upper arm (shoulder -> elbow axis) vertical: 24.0 deg, about the loading pose."""
-    o = plan.Chain(plan.URDF).origin('elbow_joint')
-    return math.atan2(o[1], o[2])
-
-
-def toward_vertical(s0, s1, short=0.0):
-    """Shoulder s0 -> s1, but stopping `short` [rad] before vertical on s0's side; it never moves away from that
-    point (it stays at s0 then)."""
-    v = shoulder_vertical()
-    stop = v + math.copysign(short, s0 - v)
-    return min(max(stop, min(s0, s1)), max(s0, s1))
-
-
 def steps_from_plan(current_slide=None, start=None):
-    """sis1, one move per step (2026-11-03): the shoulder carries the whole arm, so every swing runs the rest of the
-    arm with the shoulder held (going out) or only up to vertical (loading, coming back), then the shoulder alone.
-    start None (dry run): the shoulder of the first move is the current one (nan)."""
+    """sis1, one move per step: the shoulder carries the whole arm, so going out the rest of the arm moves with the
+    shoulder held, then the shoulder alone; loading and the way back follow the poses measured on 2026-11-03
+    (LOAD/BACK_*). start None (dry run): the shoulder of the first move is the current one (nan)."""
     # plan.py layout at 20 Hz: 0-19 hold above, 20-59 descent, 60-79 close, rest hold (no lift).
     pose = plan_pose()
     approach, grasp = pose(0), pose(59)
-    load = [LOAD_SLIDE + LM_BACKLASH] + load_pose()
+    slide = LOAD_SLIDE + LM_BACKLASH
+    load = [slide] + load_pose()
+    fold = approach[:3] + [load[3]] + approach[4:]  # wrist_pitch first: elbow and wrist together scraped the shelf
+    load1 = [slide, approach[1]] + load[2:]  # then the elbow and the LM; the shoulder stays at the ascend
     held = start[1] if start is not None else math.nan
-    s = [('move 1: LM to the puck line, arm but the shoulder above the puck', TaskCommand.MANIPULATOR,
-          [[approach[0], held] + approach[2:]]),
+    # The gripper opens fully during move 1: a sixth joint 'gripper' in a MANIPULATOR task (control_master).
+    full_open = yaml.safe_load(open(plan.CONTROL_YAML))['control_master']['ros__parameters']['gripper_open_angle']
+    s = [('move 1: LM to the puck line, arm but the shoulder above the puck, gripper full open',
+          TaskCommand.MANIPULATOR, [[approach[0], held] + approach[2:] + [full_open]]),
          ('move 2: shoulder above the puck', TaskCommand.MANIPULATOR, [approach]),
-         ('open gripper (before descending)', TaskCommand.GRIPPER, False),
          ('descend', TaskCommand.MANIPULATOR, [grasp]),
          ('close gripper (grasp by current >= 0.1 A)', TaskCommand.GRIPPER, True),
          ('ascend', TaskCommand.MANIPULATOR, [approach]),
-         (f'load 1: LM, elbow, wrist, roll to the loading pose, shoulder up to '
-          f'{math.degrees(LOAD_SHOULDER_SHORT):.0f} deg before vertical', TaskCommand.MANIPULATOR,
-          [[load[0], toward_vertical(approach[1], load[1], LOAD_SHOULDER_SHORT)] + load[2:]]),
-         # control runs one task at a time, so the clock goes between the two: load 2 starts once it reports done
+         ('load 1: wrist_pitch to the loading pose', TaskCommand.MANIPULATOR, [fold]),
+         ('load 2: elbow and LM to the loading pose (shoulder stays)', TaskCommand.MANIPULATOR, [load1]),
+         # control runs one task at a time, so the clock goes between the two: load 3 starts once it reports done
          (f'clock to slot {LOAD_SLOT} (loading guide)', TaskCommand.CLOCK, LOAD_SLOT),
-         ('load 2: shoulder to the loading pose', TaskCommand.MANIPULATOR, [load]),
-         ('open gripper (drop the puck into the clock)', TaskCommand.GRIPPER, False)]
+         ('load 3: shoulder to the loading pose', TaskCommand.MANIPULATOR, [load]),
+         (f'open gripper to {RELEASE_GRIPPER_DEG:g} deg (drop the puck into the clock)', TaskCommand.GRIPPER,
+          math.radians(RELEASE_GRIPPER_DEG))]
+    roll = load[:4] + [math.radians(BACK_ROLL_URDF_DEG)]
+    s.append(('back 1: tool_roll to raw 0 deg', TaskCommand.MANIPULATOR, [roll]))
     if start is not None:
-        s.append(('back 1: elbow, wrist, roll to the start, shoulder up to vertical, LM stays',
-                  TaskCommand.MANIPULATOR, [[load[0], toward_vertical(load[1], start[1])] + start[2:]]))
-        s.append(('back 2: LM and shoulder to the start', TaskCommand.MANIPULATOR, [start]))
+        half = [(a + b) / 2 for a, b in zip(roll[2:4], start[2:4])]
+        s.append(('back 2: elbow, wrist_pitch half way to the start pose (LM, shoulder, tool_roll stay)',
+                  TaskCommand.MANIPULATOR, [roll[:2] + half + roll[4:]]))
+        s.append(('back 3: LM, shoulder, elbow, wrist_pitch, tool_roll to the start pose', TaskCommand.MANIPULATOR,
+                  [start]))
     return s
 
 
@@ -337,10 +342,12 @@ class Runner(Node):
         c = TaskCommand()
         c.header.stamp = self.get_clock().now().to_msg()
         c.task_id, c.revision, c.operation, c.kind = self.task_id, 1, TaskCommand.EXECUTE, kind
-        if kind == TaskCommand.MANIPULATOR:
-            c.joints.name, c.joints.position = list(ARM), [float(v) for v in arg]
-        elif kind == TaskCommand.GRIPPER:
-            c.close = bool(arg)
+        if kind == TaskCommand.MANIPULATOR:  # a sixth value: open the gripper to that motor angle [rad] meanwhile
+            c.joints.name, c.joints.position = list(ARM) + ['gripper'] * (len(arg) - 5), [float(v) for v in arg]
+        elif kind == TaskCommand.GRIPPER:  # True close, False full open, a float: open to that motor angle [rad]
+            c.close = arg is True
+            if not isinstance(arg, bool):
+                c.joints.name, c.joints.position = ['gripper'], [float(arg)]
         elif kind == TaskCommand.CLOCK:
             c.clock_slot = int(arg)
         self.result = None
@@ -366,6 +373,8 @@ def describe(kind, arg):
         return [round(v, 4) for v in arg[-1]] + ([f'{len(arg)} moves'] if len(arg) > 1 else [])
     if kind == TaskCommand.CLOCK:
         return f'slot {arg}'
+    if not isinstance(arg, bool):
+        return f'open to {math.degrees(arg):.1f} deg'
     return 'close' if arg else 'open'
 
 
@@ -385,7 +394,7 @@ def run_steps(node, steps):
             status, reason = node.wait(node.send(kind, target))
             if status != 'SUCCEEDED':
                 break
-        extra = f'  grasped={node.grasped}' if kind == TaskCommand.GRIPPER and arg else ''
+        extra = f'  grasped={node.grasped}' if kind == TaskCommand.GRIPPER and arg is True else ''
         print(f'   -> {status} {reason}{extra}')
         if status != 'SUCCEEDED':
             print('step did not succeed')

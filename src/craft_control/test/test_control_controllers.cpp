@@ -229,6 +229,21 @@ TEST(GripperController, HoldsUntilTargetAndSelectsOpenCloseAngles)
   EXPECT_FALSE(controller.configure(2.0, 0.0, 0.5, 1.5, 0.0, 0.0, 0.05));
 }
 
+TEST(GripperController, PartialOpenStopsAtTheGivenAngle)
+{
+  craft_control::GripperController controller;
+  ASSERT_TRUE(controller.configure(0.0, 2.0, 0.5, 1.5, 0.0, 0.0, 0.05));
+  controller.set_target(false, 1.2);
+  EXPECT_DOUBLE_EQ(controller.compute_command(1.4), 1.2);
+  EXPECT_TRUE(controller.is_target_reached(1.22));
+  EXPECT_FALSE(controller.is_target_reached(0.5));
+  controller.set_target(false);
+  EXPECT_DOUBLE_EQ(controller.compute_command(1.2), 0.5);
+  EXPECT_TRUE(controller.is_valid_open_angle(1.2));
+  EXPECT_FALSE(controller.is_valid_open_angle(2.5));
+  EXPECT_FALSE(controller.is_valid_open_angle(std::nan("")));
+}
+
 TEST(GripperController, ClearingTargetHoldsAndResetsGraspDetection)
 {
   craft_control::GripperController controller;

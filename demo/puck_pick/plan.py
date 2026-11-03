@@ -44,8 +44,9 @@ ASSUME = dict(
     # On the 7 cm shelf the wrist_pitch lower limit binds as the TCP rises above the grasp.
     # The tool stays vertical where it can and otherwise leans its tip forward
     # (away from the robot) by the smallest angle that fits the limits.
-    grasp_coverage=0.035 / 0.06,  # fraction of the puck height the jaws cover from its top: 35 mm (2026-11-03;
-                           # was 0.5 = 30 mm planned, 20 mm real before hw_z_correction; 0.30 before)
+    grasp_coverage=0.052 / 0.06,  # fraction of the puck height the jaws cover from its top: 52 mm (2026-11-03,
+                           # for the hand-set loading pose; fingertips ~8 mm over the shelf on the robot; was 45,
+                           # 40, 35 mm, before that 0.5 = 30 mm planned / 20 mm real before hw_z_correction; 0.30)
     max_tilt_deg=30.0,     # tool tip lean toward -Y (robot front) allowed above the grasp
     limit_margin_deg=3.0,  # every joint stays this far inside its URDF limits (hardware sync is approximate)
     tool_roll=0.0,         # URDF tool_roll_joint; aligned (jaws close front-back)

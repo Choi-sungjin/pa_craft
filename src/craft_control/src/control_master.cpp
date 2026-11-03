@@ -503,16 +503,26 @@ private:
     publish_bool(lm_target_reached_pub_, false);
   }
 
-  bool validate_gripper_target()
+  // An open task may carry joints {gripper: motor rad} to open only that far (a short release); none = full open.
+  static std::optional<double> gripper_open_angle_of(const TaskCommand &c)
   {
-    // Open/close is always well-formed; configure() succeeded in the constructor.
-    return gripper_mapping_confirmed_;
+    if (c.joints.name.empty() && c.joints.position.empty()) return std::nullopt;
+    return c.joints.position.front();
   }
 
-  void set_gripper_target(bool close)
+  bool validate_gripper_target(const TaskCommand &c)
+  {
+    // Open/close is always well-formed; configure() succeeded in the constructor.
+    if (!gripper_mapping_confirmed_) return false;
+    if (c.joints.name.empty() && c.joints.position.empty()) return true;
+    return !c.close && c.joints.name.size() == 1 && c.joints.position.size() == 1 &&
+      c.joints.name.front() == "gripper" && gripper_controller_.is_valid_open_angle(c.joints.position.front());
+  }
+
+  void set_gripper_target(bool close, std::optional<double> open_angle)
   {
     // Store the validated target; angle selection and clamping happen in control_loop().
-    gripper_controller_.set_target(close);
+    gripper_controller_.set_target(close, open_angle);
     publish_bool(gripper_target_reached_pub_, false);
   }
 
@@ -775,13 +785,19 @@ private:
           (update ? c.speed >= 0 : c.speed > 0);
         participants[2] = true; break;
       case TaskCommand::MANIPULATOR:
-        if (c.joints.name.size() == 5 && c.joints.position.size() == 5) {
-          arm.name.assign(c.joints.name.begin()+1, c.joints.name.end());
-          arm.position.assign(c.joints.position.begin()+1, c.joints.position.end());
-          valid = validate_arm_target(arm) && validate_lm_target(c.joints.name[0], c.joints.position[0]);
+        // LM + four arm joints; an optional sixth joint "gripper" [motor rad] opens the gripper to that angle in
+        // the same task (it then also waits for the gripper).
+        if (c.joints.name.size() == c.joints.position.size() &&
+            (c.joints.name.size() == 5 || (c.joints.name.size() == 6 && c.joints.name[5] == "gripper"))) {
+          arm.name.assign(c.joints.name.begin()+1, c.joints.name.begin()+5);
+          arm.position.assign(c.joints.position.begin()+1, c.joints.position.begin()+5);
+          valid = validate_arm_target(arm) && validate_lm_target(c.joints.name[0], c.joints.position[0]) &&
+            (c.joints.name.size() == 5 ||
+             (gripper_mapping_confirmed_ && gripper_controller_.is_valid_open_angle(c.joints.position[5])));
+          participants[4] = c.joints.name.size() == 6;
         }
         participants[0] = participants[1] = true; break;
-      case TaskCommand::GRIPPER: valid = validate_gripper_target(); participants[4] = true; break;
+      case TaskCommand::GRIPPER: valid = validate_gripper_target(c); participants[4] = true; break;
       case TaskCommand::CLOCK: valid = validate_clock_target(c.clock_slot); participants[3] = true; break;
       case TaskCommand::WAIT: valid = std::isfinite(c.duration_s) && c.duration_s >= 0; break;
     }
@@ -803,8 +819,11 @@ private:
     } else task_.result.revision = c.revision;
     switch (c.kind) {
       case TaskCommand::NAVIGATE: set_path_target(c.path, c.require_goal_heading); set_wheel_target(c.speed); break;
-      case TaskCommand::MANIPULATOR: set_arm_target(arm); set_lm_target(c.joints.position[0]); break;
-      case TaskCommand::GRIPPER: set_gripper_target(c.close); break;
+      case TaskCommand::MANIPULATOR:
+        set_arm_target(arm); set_lm_target(c.joints.position[0]);
+        if (c.joints.position.size() == 6) set_gripper_target(false, c.joints.position[5]);
+        break;
+      case TaskCommand::GRIPPER: set_gripper_target(c.close, gripper_open_angle_of(c)); break;
       case TaskCommand::CLOCK: set_clock_target(c.clock_slot); break;
       case TaskCommand::WAIT: wait_duration_ = c.duration_s; break;
     }

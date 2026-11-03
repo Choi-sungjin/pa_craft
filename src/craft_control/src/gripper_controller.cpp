@@ -40,15 +40,20 @@ bool GripperController::configure(
 }
 
 // set gripper open/close target; reset grasp detection when the direction changes
-void GripperController::set_target(bool close)
+void GripperController::set_target(bool close, std::optional<double> open_angle)
 {
   if (!has_target_ || closing_ != close) {
     overcurrent_time_ = 0.0;
     grasped_ = false;
   }
-  target_angle_ = close ? close_angle_ : open_angle_;
+  target_angle_ = close ? close_angle_ : open_angle.value_or(open_angle_);
   closing_ = close;
   has_target_ = true;
+}
+
+bool GripperController::is_valid_open_angle(double angle) const
+{
+  return std::isfinite(angle) && angle >= min_angle_ && angle <= max_angle_;
 }
 
 void GripperController::clear_target()

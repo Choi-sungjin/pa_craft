@@ -1,14 +1,31 @@
 #!/usr/bin/env bash
 # Throwaway demo: plan the puck pick and play it in RViz (no hardware). Delete with: rm -rf ~/craft/demo
 # show.sh --lying: puck on its side, gripped on its long axis (plan_lying.yaml)
+# show.sh --sis1:  the whole sis1 run (pick, load into clock slot 12, back), from execute.py's steps
 set -e
 cd "$(dirname "$(readlink -f "$0")")"
 WS=$(cd ../.. && pwd)
 source /opt/ros/lyrical/setup.bash
-/usr/bin/python3 -I plan.py "$@"
-PLAN=plan.yaml; [ "$1" = --lying ] && PLAN=plan_lying.yaml
+# show.sh --sis1: the whole sis1 step list (execute.py) as one loop, step name on top (sis1_sim.py)
+if [ "$1" = --sis1 ]; then
+  /usr/bin/python3 -I plan.py
+  (source "$WS/install/setup.bash" && /usr/bin/python3 sis1_sim.py)
+  PLAN=sis1_sim.yaml
+else
+  /usr/bin/python3 -I plan.py "$@"
+  PLAN=plan.yaml; [ "$1" = --lying ] && PLAN=plan_lying.yaml
+fi
 URDF=$WS/src/craft_planning/v75_ws/src/v75_robot_description/urdf/v75_robot.urdf
-/usr/bin/python3 -c "import yaml,sys;print(yaml.safe_dump({'/**':{'ros__parameters':{'robot_description':open(sys.argv[1]).read()}}}))" "$URDF" > /tmp/puck_demo_rsp.yaml
+# Preview only: drop the camera bracket on the tool (tool_roll_link_vis_orange/yellow/green, out to the side).
+/usr/bin/python3 - "$URDF" > /tmp/puck_demo_rsp.yaml <<'PY'
+import re, sys, yaml
+u = open(sys.argv[1]).read()
+for part in ('orange', 'yellow', 'green'):
+    n = f'tool_roll_link_vis_{part}'
+    u = re.sub(rf'\s*<link name="{n}">.*?</link>', '', u, flags=re.S)
+    u = re.sub(rf'\s*<joint name="{n}_joint"[^>]*>.*?</joint>', '', u, flags=re.S)
+print(yaml.safe_dump({'/**': {'ros__parameters': {'robot_description': u}}}))
+PY
 source "$WS/src/craft_planning/v75_ws/install/setup.bash"   # package:// meshes for RViz
 # Isolate the preview: another PC on the LAN (domain 0) publishes its own /robot_description.
 # Set after every 'source' (ros_environment's hook resets the discovery range to SUBNET).

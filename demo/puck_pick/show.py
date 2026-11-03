@@ -29,12 +29,12 @@ class Show(Node):
         self.i = 0
         self.create_timer(0.05, self.tick)  # 20 Hz, same as plan.py
 
-    def marker(self, mid, kind, xyz, scale, rgba, text=''):
+    def marker(self, mid, kind, xyz, scale, rgba, text='', quat=(0.0, 0.0, 0.0, 1.0)):
         m = Marker()
         m.header.frame_id = 'base_link'; m.header.stamp = self.get_clock().now().to_msg()
         m.ns, m.id, m.type, m.action = 'puck_pick', mid, kind, Marker.ADD
         m.pose.position.x, m.pose.position.y, m.pose.position.z = map(float, xyz)
-        m.pose.orientation.w = 1.0
+        m.pose.orientation.x, m.pose.orientation.y, m.pose.orientation.z, m.pose.orientation.w = map(float, quat)
         m.scale.x, m.scale.y, m.scale.z = map(float, scale)
         m.color.r, m.color.g, m.color.b, m.color.a = map(float, rgba)
         m.text = text
@@ -56,14 +56,16 @@ class Show(Node):
         sh = a['shelf_height']; sx, sy = a['shelf_size']
         self.mk.publish(MarkerArray(markers=[
             self.marker(5, Marker.CUBE, (shelf[0], shelf[1], fz + sh / 2), (sx, sy, sh), (0.55, 0.35, 0.15, 0.6)),
-            self.marker(0, Marker.CUBE, f['puck'], a['puck_size'], (0.9, 0.1, 0.1, 0.9)),
+            self.marker(0, Marker.CUBE, f['puck'], a['puck_size'], (0.9, 0.1, 0.1, 0.9),
+                        quat=f.get('puck_quat', (0.0, 0.0, 0.0, 1.0))),  # sis1_sim.yaml: turns with the jaws
             self.marker(1, Marker.CYLINDER, lidar, (0.04, 0.04, lz1 - lz0), (0.1, 0.1, 0.1, 0.35)),
             self.marker(2, Marker.CUBE, (cx, cy, fz - 0.001), (0.6, 0.8, 0.002), (0.6, 0.6, 0.6, 0.35)),
             self.marker(3, Marker.TEXT_VIEW_FACING, (lidar[0], lidar[1], lidar[2] + 0.05),
                         (0, 0, 0.03), (0, 0, 0, 1), 'front LiDAR (CAD)'),
             self.marker(4, Marker.TEXT_VIEW_FACING, (ahead[0], ahead[1], fz + sh + 0.10),
                         (0, 0, 0.03), (0.6, 0, 0, 1), f"puck +{a['puck_ahead']*100:.0f} cm"),
-        ]))
+        ] + ([self.marker(6, Marker.TEXT_VIEW_FACING, (lidar[0], lidar[1], 0.55), (0, 0, 0.035), (0, 0, 0.6, 1),
+                          f['label'])] if 'label' in f else [])))  # sis1_sim.yaml: the running step
 
 
 def main():
