@@ -24,7 +24,7 @@ import sys
 import threading
 import time
 
-from .audio import CommandPlayer, CommandTts, pcm_to_wav, split_command, wav_seconds
+from .audio import CommandPlayer, CommandTts, StreamPlayer, pcm_to_wav, split_command, wav_seconds
 from .narrator import Narrator, NarratorConfig
 from .robot_state import StateTracker
 
@@ -60,6 +60,35 @@ class TimedPlayer:
             self.inner.stop()
 
 
+class TimedStreamPlayer:
+    """Wraps a stream player (or none) and notes when the first audio is handed over (open)."""
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.started = []
+        self.event = threading.Event()
+        self.bytes = 0
+
+    def open(self, rate, cancelled=None):
+        self.started.append((time.monotonic(), 0.0))
+        self.event.set()
+        self.bytes = 0
+        return self.inner.open(rate, cancelled) if self.inner else True
+
+    def write(self, chunk):
+        self.bytes += len(chunk)
+        return self.inner.write(chunk) if self.inner else True
+
+    def finish(self):
+        if self.started:
+            self.started[-1] = (self.started[-1][0], self.bytes / 48000.0)  # 24 kHz 16-bit mono seconds
+        return self.inner.finish() if self.inner else True
+
+    def stop(self):
+        if self.inner:
+            self.inner.stop()
+
+
 def summary(name: str, values: list[float]) -> str:
     if not values:
         return f'{name:>10}: -'
@@ -75,6 +104,9 @@ def main(argv=None) -> int:
                    help='auto: OpenAI if OPENAI_API_KEY is set, else --fallback-tts')
     p.add_argument('--fallback-tts', default='', help='e.g. "espeak-ng -v ko --stdout -- {text}"')
     p.add_argument('--player', default='aplay -q {file}', help="command with {file}; 'none' to skip playback")
+    p.add_argument('--stream', action='store_true',
+                   help='OpenAI speech played while it arrives (to_play = first audio)')
+    p.add_argument('--stream-player', default='aplay -q -t raw -f S16_LE -r {rate} -c 1 -')
     p.add_argument('--gpt', action='store_true', help='also time GPT (needs OPENAI_API_KEY)')
     p.add_argument('--camera', default='', help='picture for --gpt (none = text only)')
     p.add_argument('--model', default='gpt-5.4-mini,gpt-6-luna,gpt-5.5')
@@ -115,11 +147,16 @@ def main(argv=None) -> int:
     tts = {'openai': backend, 'fallback': fallback, 'instant': Instant()}[engine]
 
     player = TimedPlayer(CommandPlayer(split_command(args.player)) if args.player != 'none' else None)
+    stream = None
+    if args.stream and engine == 'openai':
+        stream = TimedStreamPlayer(StreamPlayer(split_command(args.stream_player)) if args.player != 'none' else None)
+        player = stream  # what to_play times: the first audio handed to the stream player
     # The narrator speaks with `backend` first; give it exactly the engine under test.
     narrator = Narrator(NarratorConfig(state_mode='template', narrate_period_s=0, use_image=False),
                         StateTracker(announce=()), backend=tts if engine != 'fallback' else None,
-                        player=player, fallback_tts=fallback)
-    print(f'TTS engine: {engine}' + (f' ({args.tts_model}/{args.voice})' if engine == 'openai' else '')
+                        player=player if stream is None else None, fallback_tts=fallback, stream_player=stream)
+    print(f'TTS engine: {engine}' + (' streamed' if stream else '')
+          + (f' ({args.tts_model}/{args.voice})' if engine == 'openai' else '')
           + f', player: {args.player}')
     tts_times, to_play, audio = [], [], []
     try:
@@ -135,9 +172,9 @@ def main(argv=None) -> int:
                 print('player never started', file=sys.stderr)
                 return 1
             to_play.append(player.started[-1][0] - started)
-            audio.append(wav_seconds(wav))
             while narrator.status()['speaking']:
                 time.sleep(0.01)
+            audio.append(wav_seconds(wav))
             print(f'run {i + 1}: tts {tts_times[-1]:.2f} s, sentence -> player start {to_play[-1]:.2f} s, '
                   f'audio {audio[-1]:.1f} s', flush=True)
         gpt_times, event_to_play = [], []
@@ -243,8 +280,10 @@ def time_gpt(args, backend, player):
     files = picture_files(args.camera)
     camera = Camera(files[0] if files else 'none')
     tracker = StateTracker(cooldown_s=0.0)
+    stream = isinstance(player, TimedStreamPlayer)
     narrator = Narrator(NarratorConfig(state_mode='gpt', narrate_period_s=0, use_image=bool(files)),
-                        tracker, backend=backend, player=player, frame_provider=camera.frame)
+                        tracker, backend=backend, player=None if stream else player, frame_provider=camera.frame,
+                        stream_player=player if stream else None)
     gpt_times, event_to_play = [], []
     try:
         labels = ['Ready', 'Run.Execute', 'Run.Complete']

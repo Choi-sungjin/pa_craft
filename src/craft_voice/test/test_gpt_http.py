@@ -305,3 +305,42 @@ def test_proxy_auth_mode_sends_no_authorization_header(monkeypatch):
     server.httpd.shutdown()
     monkeypatch.delenv('OPENAI_AUTH')
     assert not openai_auth_available()
+
+
+def test_stream_speech_yields_audio_as_it_arrives(monkeypatch):
+    """The real SDK streaming path against a server that sends the PCM in three slow pieces."""
+    import time as clock
+    monkeypatch.setenv('OPENAI_API_KEY', 'test-key-not-real')
+    seen = []
+
+    class Slow(BaseHTTPRequestHandler):
+        protocol_version = 'HTTP/1.1'
+
+        def do_POST(self):
+            seen.append(json.loads(self.rfile.read(int(self.headers['Content-Length']))))
+            self.send_response(200)
+            self.send_header('Content-Type', 'audio/pcm')
+            self.send_header('Transfer-Encoding', 'chunked')
+            self.end_headers()
+            for piece in (b'\x01\x00' * 1000, b'\x02\x00' * 1000, b'\x03\x00' * 1000):
+                self.wfile.write(f'{len(piece):x}\r\n'.encode() + piece + b'\r\n')
+                self.wfile.flush()
+                clock.sleep(0.3)
+            self.wfile.write(b'0\r\n\r\n')
+
+        def log_message(self, *args):
+            pass
+
+    httpd = ThreadingHTTPServer(('127.0.0.1', 0), Slow)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    b = OpenAIBackend(model='m', tts_model='gpt-4o-mini-tts', voice='coral', tts_instructions='밝게',
+                      timeout_s=5.0, base_url=f'http://127.0.0.1:{httpd.server_address[1]}/v1')
+    started = clock.monotonic()
+    arrivals, data = [], b''
+    for chunk in b.stream_speech('준비 완료.', chunk_size=512):
+        arrivals.append(clock.monotonic() - started)
+        data += chunk
+    httpd.shutdown()
+    assert data == b'\x01\x00' * 1000 + b'\x02\x00' * 1000 + b'\x03\x00' * 1000
+    assert arrivals[0] < 0.25 and arrivals[-1] > 0.55             # first audio long before the end
+    assert seen[0]['response_format'] == 'pcm' and seen[0]['instructions'] == '밝게'

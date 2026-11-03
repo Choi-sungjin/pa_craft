@@ -26,7 +26,7 @@ import time
 
 import numpy as np
 
-from .audio import CommandPlayer, CommandTts, WinsoundPlayer, split_command
+from .audio import CommandPlayer, CommandTts, StreamPlayer, WinsoundPlayer, split_command
 from .narrator import Narrator, NarratorConfig
 from .robot_state import StateTracker, parse_list, parse_mapping
 from .sim import DEFAULT_SCENARIO, SimStateMachine, parse_item, parse_scenario
@@ -124,6 +124,18 @@ def default_player(command: str):
     return None
 
 
+def default_stream_player(args):
+    """Stream OpenAI speech into aplay on Linux (auto); elsewhere whole WAVs as before."""
+    if args.stream == 'off' or args.player == 'none':
+        return None
+    command = args.stream_player or ('aplay -q -t raw -f S16_LE -r {rate} -c 1 -' if shutil.which('aplay') else '')
+    if not command:
+        if args.stream == 'on':
+            log.warning('--stream on but no stream player (aplay not found, no --stream-player)')
+        return None
+    return StreamPlayer(split_command(command))
+
+
 def build(args) -> tuple[Narrator, SimStateMachine, Camera]:
     backend = None
     from .gpt import openai_auth_available
@@ -143,6 +155,7 @@ def build(args) -> tuple[Narrator, SimStateMachine, Camera]:
                             persona=args.persona, use_image=args.camera.lower() not in ('', 'none'),
                             camera_description='노트북 카메라 (로봇 대신 시험 중)')
     narrator = Narrator(config, tracker, backend=backend, player=default_player(args.player),
+                        stream_player=default_stream_player(args) if backend else None,
                         frame_provider=camera.frame, fallback_tts=CommandTts(fallback) if fallback else None,
                         on_text=lambda kind, text: print(f'\n>> [{kind}] {text}', flush=True))
     return narrator, SimStateMachine(parse_scenario(args.scenario), loop=not args.once), camera
@@ -243,6 +256,10 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument('--timeout', type=float, default=15.0)
     p.add_argument('--base-url', default='', help='OpenAI-compatible endpoint ("" = api.openai.com)')
     p.add_argument('--player', default='auto', help="'auto', 'none', or a command with {file}")
+    p.add_argument('--stream', choices=['auto', 'on', 'off'], default='auto',
+                   help='play OpenAI speech while it arrives (auto: Linux with aplay)')
+    p.add_argument('--stream-player', default='',
+                   help='raw PCM stdin command with {rate}, e.g. "aplay -q -t raw -f S16_LE -r {rate} -c 1 -"')
     p.add_argument('--fallback-tts', default='', help='offline speech, e.g. "espeak-ng -v ko --stdout -- {text}"')
     p.add_argument('--seconds', type=float, default=0.0, help='stop after N seconds (0 = until /quit)')
     p.add_argument('--keep-running-without-input', action='store_true',

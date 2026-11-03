@@ -898,3 +898,122 @@ def test_refreshed_answer_tells_the_situation_at_the_moment_it_is_said():
     narrator.planning_state('Run.Stopping')                   # changes again before the refresh is said
     run(narrator)
     assert texts == [('status', '멈추는 중이에요.')]
+
+
+# ---- streamed speech (B) ---------------------------------------------------------------------------------
+class StreamingBackend(Backend):
+    def __init__(self, chunks=(b'aa', b'bb', b'cc'), first_delay=0.0, chunk_delay=0.0, fail=None, **kwargs):
+        super().__init__(**kwargs)
+        self.chunks, self.first_delay, self.chunk_delay, self.fail = chunks, first_delay, chunk_delay, fail
+        self.streams = []
+        self.sample_rate = 24000
+
+    def stream_speech(self, text):
+        self.streams.append(text)
+        time.sleep(self.first_delay)
+        if self.fail:
+            raise self.fail
+        for i, chunk in enumerate(self.chunks):
+            if i:
+                time.sleep(self.chunk_delay)
+            yield chunk
+
+
+class FakeStreamPlayer:
+    def __init__(self, block=False):
+        self.opened, self.data, self.finished, self.stops, self.block = [], [], 0, 0, block
+        self._stop = threading.Event()
+
+    def open(self, rate, cancelled=None):
+        if cancelled is not None and cancelled():
+            return False
+        self._stop.clear()
+        self.opened.append(rate)
+        return True
+
+    def write(self, chunk):
+        if self._stop.is_set():
+            return False
+        self.data.append(chunk)
+        return True
+
+    def finish(self):
+        self.finished += 1
+        if self.block:
+            return not self._stop.wait(5.0)
+        return not self._stop.is_set()
+
+    def stop(self):
+        self.stops += 1
+        self._stop.set()
+
+
+def make_streaming(backend, stream, **config):
+    texts = []
+    narrator = Narrator(NarratorConfig(**config), StateTracker(), backend=backend, player=Player(),
+                        stream_player=stream, on_text=lambda kind, text: texts.append((kind, text)),
+                        clock=Clock(), start=False)
+    return narrator, texts
+
+
+def test_speech_is_streamed_in_order():
+    backend, stream = StreamingBackend(reply='출발할게요.'), FakeStreamPlayer()
+    narrator, texts = make_streaming(backend, stream)
+    narrator.planning_state('Run.Execute')
+    run(narrator)
+    assert texts == [('state', '출발할게요.')] and backend.streams == ['출발할게요.']
+    assert stream.opened == [24000] and stream.data == [b'aa', b'bb', b'cc'] and stream.finished == 1
+    assert narrator.player.played == [] and narrator.stats['spoken'] == 1   # the WAV player was not used
+
+
+@pytest.mark.parametrize('case', ['timeout', 'error'])
+def test_stream_without_first_audio_falls_back(case):
+    backend = StreamingBackend(first_delay=1.0) if case == 'timeout' else \
+        StreamingBackend(fail=ConnectionError('offline'))
+    stream = FakeStreamPlayer()
+    narrator, texts = make_streaming(backend, stream, tts_deadline_s=0.2, state_mode='template')
+    narrator.fallback_tts = type('F', (), {'synthesize': lambda self, text: b'FALLBACK'})()
+    narrator.planning_state('Ready')
+    run(narrator)
+    assert texts == [('state', '준비됐어요. 출발 신호를 기다리고 있어요.')]
+    assert narrator.player.played == [b'FALLBACK'] and stream.opened == [] and narrator.stats['tts_errors'] == 1
+
+
+def test_state_change_before_first_audio_drops_the_sentence():
+    class Moving(StreamingBackend):
+        def stream_speech(self, text):
+            narrator.planning_state('Run.Compute')            # the robot moved on while TTS started
+            yield from super().stream_speech(text)
+
+    stream = FakeStreamPlayer()
+    narrator, texts = make_streaming(Moving(), stream, state_mode='template')
+    narrator.planning_state('Run.Stopping')
+    run(narrator)
+    assert texts == [] and stream.opened == []
+
+
+def test_fault_cuts_a_streaming_sentence_and_is_not_streamed():
+    clock = Clock()
+    backend = StreamingBackend(chunks=(b'a',) * 50, chunk_delay=0.05)
+    stream = FakeStreamPlayer(block=True)
+    texts = []
+    narrator = Narrator(NarratorConfig(state_mode='template'), StateTracker(), backend=backend, player=Player(),
+                        stream_player=stream, on_text=lambda kind, text: texts.append((kind, text)),
+                        clock=clock, start=True)
+    try:
+        narrator.planning_state('Run.Execute')
+        deadline = time.monotonic() + 3
+        while not stream.data and time.monotonic() < deadline:
+            time.sleep(0.01)
+        narrator.planning_state('Fault')
+        clock.now += 2.0
+        narrator.tick()
+        deadline = time.monotonic() + 3
+        while not narrator.player.played and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert stream.stops >= 1 and len(stream.data) < 50          # cut off mid-sentence
+        assert [kind for kind, _ in texts] == ['state', 'fault']
+        assert narrator.player.played and narrator.player.played[-1].startswith(b'RIFF')  # fault: whole WAV
+        assert backend.urgent and backend.urgent[-1] is True
+    finally:
+        narrator.close()

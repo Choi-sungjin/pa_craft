@@ -121,3 +121,28 @@ def test_split_command_windows_quotes_inside_an_argument():
     assert split_command('espeak-ng --voice="Microsoft Heami" -- {text}', windows=True) == \
         ['espeak-ng', '--voice=Microsoft Heami', '--', '{text}']
     assert split_command('a "" b', windows=True) == ['a', '', 'b']
+
+
+# ---- StreamPlayer (raw PCM on stdin) --------------------------------------------------------------------
+def test_stream_player_feeds_stdin_in_order_with_rate(tmp_path):
+    from craft_voice.audio import StreamPlayer
+    out = tmp_path / 'pcm.bin'
+    code = f'import sys; open({str(out)!r}, "wb").write(sys.argv[1].encode() + b"|" + sys.stdin.buffer.read())'
+    player = StreamPlayer([PY, '-c', code, '{rate}'])
+    assert player.open(24000)
+    for chunk in (b'ab', b'cd', b'ef'):
+        assert player.write(chunk)
+    assert player.finish() is True
+    assert out.read_bytes() == b'24000|abcdef'
+
+
+def test_stream_player_stop_and_cancel():
+    from craft_voice.audio import StreamPlayer
+    player = StreamPlayer([PY, '-c', 'import sys,time; sys.stdin.buffer.read(); time.sleep(10)'])
+    assert player.open(24000, cancelled=lambda: True) is False and not player.playing
+    assert player.open(24000)
+    player.write(b'xx')
+    started = time.monotonic()
+    threading.Timer(0.3, player.stop).start()
+    assert player.finish() is False and time.monotonic() - started < 3
+    assert player.write(b'more') is False

@@ -140,6 +140,78 @@ class CommandPlayer:
                 self._process.terminate()
 
 
+class StreamPlayer:
+    """Plays raw 16-bit mono PCM fed chunk by chunk to a command's stdin, e.g.
+    `aplay -q -t raw -f S16_LE -r {rate} -c 1 -` (or `paplay --raw --format=s16le --rate={rate} --channels=1`).
+    Same stop/cancel contract as CommandPlayer; writing never holds the lock, so stop() always gets through.
+    """
+
+    def __init__(self, command: list[str], timeout_s: float = 120.0):
+        if not command:
+            raise ValueError('stream player command is empty')
+        self.command = list(command)
+        self.timeout_s = timeout_s
+        self._lock = threading.Lock()
+        self._process: subprocess.Popen | None = None
+        self._stopped = False
+
+    @property
+    def playing(self) -> bool:
+        with self._lock:
+            return self._process is not None and self._process.poll() is None
+
+    def open(self, rate: int, cancelled=None) -> bool:
+        argv = [arg.replace('{rate}', str(int(rate))) for arg in self.command]
+        with self._lock:
+            if cancelled is not None and cancelled():
+                return False
+            self._stopped = False
+            try:
+                self._process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                                 stderr=subprocess.DEVNULL)
+            except OSError as error:
+                raise RuntimeError(f'cannot run stream player {argv[0]!r}: {error}') from error
+        return True
+
+    def write(self, chunk: bytes) -> bool:
+        """False once the player stopped or died (then the rest is not sent)."""
+        process = self._process
+        if process is None or self._stopped:
+            return False
+        try:
+            process.stdin.write(chunk)
+            return True
+        except (BrokenPipeError, OSError, ValueError):
+            return False
+
+    def finish(self) -> bool:
+        """End of audio: wait until it has been played. False if it was stopped or failed."""
+        process = self._process
+        if process is None:
+            return False
+        try:
+            try:
+                process.stdin.close()
+            except (BrokenPipeError, OSError):
+                pass
+            try:
+                process.wait(timeout=self.timeout_s)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        finally:
+            with self._lock:
+                self._process = None
+                stopped = self._stopped
+        return not stopped and process.returncode == 0
+
+    def stop(self):
+        with self._lock:
+            if self._process is not None and self._process.poll() is None:
+                self._stopped = True
+                self._process.terminate()
+
+
 class CommandTts:
     """Offline fallback, e.g. `espeak-ng -v ko --stdout {text}`: the command prints WAV to stdout."""
 

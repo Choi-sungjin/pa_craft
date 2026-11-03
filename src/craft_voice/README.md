@@ -112,6 +112,7 @@ ros2 topic echo /voice/utterance                                              # 
 | `image_detail` | `low` | `low`/`high`/`auto`/`original`. 이미지는 긴 변 `image_max_side`(512) px로 줄여 보냄 |
 | `tts_model` / `tts_voice` | `gpt-4o-mini-tts` / `coral` | `tts_instructions`로 말투 지정(tts-1 계열은 무시) |
 | `player_command` | `aplay -q {file}` | `paplay {file}`, `aplay -q -D plughw:1,0 {file}` 등 |
+| `tts_stream` / `stream_player_command` | `true` / `aplay -q -t raw -f S16_LE -r {rate} -c 1 -` | OpenAI 음성을 받는 대로 재생(첫 소리 약 0.5 s 빨라짐, 실측) |
 | `fallback_tts_command` | `""` | 오프라인 음성, 예: `espeak-ng -v ko --stdout -- {text}`(stdout으로 WAV). `--`를 꼭 넣고, 문장 앞의 `-`는 지운다 |
 | `fault_tts_timeout_s` | `4.0` | Fault 문장의 OpenAI 음성 대기 시간(재시도 없음). 넘으면 fallback |
 | `gpt_state_deadline_s` / `tts_deadline_s` | `6.0` / `8.0` | 상태 문장 GPT 대기 → 템플릿, 일반 음성 OpenAI 대기 → fallback |
@@ -209,6 +210,18 @@ Jetson·경기장 Wi-Fi에서는 네트워크가 달라 다시 재야 한다.
 같은 조건에서 reasoning low는 none보다 0.3~0.5 s 느렸다. 기본값(gpt-5.4-mini, none)으로 상태 변화 → 플레이어 시작
 (GPT 문장 + 사진 + OpenAI TTS) **2.89 s** (2.38~3.15, n=5), 그중 TTS(문장 → 플레이어 시작) 1.25 s.
 같은 측정을 노트북(이전 기본값 gpt-5.5·low, 사진 없음)에서 했을 때는 3.67 s였다(네트워크가 달라 직접 비교는 참고만).
+
+**TTS 스트리밍**(`tts_stream: true`, 기본): OpenAI 음성을 다 받기 전에, 첫 조각이 오는 대로 `stream_player_command`
+(aplay raw stdin)로 흘려 보낸다. 같은 날 같은 환경 실측(중앙값, n=6):
+
+| 구간 | 전체 WAV를 받고 재생 | 스트리밍 |
+| --- | --- | --- |
+| 문장 → 첫 소리(플레이어에 첫 오디오) | 1.38 s (0.72~2.14) | **0.89 s** (0.53~1.18) |
+| 상태 변화 → 첫 소리 (GPT + 사진 + TTS) | 2.89 s (n=5) | **1.88 s** (1.54~2.37) |
+
+음성은 말하는 속도보다 빨리 도착해서(약 5 s 분량이 1.4 s 안에) 재생 중 끊기지 않는다. 첫 조각이 `tts_deadline_s` 안에
+안 오거나 에러면 fallback TTS로, 첫 조각이 왔을 때 이미 상태가 바뀌었으면 말하지 않는다. 멈춤(Fault) 문장은 지금처럼
+전체 WAV(짧은 마감 + fallback)로 말한다. macOS/Windows처럼 stdin 재생기가 없으면 `tts_stream: false`(데모는 자동).
 
 ## 테스트
 

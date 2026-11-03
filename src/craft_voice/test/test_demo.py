@@ -73,7 +73,7 @@ def test_demo_runs_end_to_end(tmp_path):
          '--scenario', 'Idle:0.5, Ready:2.5, Run.PrepareTask@approach:0.3, Run.Execute@approach:2, '
                        'Fault@approach!Run.Execute: execution timeout:4',
          '--base-url', server.url, '--player', f'{sys.executable} -c "{copy}" {{file}}',
-         '--keep-running-without-input'],
+         '--stream', 'off', '--keep-running-without-input'],
         input='앞에 뭐 있어?\n/describe\n/nonsense\n', capture_output=True, text=True, timeout=60, env=env)
     server.httpd.shutdown()
     out = result.stdout

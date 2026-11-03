@@ -29,7 +29,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from std_msgs.msg import Bool, String, UInt64MultiArray
 
-from .audio import CommandPlayer, CommandTts, split_command
+from .audio import CommandPlayer, CommandTts, StreamPlayer, split_command
 from .frames import ShmFrameReader, compressed_to_bgr, image_to_bgr
 from .narrator import Narrator, NarratorConfig
 from .robot_state import StateTracker, parse_list, parse_mapping
@@ -87,6 +87,8 @@ PARAMETERS = {
     'gpt_ask_deadline_s': 15.0,
     'tts_deadline_s': 8.0,
     'player_command': 'aplay -q {file}',
+    'tts_stream': True,
+    'stream_player_command': 'aplay -q -t raw -f S16_LE -r {rate} -c 1 -',
     'fallback_tts_command': '',
 }
 
@@ -145,8 +147,10 @@ class VoiceNode(Node):
         self._camera = p['camera']
         self._setup_camera(p)
 
+        stream = split_command(p['stream_player_command']) if p['tts_stream'] and backend else []
         self.narrator = Narrator(
             config, tracker, backend=backend, player=CommandPlayer(player) if player else None,
+            stream_player=StreamPlayer(stream) if stream else None,
             frame_provider=self._frame if config.use_image else None,
             fallback_tts=CommandTts(fallback) if fallback else None,
             on_text=self._publish_text, on_speaking=self._publish_speaking, logger=log)

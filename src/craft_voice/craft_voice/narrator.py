@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import math
+import queue
 import re
 import threading
 import time
@@ -104,11 +105,14 @@ def clean_text(text: str, max_chars: int) -> str:
 class Narrator:
     def __init__(self, config: NarratorConfig, tracker: StateTracker, backend=None, player=None,
                  frame_provider=None, fallback_tts=None, on_text=None, on_speaking=None, logger=None,
-                 clock=time.monotonic, start: bool = True):
+                 clock=time.monotonic, start: bool = True, stream_player=None):
         self.config = config
         self.tracker = tracker
         self.backend = backend
         self.player = player
+        # OpenAI speech is played while it streams in (first audio ~0.6 s sooner); faults and the
+        # fallback TTS still use `player` with a whole WAV.
+        self.stream_player = stream_player
         self.frame_provider = frame_provider
         self.fallback_tts = fallback_tts
         self.on_text = on_text
@@ -340,6 +344,8 @@ class Narrator:
             self._current.cancelled = True  # checked after TTS and by the player right before it starts
         if self.player:
             self.player.stop()
+        if self.stream_player:
+            self.stream_player.stop()
 
     @staticmethod
     def _pop_best(items):
@@ -596,7 +602,13 @@ class Narrator:
 
     def _speak(self, utterance: Utterance) -> bool:
         """True if the sentence went out (published, and played when there is audio)."""
-        wav = self._synthesize(utterance)
+        if (self.stream_player is not None and utterance.kind != 'fault' and
+                hasattr(self.backend, 'stream_speech')):
+            return self._speak_streaming(utterance)
+        return self._deliver(utterance, self._synthesize(utterance))
+
+    def _deliver(self, utterance: Utterance, wav: bytes | None) -> bool:
+        """Last check, publish, play a whole WAV."""
         with self._lock:
             # TTS can take seconds: check again right before the sentence goes out.
             if utterance.cancelled or self._closed:
@@ -618,6 +630,91 @@ class Narrator:
             self.log.error(f'audio playback failed: {error}')
         finally:
             self._notify(self.on_speaking, False)
+        return True
+
+    def _still_true(self, utterance: Utterance) -> bool:
+        """Right before audio goes out: not cancelled, not closed, not stale (drops it otherwise)."""
+        with self._lock:
+            if utterance.cancelled or self._closed:
+                why = 'cancelled'
+            else:
+                why = self._stale(utterance, self.clock(), after_tts=True)
+            if why:
+                self._drop(utterance, why + ' after TTS')
+                return False
+        return True
+
+    def _speak_streaming(self, utterance: Utterance) -> bool:
+        """OpenAI speech piped into the stream player as it arrives."""
+        chunks: queue.Queue = queue.Queue()
+        abort = threading.Event()
+        failure = {}
+
+        def produce():
+            try:
+                for chunk in self.backend.stream_speech(utterance.text):
+                    if abort.is_set() or utterance.cancelled or self._closed:
+                        break
+                    chunks.put(chunk)
+            except Exception as error:  # network, quota, bad model: reported below
+                failure['error'] = error
+            finally:
+                chunks.put(None)
+
+        threading.Thread(target=produce, name='voice-tts-stream', daemon=True).start()
+
+        def next_chunk(deadline_s: float):
+            """Next chunk, None at the end/error, 'cancelled' or 'timeout'."""
+            started = time.monotonic()
+            while True:
+                if utterance.cancelled or self._closed:
+                    return 'cancelled'
+                try:
+                    return chunks.get(timeout=0.02)
+                except queue.Empty:
+                    if time.monotonic() - started > deadline_s:
+                        return 'timeout'
+
+        first = next_chunk(self.config.tts_deadline_s)
+        if first == 'cancelled':
+            abort.set()
+            return self._still_true(utterance)  # drops it (cancelled)
+        if not isinstance(first, bytes):
+            abort.set()
+            self.stats['tts_errors'] += 1
+            error = failure.get('error')
+            reason = f'{type(error).__name__}: {error}' if error else 'no audio in time'
+            self.log.error(f'TTS (openai stream) failed: {reason}')
+            wav = None
+            if self.fallback_tts is not None:
+                result, value = self._call(lambda: self.fallback_tts.synthesize(utterance.text), None,
+                                           lambda: utterance.cancelled)
+                wav = value if result == 'ok' else None
+            return self._deliver(utterance, wav)
+        if not self._still_true(utterance):
+            abort.set()
+            return False
+        self.log.info(f'say [{utterance.kind}] {utterance.text}')
+        self._notify(self.on_text, utterance.kind, utterance.text)
+        self._notify(self.on_speaking, True)
+        played = False
+        try:
+            if self.stream_player.open(getattr(self.backend, 'sample_rate', 24000),
+                                       cancelled=lambda: utterance.cancelled):
+                chunk = first
+                while isinstance(chunk, bytes) and self.stream_player.write(chunk):
+                    chunk = next_chunk(self.config.tts_deadline_s)
+                abort.set()
+                played = self.stream_player.finish()
+                if 'error' in failure:
+                    self.log.error(f'TTS stream broke off: {failure["error"]}')
+        except Exception as error:
+            abort.set()
+            self.log.error(f'audio playback failed: {error}')
+        finally:
+            self._notify(self.on_speaking, False)
+        if played:
+            self.stats['spoken'] += 1
         return True
 
     def _notify(self, callback, *args):
