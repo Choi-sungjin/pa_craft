@@ -148,3 +148,106 @@ def test_urgent_speech_gives_up_fast(monkeypatch):
         b.synthesize('문제가 생겨서 멈췄어요.', urgent=True)
     assert time.monotonic() - started < 2.0
     silent.close()
+
+
+# ---- model chain and reasoning step-down (faster models first) ----------------------------------------
+class ModelServer:
+    """/v1/responses answer per model: reply(body) -> (status, payload)."""
+
+    def __init__(self, reply):
+        self.bodies = []
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+                outer.bodies.append(body)
+                status, payload = reply(body)
+                data = json.dumps(payload).encode()
+                self.send_response(status)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, *args):
+                pass
+
+        self.httpd = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        self.url = f'http://127.0.0.1:{self.httpd.server_address[1]}/v1'
+
+
+def error(message, code=None):
+    return {'error': {'message': message, 'type': 'invalid_request_error', 'param': None, 'code': code}}
+
+
+def test_model_chain_skips_unknown_and_imageless_models_and_sticks(monkeypatch):
+    monkeypatch.setenv('OPENAI_API_KEY', 'test-key-not-real')
+
+    def reply(body):
+        if body['model'] == 'gpt-6.1-luna':
+            return 404, error('The model `gpt-6.1-luna` does not exist or you do not have access to it.',
+                              'model_not_found')
+        if body['model'] == 'text-only':
+            return 400, error('Invalid content: image_url is only supported by certain models.')
+        return 200, response_json(f'{body["model"]} 응답')
+
+    server = ModelServer(reply)
+    b = OpenAIBackend(model='gpt-6.1-luna, text-only, gpt-5.4-mini', tts_model='x', voice='coral',
+                      timeout_s=5.0, base_url=server.url)
+    assert b.generate('규칙', '질문', b'\xff\xd8jpeg') == 'gpt-5.4-mini 응답'
+    assert [body['model'] for body in server.bodies] == ['gpt-6.1-luna', 'text-only', 'gpt-5.4-mini']
+    assert b.model == 'gpt-5.4-mini'
+    b.generate('규칙', '질문')
+    assert [body['model'] for body in server.bodies][-1] == 'gpt-5.4-mini' and len(server.bodies) == 4
+    server.httpd.shutdown()
+
+
+def test_reasoning_effort_steps_down_then_unrelated_errors_raise(monkeypatch):
+    monkeypatch.setenv('OPENAI_API_KEY', 'test-key-not-real')
+
+    def reply(body):
+        effort = body.get('reasoning', {}).get('effort')
+        if effort in ('none', 'minimal'):
+            return 400, error(f"Unsupported value: 'reasoning.effort' does not support '{effort}' with this model.")
+        if body['max_output_tokens'] == 1:
+            return 400, error("Invalid 'max_output_tokens': integer below minimum value.")
+        return 200, response_json('네.')
+
+    server = ModelServer(reply)
+    b = OpenAIBackend(model='m1,m2', tts_model='x', voice='coral', reasoning_effort='none', timeout_s=5.0,
+                      base_url=server.url)
+    assert b.generate('규칙', '질문') == '네.'
+    assert [body.get('reasoning', {}).get('effort') for body in server.bodies] == ['none', 'minimal', 'low']
+    assert b.reasoning_effort == 'low' and b.model == 'm1'
+    b.max_output_tokens = 1
+    with pytest.raises(openai.BadRequestError):
+        b.generate('규칙', '질문')                             # not a model problem: no switch to m2
+    assert b.model == 'm1'
+    server.httpd.shutdown()
+
+
+def test_bench_compare_against_fake_server(monkeypatch):
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    def reply(body):
+        assert body['input'][0]['content'][1]['type'] == 'input_image'        # the picture is sent
+        assert '[센서가 확인한 것]' in body['input'][0]['content'][0]['text']   # the real narration prompt
+        if body['model'] == 'missing':
+            return 404, error('The model `missing` does not exist.', 'model_not_found')
+        return 200, response_json('접근 중이에요. 초록 신호가 보여요.')
+
+    server = ModelServer(reply)
+    env = dict(os.environ, OPENAI_API_KEY='test-key-not-real', CRAFT_VOICE_ENV='/nonexistent',
+               PYTHONPATH=str(Path(__file__).resolve().parents[1]))
+    result = subprocess.run([sys.executable, '-m', 'craft_voice.bench', '--compare', 'missing,fast-one',
+                             '--efforts', 'none', '--runs', '2', '--base-url', server.url],
+                            capture_output=True, text=True, timeout=60, env=env)
+    server.httpd.shutdown()
+    assert result.returncode == 0, result.stderr
+    assert 'missing          effort none     FAILED  NotFoundError' in result.stdout
+    assert 'fast-one' in result.stdout and 'n=2' in result.stdout and '접근 중이에요' in result.stdout

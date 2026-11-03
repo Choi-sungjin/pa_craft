@@ -4,6 +4,9 @@
     python -m craft_voice.bench --fallback-tts "espeak-ng -v ko --stdout -- {text}"
     python -m craft_voice.bench --gpt --camera photo.jpg # also time the GPT answer (picture + facts)
     python -m craft_voice.bench --engine instant          # only this code's own overhead (no TTS at all)
+    python -m craft_voice.bench --compare "gpt-6-luna,gpt-5.4-mini,gpt-5.5" --efforts none,low
+                                                          # GPT models side by side: the robot's real narration
+                                                          # prompt + a picture (--camera, else a drawn scene)
 
 Per run it times, through the same Narrator the robot uses:
     tts       sentence -> WAV bytes (OpenAI speech or the fallback command)
@@ -74,11 +77,13 @@ def main(argv=None) -> int:
     p.add_argument('--player', default='aplay -q {file}', help="command with {file}; 'none' to skip playback")
     p.add_argument('--gpt', action='store_true', help='also time GPT (needs OPENAI_API_KEY)')
     p.add_argument('--camera', default='', help='picture for --gpt (none = text only)')
-    p.add_argument('--model', default='gpt-5.5')
-    p.add_argument('--reasoning-effort', default='low')
+    p.add_argument('--model', default='gpt-6-luna,gpt-5.4-mini,gpt-5.5')
+    p.add_argument('--reasoning-effort', default='none')
     p.add_argument('--tts-model', default='gpt-4o-mini-tts')
     p.add_argument('--voice', default='coral')
     p.add_argument('--base-url', default='')
+    p.add_argument('--compare', default='', help='comma separated GPT models to time side by side')
+    p.add_argument('--efforts', default='none,low', help='reasoning efforts for --compare ("" = not sent)')
     args = p.parse_args(argv)
     from .envfile import load_env_file
     used, names = load_env_file()
@@ -86,6 +91,11 @@ def main(argv=None) -> int:
         print(f'loaded {", ".join(names)} from {used}')
 
     key = bool(os.environ.get('OPENAI_API_KEY'))
+    if args.compare:
+        if not key:
+            print('OPENAI_API_KEY is not set: models cannot be compared', file=sys.stderr)
+            return 2
+        return compare(args)
     engine = args.engine if args.engine != 'auto' else ('openai' if key else 'fallback')
     backend = fallback = None
     if engine == 'openai' or args.gpt:
@@ -141,6 +151,69 @@ def main(argv=None) -> int:
     if args.gpt:
         print(summary('gpt', gpt_times))
         print(summary('event->play', event_to_play))
+    return 0
+
+
+def scene_picture(path: str):
+    """--camera picture, or a drawn arena scene (floor, wall, green signal, two pucks) so images are exercised."""
+    import cv2
+    import numpy as np
+    if path:
+        image = cv2.imdecode(np.fromfile(path, np.uint8), cv2.IMREAD_COLOR)
+        if image is None:
+            raise SystemExit(f'cannot read picture {path!r}')
+        return image
+    image = np.full((360, 640, 3), (90, 90, 90), np.uint8)
+    cv2.rectangle(image, (0, 0), (640, 150), (200, 200, 205), -1)                 # wall
+    cv2.circle(image, (520, 80), 30, (40, 200, 40), -1)                           # green signal
+    cv2.ellipse(image, (250, 270), (40, 18), 0, 0, 360, (200, 90, 20), -1)        # lying puck
+    cv2.rectangle(image, (380, 200), (420, 280), (200, 90, 20), -1)               # standing puck
+    return image
+
+
+def compare(args) -> int:
+    """Each model x effort answers the robot's own narration prompt with a picture; fastest first."""
+    from .frames import encode_jpeg
+    from .gpt import OpenAIBackend
+    tracker = StateTracker(step_names={'approach': '접근'})
+    narrator = Narrator(NarratorConfig(), tracker, start=False, clock=lambda: 100.0)
+    tracker.update_planning('Run.Execute', 90.0)
+    tracker.update_planning('Run.Execute', 100.0)
+    tracker.update_diagnostics('planning/state_machine', 0, 'Run.Execute: ', {'step': 'approach'}, 100.0)
+    tracker.update_motion(0.12, 0.0, 100.0)
+    tracker.update_objects(['sign_green'], 100.0)
+    tracker.update_pucks([(False, 0.9), (True, 1.3)], 100.0)
+    jpeg = encode_jpeg(scene_picture(args.camera), 512, 80)
+    from .narrator import Job
+    instructions, prompt = narrator._prompt(Job('scene', 100.0), has_image=True)
+    efforts = [e.strip() for e in args.efforts.split(',')] if args.efforts.strip() else ['']
+    rows = []
+    for model in [m.strip() for m in args.compare.split(',') if m.strip()]:
+        for effort in efforts:
+            backend = OpenAIBackend(model=model, tts_model=args.tts_model, voice=args.voice,
+                                    reasoning_effort=effort, base_url=args.base_url)
+            times, answer, error = [], '', ''
+            for _ in range(args.runs):
+                started = time.monotonic()
+                try:
+                    answer = backend.generate(instructions, prompt, jpeg)
+                except Exception as exc:  # report and move on to the next model
+                    error = f'{type(exc).__name__}: {str(exc).splitlines()[0][:90]}'
+                    break
+                times.append(time.monotonic() - started)
+            used = backend.reasoning_effort  # after any step-down
+            rows.append((statistics.median(times) if times else float('inf'), model, effort or '-',
+                         used or '-', times, answer, error))
+            line = (f'{model:<16} effort {effort or "-":<8} ' +
+                    (f'median {statistics.median(times):5.2f} s  (min {min(times):.2f}, max {max(times):.2f}, '
+                     f'n={len(times)})' if times else f'FAILED  {error}'))
+            print(line, flush=True)
+    print('\nfastest first (effort actually used in brackets):')
+    for median, model, effort, used, times, answer, error in sorted(rows, key=lambda r: r[0]):
+        if times:
+            print(f'  {median:5.2f} s  {model} effort {effort} [{used}]  "{answer[:60]}"')
+        else:
+            print(f'    -     {model} effort {effort}  {error}')
     return 0
 
 

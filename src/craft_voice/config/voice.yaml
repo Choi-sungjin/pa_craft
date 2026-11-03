@@ -43,8 +43,10 @@ voice_node:
     language: ko
     persona: ""                   # extra style instructions, e.g. "반말로 친구처럼 말해."
     max_chars: 150
-    model: gpt-5.5
-    reasoning_effort: low         # "" = not sent (models without reasoning); low keeps latency down
+    # Fastest first; the next one is used if a model is unknown to this key or takes no images.
+    # Compare on your network: python -m craft_voice.bench --compare "gpt-6-luna,gpt-5.4-mini,gpt-5.5"
+    model: "gpt-6-luna,gpt-5.4-mini,gpt-5.5"
+    reasoning_effort: none        # none -> minimal -> low -> unset if a model rejects it; reasoning adds seconds
     image_detail: low             # low | high | auto | original
     max_output_tokens: 400        # includes reasoning tokens; too small gives an empty answer
     request_timeout_s: 15.0       # GPT and normal speech requests (one retry)

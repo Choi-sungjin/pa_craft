@@ -412,7 +412,8 @@ class Narrator:
             reason = f'{type(value).__name__}: {value}' if result == 'error' else f'no answer in {deadline} s'
             self.log.error(f'GPT {job.kind} failed: {reason}')
             return self._fallback(job, 'GPT 응답을 받지 못했어요.'), False
-        self.log.info(f'GPT {job.kind} {time.monotonic() - started:.1f}s image={jpeg is not None}: {value}')
+        model = getattr(self.backend, 'model', '?')
+        self.log.info(f'GPT {job.kind} {time.monotonic() - started:.1f}s {model} image={jpeg is not None}: {value}')
         text = clean_text(value, self.config.max_chars)
         return (text, True) if text else (self._fallback(job, '빈 응답이었어요.'), False)
 

@@ -13,6 +13,18 @@ import base64
 from .audio import pcm_to_wav  # noqa: F401  (re-exported)
 
 
+# A model that rejects reasoning.effort=X is tried with the next lighter-weight value, then without it.
+REASONING_FALLBACK = {'none': 'minimal', 'minimal': 'low', 'low': ''}
+
+
+def model_unusable(error: Exception) -> bool:
+    """The model itself cannot serve this request (unknown/not allowed model, no image input)."""
+    status = getattr(error, 'status_code', None)
+    text = str(error).lower()
+    return status in (400, 403, 404) and 'reasoning' not in text and (
+        'model' in text or 'image' in text or 'vision' in text)
+
+
 class EmptyResponse(RuntimeError):
     """The model answered without text (e.g. max_output_tokens spent on reasoning)."""
 
@@ -26,7 +38,9 @@ class OpenAIBackend:
             from openai import OpenAI  # imported here so tests and template-only runs need no SDK
             client = OpenAI(base_url=base_url or None, timeout=timeout_s, max_retries=1)
         self.client = client
-        self.model = model
+        # "fast-model,fallback-model,...": the first that works is kept for the rest of the run.
+        self.models = [m.strip() for m in model.split(',') if m.strip()] or ['gpt-5.5']
+        self.model = self.models[0]
         self.tts_model = tts_model
         self.voice = voice
         self.tts_instructions = tts_instructions
@@ -42,25 +56,38 @@ class OpenAIBackend:
         if jpeg:
             content.append({'type': 'input_image', 'detail': self.image_detail,
                             'image_url': 'data:image/jpeg;base64,' + base64.b64encode(jpeg).decode('ascii')})
-        request = {'model': self.model, 'instructions': instructions, 'store': False,
+        request = {'instructions': instructions, 'store': False,
                    'input': [{'role': 'user', 'content': content}],
                    'max_output_tokens': self.max_output_tokens}
-        if self.reasoning_effort:
-            request['reasoning'] = {'effort': self.reasoning_effort}
-        try:
-            response = self.client.responses.create(**request)
-        except Exception as error:
-            # A model without reasoning support rejects the field: drop it for good, retry once.
-            if not self.reasoning_effort or 'reasoning' not in str(error).lower():
-                raise
-            self.reasoning_effort = ''
-            request.pop('reasoning')
-            response = self.client.responses.create(**request)
+        while True:
+            request['model'] = self.model
+            try:
+                response = self._create(request)
+                break
+            except Exception as error:
+                index = self.models.index(self.model)
+                if not model_unusable(error) or index + 1 >= len(self.models):
+                    raise
+                self.model = self.models[index + 1]  # e.g. model not available to this key, or no image input
         text = (getattr(response, 'output_text', '') or '').strip()
         if not text:
             raise EmptyResponse(f'no text in response (status {getattr(response, "status", "?")}, '
                                 f'{getattr(response, "incomplete_details", None)})')
         return text
+
+    def _create(self, request: dict):
+        """responses.create, stepping reasoning.effort down (none -> minimal -> low -> unset) if rejected."""
+        while True:
+            if self.reasoning_effort:
+                request['reasoning'] = {'effort': self.reasoning_effort}
+            else:
+                request.pop('reasoning', None)
+            try:
+                return self.client.responses.create(**request)
+            except Exception as error:
+                if not self.reasoning_effort or 'reasoning' not in str(error).lower():
+                    raise
+                self.reasoning_effort = REASONING_FALLBACK.get(self.reasoning_effort, '')
 
     def synthesize(self, text: str, urgent: bool = False) -> bytes:
         """Text -> WAV bytes. Asks for raw PCM and writes the header itself.
