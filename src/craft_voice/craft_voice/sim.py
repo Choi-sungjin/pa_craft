@@ -72,6 +72,25 @@ class SimStateMachine:
     def set_override(self, step: SimStep | None):
         self.override = step
 
+    def fault(self, reason: str):
+        """Fail like StateMachine::fail(): the reason gets the current phase in front, the step is kept."""
+        last = self._last
+        if last is not None and last.label == 'Fault':
+            return  # fail() keeps the original cause
+        prefix = f'{last.label}: ' if last is not None else ''
+        self.override = SimStep('Fault', last.step if last is not None else '', prefix + reason)
+
+    def queued(self) -> int:
+        """Steps still waiting after the current one, like planning_master's remaining.size()."""
+        if self.override is not None or self._index < 0:
+            return 0
+        count = 0
+        for step in self.steps[self._index + 1:]:
+            if step.label in ('Idle', 'Ready', 'Fault', 'Run.Stopping'):
+                break
+            count += step.label == 'Run.PrepareTask'
+        return count
+
     def at(self, elapsed: float) -> SimStep:
         if self.override is not None:
             current, index = self.override, -2
@@ -91,6 +110,6 @@ class SimStateMachine:
     def diagnostics(self, current: SimStep) -> tuple[str, int, str, dict]:
         """(name, level, message, values) as planning_master publishes them (1 Hz)."""
         values = {'task_id': str(self.task_id) if current.step else '', 'step': current.step,
-                  'queued': '0', 'waiting_for': ''}
+                  'queued': str(self.queued()), 'waiting_for': ''}
         level = 2 if current.label == 'Fault' else 0
         return DIAGNOSTIC_NAME, level, f'{current.label}: {current.reason}', values

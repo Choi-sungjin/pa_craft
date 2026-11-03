@@ -51,3 +51,19 @@ def test_diagnostics_match_planning_master_and_feed_the_tracker():
     assert (name, level, message) == ('planning/state_machine', 2, 'Fault: Run.Execute: compute timeout')
     assert values['task_id'] == '2' and values['step'] == 'grasp'
     assert events[-1] == '문제가 생겨서 멈췄어요. 원인: 계산 시간 초과.'
+
+
+def test_fault_command_like_state_machine_fail():
+    sim = SimStateMachine(parse_scenario('Run.PrepareTask@approach:1, Run.Execute@approach:5'))
+    sim.at(1.5)
+    sim.fault('localization lost')
+    current = sim.at(1.6)
+    assert (current.label, current.step, current.reason) == ('Fault', 'approach', 'Run.Execute: localization lost')
+    sim.fault('something else')                               # fail() keeps the first cause
+    assert sim.at(1.7).reason == 'Run.Execute: localization lost'
+
+
+def test_queued_counts_remaining_steps_like_planning_master():
+    sim = SimStateMachine(parse_scenario(DEFAULT_SCENARIO), loop=False)
+    assert sim.diagnostics(sim.at(10.0))[3]['queued'] == '1'   # base_goal running, approach waiting
+    assert sim.diagnostics(sim.at(22.0))[3]['queued'] == '0'   # approach running

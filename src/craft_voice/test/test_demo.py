@@ -88,3 +88,78 @@ def test_demo_runs_end_to_end(tmp_path):
                              for b in responses)
     assert any('접근' in b['input'][0]['content'][0]['text'] for b in responses)  # step name from diagnostics
     assert len(list(played.iterdir())) == 5                     # ask, scene, 2 states, fault
+
+
+def make_video(path, frames=30, fps=10):
+    """Frame i is filled with i*8, so the value tells which frame the camera handed out."""
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*'MJPG'), fps, (64, 48))
+    for i in range(frames):
+        writer.write(np.full((48, 64, 3), i * 8, np.uint8))
+    writer.release()
+    assert path.stat().st_size > 0
+
+
+def demo(args, stdin, env_extra=None, timeout=30):
+    env = dict(os.environ, PYTHONPATH=str(PACKAGE))
+    env.pop('OPENAI_API_KEY', None)
+    env.update(env_extra or {})
+    started = __import__('time').monotonic()
+    result = subprocess.run([sys.executable, '-m', 'craft_voice.demo', '--player', 'none', *args], input=stdin,
+                            capture_output=True, timeout=timeout, env=env)
+    return result, __import__('time').monotonic() - started
+
+
+def test_camera_close_while_reading_video_never_hangs_or_crashes(tmp_path):
+    """QA: release() while the reader thread was inside read() -> hang/SIGABRT ~1 in 5 runs."""
+    video = tmp_path / 'clip.avi'
+    make_video(video)
+    code = (f'import time; from craft_voice.demo import Camera; c = Camera({str(video)!r}); '
+            'time.sleep(0.3); c.close(); print("closed")')
+    for _ in range(8):
+        result = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True, timeout=15,
+                                cwd=str(PACKAGE))
+        assert result.returncode == 0 and result.stdout.strip() == 'closed', result.stderr
+
+
+def test_video_plays_at_its_own_speed_and_loops(tmp_path):
+    import time
+    from craft_voice.demo import Camera
+    video = tmp_path / 'clip.avi'
+    make_video(video, frames=30, fps=10)                      # 3 s
+    camera = Camera(str(video))
+    try:
+        samples = []
+        for _ in range(26):                                   # 2.6 s, every 0.1 s
+            frame = camera.frame()
+            samples.append(None if frame is None else round(int(frame[24, 32, 0]) / 8))
+            time.sleep(0.1)
+        seen = [s for s in samples if s is not None]
+        steps = [b - a for a, b in zip(seen, seen[1:])]
+        assert max(steps) <= 3, samples                       # ~1 frame per 0.1 s, not jumping ahead
+        assert 15 <= seen[-1] - seen[0] <= 30, samples
+        time.sleep(1.2)                                       # past the end: it must start over
+        assert round(int(camera.frame()[24, 32, 0]) / 8) < seen[-1], samples
+    finally:
+        camera.close()
+
+
+def test_quit_works_with_keep_running_flag():
+    result, took = demo(['--camera', 'none', '--seconds', '15', '--keep-running-without-input'], b'/quit\n')
+    assert result.returncode == 0 and took < 6
+
+
+def test_broken_utf8_input_does_not_kill_input_thread():
+    result, took = demo(['--camera', 'none', '--seconds', '15'], b'\xec\x95\n/quit\n',
+                        {'PYTHONIOENCODING': 'utf-8:strict'})
+    assert result.returncode == 0 and took < 6 and b'Traceback' not in result.stderr
+
+
+@pytest.mark.parametrize('encoding', ['cp949', 'cp1252'])
+def test_non_utf8_console_keeps_talking(encoding):
+    """Windows consoles/pipes: Korean output must not crash the main loop or the speak thread."""
+    result, _ = demo(['--camera', 'none', '--seconds', '4', '--keep-running-without-input', '--once',
+                      '--scenario', 'Ready:1, Fault!Run.Execute: execution timeout:5'], b'',
+                     {'PYTHONIOENCODING': encoding})
+    out = result.stdout.decode(encoding, errors='replace')
+    assert result.returncode == 0 and b'Traceback' not in result.stderr, result.stderr
+    assert out.count('>> [') == 2 and 'pending_speech' in out  # Ready and Fault both went out

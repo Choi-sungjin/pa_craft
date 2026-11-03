@@ -26,7 +26,7 @@ import time
 from .audio import CommandPlayer, CommandTts, WinsoundPlayer, split_command
 from .narrator import Narrator, NarratorConfig
 from .robot_state import StateTracker, parse_list, parse_mapping
-from .sim import DEFAULT_SCENARIO, SimStateMachine, SimStep, parse_item, parse_scenario
+from .sim import DEFAULT_SCENARIO, SimStateMachine, parse_item, parse_scenario
 
 log = logging.getLogger('craft_voice')
 
@@ -40,7 +40,10 @@ class Camera:
         self._frame = None
         self._lock = threading.Lock()
         self._capture = None
-        self._running = True
+        self._thread = None
+        self._stop = threading.Event()
+        self._source = source
+        self._is_file = False
         if source.lower() in ('', 'none'):
             return
         if source.isdigit():
@@ -51,28 +54,43 @@ class Camera:
                 self._frame = image
                 return
             self._capture = cv2.VideoCapture(source)
+            self._is_file = os.path.isfile(source)
         if not self._capture.isOpened():
             raise RuntimeError(f'camera source {source!r} could not be opened')
-        threading.Thread(target=self._read, name='camera', daemon=True).start()
+        self._thread = threading.Thread(target=self._read, name='camera', daemon=True)
+        self._thread.start()
 
     def _read(self):
-        # Read continuously so the frame handed to GPT is the newest one, not a buffered old one.
-        while self._running:
+        """Only this thread touches the VideoCapture (it is not thread safe); close() joins it first."""
+        cv2 = self._cv2
+        fps = self._capture.get(cv2.CAP_PROP_FPS) if self._is_file else 0
+        period = 1.0 / fps if 0 < fps < 240 else (1.0 / 30 if self._is_file else 0.0)
+        next_at = time.monotonic()
+        while not self._stop.is_set():
             ok, frame = self._capture.read()
             if not ok:
-                if self._capture.get(self._cv2.CAP_PROP_FRAME_COUNT) > 0:
-                    self._capture.set(self._cv2.CAP_PROP_POS_FRAMES, 0)  # video file: loop
-                time.sleep(0.05)
+                if self._is_file:
+                    # End of a video file: reopen (seeking back fails on MPEG-TS, unknown-length WebM, MJPEG).
+                    self._capture.release()
+                    self._capture = cv2.VideoCapture(self._source)
+                self._stop.wait(0.05)
                 continue
             with self._lock:
                 self._frame = frame
+            if period:  # a video file plays at its own speed, not as fast as it decodes
+                next_at = max(next_at + period, time.monotonic() - period)
+                self._stop.wait(max(0.0, next_at - time.monotonic()))
 
     def frame(self):
         with self._lock:
             return None if self._frame is None else self._frame.copy()
 
     def close(self):
-        self._running = False
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=3.0)
+            if self._thread.is_alive():
+                return  # still inside read(): releasing now could crash; the process exit cleans up
         if self._capture is not None:
             self._capture.release()
 
@@ -131,7 +149,7 @@ def handle(line: str, narrator: Narrator, sim: SimStateMachine) -> bool:
         if command == 'state':
             sim.set_override(parse_item(rest, with_duration=False))
         elif command == 'fault':
-            sim.set_override(SimStep('Fault', '', rest.strip() or 'Run.Execute: execution timeout'))
+            sim.fault(rest.strip() or 'execution timeout')
         elif command == 'resume':
             sim.set_override(None)
         elif command == 'say':
@@ -153,9 +171,10 @@ def run(args) -> int:
     def read_input():
         for line in sys.stdin:
             if not handle(line, narrator, sim):
-                break
+                stop.set()  # /quit always quits
+                return
         if not args.keep_running_without_input:
-            stop.set()
+            stop.set()  # stdin closed (e.g. Ctrl+D)
 
     threading.Thread(target=read_input, name='stdin', daemon=True).start()
     started = time.monotonic()
@@ -173,7 +192,7 @@ def run(args) -> int:
             if current.label != shown:
                 print(f'[{now - started:6.1f}s] state: {current.label}'
                       + (f' ({current.step})' if current.step else '')
-                      + (f' — {current.reason}' if current.reason else ''), flush=True)
+                      + (f' - {current.reason}' if current.reason else ''), flush=True)
                 shown = current.label
             time.sleep(0.05)
     except KeyboardInterrupt:
@@ -215,6 +234,16 @@ def parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
+    # Korean text on a console or pipe that is not UTF-8 (Windows cp949/cp1252, C locale): never crash on it.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors='replace')
+        except (AttributeError, ValueError):
+            pass
+    try:
+        sys.stdin.reconfigure(errors='replace')  # a broken byte in typed input must not kill the input thread
+    except (AttributeError, ValueError):
+        pass
     args = parser().parse_args(argv)
     logging.basicConfig(level=args.log_level.upper(), format='%(asctime)s %(levelname)s %(message)s',
                         datefmt='%H:%M:%S')

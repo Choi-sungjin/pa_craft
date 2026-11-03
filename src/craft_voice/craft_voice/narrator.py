@@ -525,18 +525,24 @@ class Narrator:
                 self._drop(utterance, why + ' after TTS')
                 return False
         self.log.info(f'say [{utterance.kind}] {utterance.text}')
-        if self.on_text:
-            self.on_text(utterance.kind, utterance.text)
+        self._notify(self.on_text, utterance.kind, utterance.text)
         if wav is None or self.player is None:
             return True
-        if self.on_speaking:
-            self.on_speaking(True)
+        self._notify(self.on_speaking, True)
         try:
             if self.player.play(wav, cancelled=lambda: utterance.cancelled):
                 self.stats['spoken'] += 1
         except Exception as error:
             self.log.error(f'audio playback failed: {error}')
         finally:
-            if self.on_speaking:
-                self.on_speaking(False)
+            self._notify(self.on_speaking, False)
         return True
+
+    def _notify(self, callback, *args):
+        """Callbacks (ROS publish, print) must never take the speak thread down with them."""
+        if callback is None:
+            return
+        try:
+            callback(*args)
+        except Exception as error:
+            self.log.error(f'callback failed: {type(error).__name__}: {error}')

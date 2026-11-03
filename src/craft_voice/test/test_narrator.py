@@ -568,3 +568,18 @@ def test_close_during_tts_publishes_nothing():
     narrator.close()
     time.sleep(0.8)
     assert texts == []
+
+
+def test_failing_callbacks_do_not_stop_speech():
+    def boom(*args):
+        raise UnicodeEncodeError('cp1252', '가', 0, 1, 'cannot encode')
+
+    narrator = Narrator(NarratorConfig(state_mode='template'), StateTracker(), backend=Backend(), player=Player(),
+                        on_text=boom, on_speaking=boom, start=False)
+    narrator.planning_state('Ready')
+    narrator.planning_state('Run.Stopping')
+    run(narrator)
+    assert len(narrator.player.played) == 1 and narrator.stats['spoken'] == 1
+    narrator.say('또 말해요')
+    run(narrator)
+    assert len(narrator.player.played) == 2

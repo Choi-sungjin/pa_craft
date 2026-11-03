@@ -16,8 +16,17 @@ import threading
 import wave
 
 
-def split_command(text: str) -> list[str]:
-    return shlex.split(text) if text.strip() else []
+def split_command(text: str, windows: bool | None = None) -> list[str]:
+    """Command text -> argv. On Windows backslashes are path separators, not escapes."""
+    if not text.strip():
+        return []
+    if windows is None:
+        windows = os.name == 'nt'
+    if not windows:
+        return shlex.split(text)
+    parts = shlex.split(text, posix=False)  # keeps backslashes; quotes stay on the token
+    return [part[1:-1] if len(part) >= 2 and part[0] == part[-1] and part[0] in '"\'' else part
+            for part in parts]
 
 
 def pcm_to_wav(pcm: bytes, sample_rate: int, channels: int = 1, sample_width: int = 2) -> bytes:
@@ -168,7 +177,7 @@ class WinsoundPlayer:
                     return False
                 stop = self._stop = threading.Event()
                 ws.PlaySound(path, ws.SND_FILENAME | ws.SND_ASYNC | ws.SND_NODEFAULT)
-            stopped = stop.wait(seconds + 0.3)
+            stopped = stop.wait(seconds + 0.5)  # margin for device latency before the next sound
             if stopped:
                 ws.PlaySound(None, 0)  # stops the asynchronous sound
             return not stopped

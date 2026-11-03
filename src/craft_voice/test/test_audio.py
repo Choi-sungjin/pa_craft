@@ -108,3 +108,10 @@ def test_modules_import_without_fcntl():
     package = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     result = subprocess.run([PY, '-c', code], capture_output=True, text=True, cwd=package, timeout=60)
     assert result.returncode == 0 and result.stdout.strip() == 'True', result.stderr
+
+
+def test_split_command_windows_paths():
+    assert split_command(r'C:\ffmpeg\bin\ffplay.exe -nodisp -autoexit {file}', windows=True) == \
+        [r'C:\ffmpeg\bin\ffplay.exe', '-nodisp', '-autoexit', '{file}']
+    assert split_command(r'"C:\Program Files\VLC\vlc.exe" --play-and-exit {file}', windows=True) == \
+        [r'C:\Program Files\VLC\vlc.exe', '--play-and-exit', '{file}']
