@@ -13,6 +13,15 @@ import base64
 from .audio import pcm_to_wav  # noqa: F401  (re-exported)
 
 
+import os
+
+
+def openai_auth_available() -> bool:
+    """A key in the environment, or OPENAI_AUTH=proxy: an egress proxy adds the Authorization header itself
+    (e.g. a Claude Code cloud "Network secret" for api.openai.com), so the key never enters this machine."""
+    return bool(os.environ.get('OPENAI_API_KEY')) or os.environ.get('OPENAI_AUTH', '').lower() == 'proxy'
+
+
 # A model that rejects reasoning.effort=X is tried with the next lighter-weight value, then without it.
 REASONING_FALLBACK = {'none': 'minimal', 'minimal': 'low', 'low': ''}
 
@@ -36,8 +45,17 @@ class OpenAIBackend:
                  urgent_timeout_s: float = 4.0, base_url: str = '', client=None):
         if client is None:
             from openai import OpenAI  # imported here so tests and template-only runs need no SDK
-            client = OpenAI(base_url=base_url or None, timeout=timeout_s, max_retries=1)
+            extra = {}
+            if not os.environ.get('OPENAI_API_KEY') and os.environ.get('OPENAI_AUTH', '').lower() == 'proxy':
+                extra = {'api_key': 'injected-by-proxy'}  # never sent: see self.request_headers
+            client = OpenAI(base_url=base_url or None, timeout=timeout_s, max_retries=1, **extra)
         self.client = client
+        # Proxy auth: omit Authorization on every request (the SDK only honours an omit per request), so the
+        # header the egress proxy injects is the only one.
+        self.request_headers = {}
+        if not os.environ.get('OPENAI_API_KEY') and os.environ.get('OPENAI_AUTH', '').lower() == 'proxy':
+            from openai import Omit
+            self.request_headers = {'Authorization': Omit()}
         # "fast-model,fallback-model,...": the first that works is kept for the rest of the run.
         self.models = [m.strip() for m in model.split(',') if m.strip()] or ['gpt-5.5']
         self.model = self.models[0]
@@ -83,7 +101,7 @@ class OpenAIBackend:
             else:
                 request.pop('reasoning', None)
             try:
-                return self.client.responses.create(**request)
+                return self.client.responses.create(**request, extra_headers=self.request_headers or None)
             except Exception as error:
                 if not self.reasoning_effort or 'reasoning' not in str(error).lower():
                     raise
@@ -100,7 +118,7 @@ class OpenAIBackend:
         if self.tts_speed != 1.0:
             request['speed'] = self.tts_speed
         client = self.client.with_options(timeout=self.urgent_timeout_s, max_retries=0) if urgent else self.client
-        response = client.audio.speech.create(**request)
+        response = client.audio.speech.create(**request, extra_headers=self.request_headers or None)
         pcm = response.content if hasattr(response, 'content') else response.read()
         if not pcm:
             raise EmptyResponse('speech response had no audio')

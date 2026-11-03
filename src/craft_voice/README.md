@@ -46,6 +46,9 @@ cd ~/craft/src/craft_voice && cp env/openai.env.example env/openai.env && chmod 
 로봇에서 colcon으로 설치해 돌릴 때는 설치 위치가 바뀌므로 `~/.config/craft_voice/openai.env`에 두거나
 `export CRAFT_VOICE_ENV=~/craft/src/craft_voice/env/openai.env`.
 
+키를 기계에 두지 않는 방법(Claude Code 클라우드 "Network secret" 같은 프록시가 `Authorization` 헤더를 넣어 줄 때):
+`export OPENAI_AUTH=proxy`. 이때 이 코드는 Authorization 헤더를 보내지 않고 프록시가 넣은 것만 쓰인다.
+
 ## 실행
 
 로봇(`craft.launch.py`)을 띄운 뒤 새 터미널에서:

@@ -20,7 +20,6 @@ from fixed templates through fallback_tts_command (or only published).
 from __future__ import annotations
 
 import math
-import os
 import threading
 import time
 
@@ -117,7 +116,8 @@ class VoiceNode(Node):
             raise ValueError("state_mode must be 'gpt' or 'template'")
 
         backend = None
-        if os.environ.get('OPENAI_API_KEY'):
+        from .gpt import openai_auth_available
+        if openai_auth_available():
             try:
                 from .gpt import OpenAIBackend
                 backend = OpenAIBackend(

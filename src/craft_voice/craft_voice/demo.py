@@ -126,7 +126,8 @@ def default_player(command: str):
 
 def build(args) -> tuple[Narrator, SimStateMachine, Camera]:
     backend = None
-    if os.environ.get('OPENAI_API_KEY'):
+    from .gpt import openai_auth_available
+    if openai_auth_available():
         from .gpt import OpenAIBackend
         backend = OpenAIBackend(model=args.model, tts_model=args.tts_model, voice=args.voice,
                                 tts_instructions=args.tts_instructions, reasoning_effort=args.reasoning_effort,

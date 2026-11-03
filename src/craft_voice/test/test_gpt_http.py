@@ -277,3 +277,31 @@ def test_bench_compare_cycles_through_a_picture_folder():
     assert result.returncode == 0, result.stderr
     assert 'pictures: boxes.png' in result.stdout and 'office_floor.jpg' in result.stdout
     assert len(sizes) == 3 and len(set(sizes)) == 3 and all(s > 5000 for s in sizes)   # three different JPEGs
+
+
+def test_proxy_auth_mode_sends_no_authorization_header(monkeypatch):
+    """OPENAI_AUTH=proxy: the egress proxy injects the key; this process must not send one of its own."""
+    from craft_voice.gpt import openai_auth_available
+    monkeypatch.delenv('OPENAI_API_KEY', raising=False)
+    monkeypatch.setenv('OPENAI_AUTH', 'proxy')
+    assert openai_auth_available()
+    seen = []
+
+    def reply(body):
+        return 200, response_json('네.')
+
+    server = ModelServer(reply)
+    original = server.httpd.RequestHandlerClass.do_POST
+
+    def record(handler):
+        seen.append({k.lower(): v for k, v in handler.headers.items()})
+        original(handler)
+
+    server.httpd.RequestHandlerClass.do_POST = record
+    b = OpenAIBackend(model='m', tts_model='x', voice='coral', timeout_s=5.0, base_url=server.url)
+    assert b.generate('규칙', '질문') == '네.'
+    b.synthesize('네')                                        # speech request too
+    assert len(seen) == 2 and all('authorization' not in headers for headers in seen)
+    server.httpd.shutdown()
+    monkeypatch.delenv('OPENAI_AUTH')
+    assert not openai_auth_available()

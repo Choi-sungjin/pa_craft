@@ -90,7 +90,8 @@ def main(argv=None) -> int:
     if names:
         print(f'loaded {", ".join(names)} from {used}')
 
-    key = bool(os.environ.get('OPENAI_API_KEY'))
+    from .gpt import openai_auth_available
+    key = openai_auth_available()
     if args.compare:
         if not key:
             print('OPENAI_API_KEY is not set: models cannot be compared', file=sys.stderr)
