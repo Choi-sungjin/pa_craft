@@ -42,7 +42,7 @@ voice_node:
     image_detail: low             # low | high | auto | original
     max_output_tokens: 400        # includes reasoning tokens; too small gives an empty answer
     request_timeout_s: 15.0       # GPT and normal speech requests (one retry)
-    fault_tts_timeout_s: 4.0      # fault sentence speech: no retry, then fallback_tts_command
+    fault_tts_timeout_s: 4.0      # fault sentence speech: no retry (hard stop +1 s), then fallback_tts_command
     api_base_url: ""              # "" = api.openai.com; any OpenAI-compatible endpoint otherwise
 
     # ---- speech ---------------------------------------------------------------------------------

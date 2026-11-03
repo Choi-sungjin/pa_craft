@@ -48,6 +48,7 @@ REASON_KO = (
 )
 
 DIAGNOSTIC_NAME = 'planning/state_machine'
+ACTIVE_PHASES = ('Run.PrepareTask', 'Run.Compute', 'Run.Execute')  # one step, start to finish
 
 
 def parse_list(text: str) -> list[str]:
@@ -112,7 +113,7 @@ class StateTracker:
         self.diag_message = ''
         self.diag_level = 0
         self.diag_at = -math.inf
-        self.step_started_at = -math.inf  # last Run.PrepareTask: diagnostics older than this name the previous step
+        self.step_started_at = -math.inf  # current step began: diagnostics older than this name the previous step
         self.fault_reason = ''
         self.fault_reason_at = -math.inf
         self.control = ControlSnapshot()
@@ -132,7 +133,9 @@ class StateTracker:
         if label == self.label:
             return None
         previous, self.label, self.label_since = self.label, label, now
-        if label == 'Run.PrepareTask':
+        if label in ACTIVE_PHASES and previous is not None and previous not in ACTIVE_PHASES:
+            # A new step begins (robust to a missed Run.PrepareTask sample). The first label after
+            # startup is not a step start: diagnostics already received describe that same step.
             self.step_started_at = now
         self.history.append((now, label))
         self.generation += 1

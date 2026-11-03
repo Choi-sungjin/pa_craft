@@ -97,6 +97,15 @@ def test_step_from_previous_step_is_not_used():
     assert t.step_name() == 'grasp' and '현재 단계: grasp' in t.context_text(11.0)
 
 
+def test_new_step_detected_without_prepare_task_sample():
+    t = StateTracker(cooldown_s=0.0)
+    diag(t, 'Run.Execute: ', 9.98, step='approach')
+    t.update_planning('Run.Complete', 10.0)
+    t.update_planning('Run.AwaitRequest', 10.05)
+    assert t.update_planning('Run.Compute', 10.2) is None     # PrepareTask sample lost
+    assert t.update_planning('Run.Execute', 10.4).step == ''
+
+
 def test_context_text():
     t = StateTracker()
     assert '데이터 없음' in t.context_text(0.0)

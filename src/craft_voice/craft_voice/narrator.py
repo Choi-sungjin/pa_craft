@@ -42,6 +42,7 @@ class NarratorConfig:
     jpeg_quality: int = 80
     interrupt_on_fault: bool = True
     state_max_age_s: float = 8.0     # a state sentence later than this is dropped
+    fault_tts_deadline_s: float = 5.0  # give up on OpenAI speech for a fault after this (even a DNS hang)
     scene_max_age_s: float = 10.0
     max_pending_questions: int = 3
 
@@ -397,7 +398,8 @@ class Narrator:
         if u.kind == 'state':
             if u.generation != self._latest_state_generation:
                 return 'newer state'
-            if u.label not in EVENT_LABELS and self.tracker.label != u.label:
+            # Any label change since (announced or not, even back to the same label) makes "now" wrong.
+            if u.label not in EVENT_LABELS and self.tracker.generation != u.generation:
                 return 'state moved on'
             if now - u.created > cfg.state_max_age_s:
                 return 'too late'
@@ -424,35 +426,79 @@ class Narrator:
                 self.log.debug(f'dropped {utterance.kind} ({why}): {utterance.text}')
                 return True
             self._current = utterance
+        spoken = False
         try:
-            self._speak(utterance)
+            spoken = self._speak(utterance)
         finally:
             with self._lock:
                 self._current = None
-                self._last_text, self._last_text_at = utterance.text, self.clock()
-                self._last_activity = self._last_text_at
+                if spoken:
+                    self._last_text, self._last_text_at = utterance.text, self.clock()
+                    self._last_activity = self._last_text_at
         return True
 
-    def _synthesize(self, text: str, urgent: bool) -> bytes | None:
+    def _call(self, utterance: Utterance, fn, deadline_s: float | None):
+        """Run one TTS call on a helper thread so a cancel (fault, stop) never waits for it.
+
+        Returns ('ok', wav) | ('error', exception) | ('cancelled', None) | ('timeout', None).
+        An abandoned call finishes on its own thread and its result is thrown away.
+        """
+        done = threading.Event()
+        box = {}
+
+        def work():
+            try:
+                box['wav'] = fn()
+            except Exception as error:
+                box['error'] = error
+            finally:
+                done.set()
+
+        threading.Thread(target=work, name='voice-tts', daemon=True).start()
+        started = time.monotonic()
+        while not done.wait(0.02):
+            if utterance.cancelled or self._closed:
+                return 'cancelled', None
+            if deadline_s is not None and time.monotonic() - started > deadline_s:
+                return 'timeout', None
+        return ('error', box['error']) if 'error' in box else ('ok', box['wav'])
+
+    def _synthesize(self, utterance: Utterance) -> bytes | None:
+        urgent = utterance.kind == 'fault'
+        text = utterance.text
         for name, engine in (('openai', self.backend), ('fallback', self.fallback_tts)):
             if engine is None:
                 continue
-            try:
-                # urgent: short timeout and no retry, so a dead network reaches the fallback quickly
-                return engine.synthesize(text, urgent=True) if urgent and engine is self.backend \
-                    else engine.synthesize(text)
-            except Exception as error:
-                self.stats['tts_errors'] += 1
-                self.log.error(f'TTS ({name}) failed: {type(error).__name__}: {error}')
+            if engine is self.backend and urgent:
+                # short timeout, no retry, and a hard deadline so a dead network reaches the fallback quickly
+                result, value = self._call(utterance, lambda e=engine: e.synthesize(text, urgent=True),
+                                           self.config.fault_tts_deadline_s)
+            else:
+                result, value = self._call(utterance, lambda e=engine: e.synthesize(text), None)
+            if result == 'ok':
+                return value
+            if result == 'cancelled':
+                return None
+            self.stats['tts_errors'] += 1
+            reason = f'{type(value).__name__}: {value}' if result == 'error' else 'no answer in time'
+            self.log.error(f'TTS ({name}) failed: {reason}')
         return None
 
-    def _speak(self, utterance: Utterance):
+    def _speak(self, utterance: Utterance) -> bool:
+        """True if the sentence went out (published, and played when there is audio)."""
+        wav = self._synthesize(utterance)
+        with self._lock:
+            # TTS can take seconds: check again right before the sentence goes out.
+            why = 'cancelled' if utterance.cancelled else self._stale(utterance, self.clock())
+            if why:
+                self.stats['dropped'] += 1
+                self.log.debug(f'dropped {utterance.kind} after TTS ({why}): {utterance.text}')
+                return False
         self.log.info(f'say [{utterance.kind}] {utterance.text}')
         if self.on_text:
             self.on_text(utterance.kind, utterance.text)
-        wav = self._synthesize(utterance.text, urgent=utterance.kind == 'fault')
-        if wav is None or self.player is None or utterance.cancelled:
-            return
+        if wav is None or self.player is None:
+            return True
         if self.on_speaking:
             self.on_speaking(True)
         try:
@@ -463,3 +509,4 @@ class Narrator:
         finally:
             if self.on_speaking:
                 self.on_speaking(False)
+        return True

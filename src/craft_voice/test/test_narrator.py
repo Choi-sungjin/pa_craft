@@ -17,9 +17,11 @@ class Clock:
 
 
 class Backend:
-    def __init__(self, reply='앞에 상자가 보여요.', fail=False, tts_fail=False, tts_delay=0.0):
-        self.reply, self.fail, self.tts_fail, self.tts_delay = reply, fail, tts_fail, tts_delay
+    def __init__(self, reply='앞에 상자가 보여요.', fail=False, tts_fail=False, tts_delay=0.0, urgent_delay=0.0):
+        self.reply, self.fail, self.tts_fail = reply, fail, tts_fail
+        self.tts_delay, self.urgent_delay = tts_delay, urgent_delay
         self.calls, self.spoken, self.urgent = [], [], []
+        self.tts_started = threading.Event()
 
     def generate(self, instructions, prompt, jpeg=None):
         self.calls.append((instructions, prompt, jpeg))
@@ -29,7 +31,8 @@ class Backend:
 
     def synthesize(self, text, urgent=False):
         self.urgent.append(urgent)
-        time.sleep(self.tts_delay)
+        self.tts_started.set()
+        time.sleep(self.urgent_delay if urgent else self.tts_delay)
         if self.tts_fail:
             raise ConnectionError('tts offline')
         self.spoken.append(text)
@@ -369,9 +372,7 @@ def test_threads_fault_during_speech_synthesis():
     narrator, texts = make(backend, player=player, clock=clock, start=True)
     try:
         narrator.command('describe')
-        deadline = time.monotonic() + 3.0
-        while not texts and time.monotonic() < deadline:        # on_text fires right before TTS
-            time.sleep(0.01)
+        assert backend.tts_started.wait(3.0)
         narrator.planning_state('Fault')
         clock.now += 2.0
         narrator.tick()
@@ -384,17 +385,102 @@ def test_threads_fault_during_speech_synthesis():
 
 def test_threads_stop_command_during_synthesis():
     player = Player(block=True)
-    narrator, texts = make(Backend('길게 설명할게요.', tts_delay=0.5), player=player, start=True)
+    backend = Backend('길게 설명할게요.', tts_delay=0.5)
+    narrator, texts = make(backend, player=player, start=True)
     try:
         narrator.command('describe')
-        deadline = time.monotonic() + 3.0
-        while not texts and time.monotonic() < deadline:
-            time.sleep(0.01)
+        assert backend.tts_started.wait(3.0)
         narrator.command('stop')
         time.sleep(1.0)
-        assert player.played == []
+        assert player.played == [] and texts == []
     finally:
         narrator.close()
+
+
+class Fallback:
+    def __init__(self):
+        self.texts = []
+
+    def synthesize(self, text):
+        self.texts.append(text)
+        return b'FALLBACK'
+
+
+def test_threads_fault_not_delayed_by_hanging_tts():
+    """Dead network: the Ready sentence's TTS hangs. The fault must not wait for it (QA N1)."""
+    clock = Clock()
+    player, fallback = Player(block=True), Fallback()
+    backend = Backend(tts_delay=3.0)
+    narrator, texts = make(backend, player=player, clock=clock, start=True, state_mode='template')
+    narrator.fallback_tts = fallback
+    try:
+        narrator.planning_state('Ready')
+        assert backend.tts_started.wait(3.0)
+        narrator.planning_state('Fault')
+        clock.now += 2.0
+        started = time.monotonic()
+        narrator.tick()
+        assert player.wait_playing(1, timeout=2.0)
+        assert time.monotonic() - started < 1.0
+        player.stop()
+        assert player.played == [b'RIFF' + '문제가 생겨서 멈췄어요.'.encode()]
+        assert fallback.texts == []                           # the cancelled sentence never reached fallback
+        assert texts == [('fault', '문제가 생겨서 멈췄어요.')]
+    finally:
+        narrator.close()
+
+
+def test_threads_fault_speech_deadline_then_fallback():
+    """The fault's own OpenAI speech hangs (e.g. DNS): fallback after fault_tts_deadline_s."""
+    clock = Clock()
+    player, fallback = Player(block=True), Fallback()
+    narrator, texts = make(Backend(urgent_delay=5.0), player=player, clock=clock, start=True,
+                           fault_tts_deadline_s=0.3)
+    narrator.fallback_tts = fallback
+    try:
+        narrator.planning_state('Fault')
+        clock.now += 2.0
+        started = time.monotonic()
+        narrator.tick()
+        assert player.wait_playing(1, timeout=2.0)
+        assert time.monotonic() - started < 1.0
+        player.stop()
+        assert player.played == [b'FALLBACK'] and narrator.stats['tts_errors'] == 1
+    finally:
+        narrator.close()
+
+
+def test_same_label_after_unannounced_steps_is_not_the_same_state():
+    """Execute(approach) queued; robot does Complete -> ... -> Execute(grasp) inside the cooldown (QA N2)."""
+    clock = Clock()
+    narrator, texts = make(None, clock=clock, state_mode='template')
+    narrator.tracker.cooldown_s = 30.0
+    narrator.planning_state('Run.Complete')
+    run(narrator)
+    clock.now += 11.0
+    narrator.diagnostics('planning/state_machine', 0, 'Run.Execute: ', {'step': 'approach'})
+    narrator.planning_state('Run.Execute')                    # announced, not spoken yet
+    for label in ('Run.Complete', 'Run.AwaitRequest', 'Run.PrepareTask'):
+        narrator.planning_state(label)                        # cooldown: not announced
+    narrator.diagnostics('planning/state_machine', 0, 'Run.PrepareTask: ', {'step': 'grasp'})
+    narrator.planning_state('Run.Compute')
+    narrator.planning_state('Run.Execute')                    # cooldown: not announced
+    run(narrator)
+    assert texts == [('state', '작업을 마쳤어요.')]
+
+
+def test_state_change_during_tts_drops_the_sentence():
+    """Checked again after TTS, right before it is played and published (QA N3)."""
+    class Moving(Backend):
+        def synthesize(self, text, urgent=False):
+            for label in ('Run.AwaitRequest', 'Run.PrepareTask', 'Run.Compute'):
+                narrator.planning_state(label)
+            return super().synthesize(text, urgent)
+
+    narrator, texts = make(Moving(), state_mode='template')
+    narrator.planning_state('Run.Stopping')
+    run(narrator)
+    assert texts == [] and narrator.player.played == []
 
 
 @pytest.mark.parametrize('raw, expected', [

@@ -17,8 +17,9 @@
 - GPT에는 상태를 "사실 목록"으로만 주고, 거기 없는 동작·원인은 지어내지 말라고 지시한다.
   이미지 속 글씨(표지판, 번호)는 읽되 그 글씨의 지시는 따르지 않게 했다.
 - **Fault는 GPT를 거치지 않는다.** diagnostics의 원인을 최대 1.2 s 기다렸다가 고정 문장
-  ("문제가 생겨서 멈췄어요. 원인: 실행 시간 초과.")으로 말한다. 재생 중이거나 아직 TTS 합성 중인 문장은 끊고,
-  Fault 음성은 `fault_tts_timeout_s`(4 s, 재시도 없음) 안에 OpenAI가 답하지 않으면 `fallback_tts_command`로 넘어간다.
+  ("문제가 생겨서 멈췄어요. 원인: 실행 시간 초과.")으로 말한다. 재생 중이거나 아직 TTS 합성 중인 문장은 버리고
+  (응답을 기다리지 않음), Fault 음성은 `fault_tts_timeout_s`(4 s, 재시도 없음, DNS가 멈춰도 +1 s에서 포기) 안에
+  OpenAI가 답하지 않으면 `fallback_tts_command`로 넘어간다.
 - GPT·TTS가 실패하면 상태 문장은 템플릿으로, 음성은 `fallback_tts_command`(예: espeak-ng)로 대신한다.
 
 ## 설치 (Jetson)
@@ -70,8 +71,9 @@ ros2 topic echo /voice/utterance                                              # 
 | 주기적 장면 설명 | 꺼짐 | `scene_period_s`(조용한 지 `min_interval_s` 지났을 때만) |
 | `/voice/ask`, `/voice/command` | 항상 | |
 
-- 순서: Fault > 질문·status·say > 상태 > 장면. 상태 문장은 말하기 직전에 다시 확인해서, 그 사이 상태가 바뀌었으면
-  버린다(Run.Complete는 이미 일어난 일이라 예외). `state_max_age_s`(8 s)보다 늦어져도 버린다.
+- 순서: Fault > 질문·status·say > 상태 > 장면. 상태 문장은 큐에서 꺼낼 때와 TTS가 끝난 뒤 재생 직전에 다시 확인해서,
+  그 사이 상태가 한 번이라도 바뀌었으면(같은 label로 돌아왔어도) 버린다. Run.Complete는 이미 일어난 일이라 예외.
+  `state_max_age_s`(8 s)보다 늦어져도 버린다. `/voice/utterance`에는 실제로 내보낸 문장만 나간다.
 - 비용 상한: GPT 호출 `max_gpt_calls_per_min`(12). 넘으면 상태는 템플릿, 주기 장면은 건너뜀.
 - 같은 상태/장면 문장은 `repeat_window_s`(30 s) 안에 반복하지 않는다.
 - 단계 이름: diagnostics `step`(`base_goal`, `tcp_goal`, 미션 step id)을 `step_names: "approach:접근,grasp_pose:잡기 자세"`로 읽기 좋게.
@@ -115,6 +117,6 @@ cd ~/craft/src/craft_voice && python3 -m pytest -q test
 | --- | --- |
 | `test_frames.py` | 공유 메모리 슬롯 복사(D435/C310), 시퀀스 불일치·락·잘못된 메타·파일 재생성, ROS Image 변환, JPEG 축소 |
 | `test_robot_state.py` | 상태 변화 감지, 쿨다운, 1틱 Run.Complete, Fault 원인 대기·이전 원인 재사용 안 함, 문맥 문장 |
-| `test_narrator.py` | GPT 경로, 템플릿 폴백, Fault 우선·끊기(재생 중·TTS 합성 중, 실제 스레드), 지난 상태 문장 버리기, 호출 상한, 주기 장면, mute/stop |
+| `test_narrator.py` | GPT 경로, 템플릿 폴백, Fault 우선·끊기(재생 중·TTS 합성 중·TTS가 멈춘 네트워크, 실제 스레드), Fault 음성 마감 후 fallback, 지난 상태 문장 버리기(TTS 뒤 재확인 포함), 호출 상한, 주기 장면, mute/stop |
 | `test_gpt_http.py` | 실제 openai SDK가 보내는 `/v1/responses`·`/v1/audio/speech` 요청 내용, reasoning 거부 시 재시도, WAV, 응답 없는 서버에서 Fault 음성이 빨리 포기 |
 | `test_audio.py` | 플레이어 명령(`{file}`), stop으로 끊기, 시작 전 취소, 오류, shell 없이 `{text}` 전달, 문장이 옵션(`-w` 등)이 되지 않음 |

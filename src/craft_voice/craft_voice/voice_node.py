@@ -95,7 +95,7 @@ class VoiceNode(Node):
             min_interval_s=p['min_interval_s'], max_gpt_calls_per_min=p['max_gpt_calls_per_min'],
             repeat_window_s=p['repeat_window_s'], use_image=p['use_image'] and p['camera'] != 'none',
             image_max_side=p['image_max_side'], jpeg_quality=p['jpeg_quality'],
-            interrupt_on_fault=p['interrupt_on_fault'])
+            interrupt_on_fault=p['interrupt_on_fault'], fault_tts_deadline_s=p['fault_tts_timeout_s'] + 1.0)
         if p['state_mode'] not in ('gpt', 'template'):
             raise ValueError("state_mode must be 'gpt' or 'template'")
 
