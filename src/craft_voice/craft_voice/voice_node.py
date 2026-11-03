@@ -175,9 +175,12 @@ class VoiceNode(Node):
     def _subscribe_perception(self, p):
         log = self.get_logger()
         if p['odom_topic']:
-            from nav_msgs.msg import Odometry
-            self.create_subscription(Odometry, p['odom_topic'], lambda m: self.narrator.motion(
-                m.twist.twist.linear.x, m.twist.twist.angular.z), qos_profile_sensor_data)
+            try:
+                from nav_msgs.msg import Odometry
+                self.create_subscription(Odometry, p['odom_topic'], lambda m: self.narrator.motion(
+                    m.twist.twist.linear.x, m.twist.twist.angular.z), qos_profile_sensor_data)
+            except ImportError:
+                log.warning('nav_msgs not found: motion is left out')
         if p['tags_topic']:
             from std_msgs.msg import Int32MultiArray
             self.create_subscription(Int32MultiArray, p['tags_topic'],
@@ -194,8 +197,9 @@ class VoiceNode(Node):
                 [d.label for d in m.detections]), qos_profile_sensor_data)
         if p['pucks_topic']:
             self.create_subscription(PuckObservationArray, p['pucks_topic'], lambda m: self.narrator.pucks(
+                # Without a depth axis the centre is (0,0,0) and 'standing' is meaningless: report unknown.
                 [(o.standing, math.sqrt(o.center.x ** 2 + o.center.y ** 2 + o.center.z ** 2))
-                 for o in m.observations]), qos_profile_sensor_data)
+                 if o.axis_valid else (None, None) for o in m.observations]), qos_profile_sensor_data)
 
     # ---- camera -----------------------------------------------------------------------------
     def _setup_camera(self, p):

@@ -279,15 +279,23 @@ def test_periodic_scene_only_when_quiet():
     assert len(backend.calls) == 2
 
 
-def test_repeat_suppressed():
+def test_repeat_suppressed_for_announcements_not_for_narration():
     clock = Clock()
-    narrator, texts = make(Backend('같은 말'), clock=clock, repeat_window_s=30.0)
+    narrator, texts = make(None, clock=clock, repeat_window_s=30.0, state_mode='template')
+    narrator.tracker.cooldown_s = 0.0
+    narrator.planning_state('Ready')
+    run(narrator)
+    clock.now += 5.0
+    narrator.planning_state('Idle')
+    narrator.planning_state('Ready')                          # same announcement again within 30 s
+    run(narrator)
+    assert texts == [('state', '준비됐어요. 출발 신호를 기다리고 있어요.')]
     narrator.command('describe')
     run(narrator)
     clock.now += 5.0
-    narrator.command('describe')
+    narrator.command('describe')                              # asked twice: said twice
     run(narrator)
-    assert texts == [('scene', '같은 말')]
+    assert [kind for kind, _ in texts] == ['state', 'scene', 'scene']
 
 
 def test_ask_and_say():
@@ -302,7 +310,7 @@ def test_ask_and_say():
     narrator.ask('뭐 보여?')
     narrator.command('describe')
     run(narrator)
-    assert texts == [('ask', '지금은 대답할 수 없어요. GPT 연결이 설정되지 않았어요.'),
+    assert texts == [('ask', '지금은 그 질문에 답하기 어려워요. 아직 제 작업 상태를 받지 못했어요.'),
                      ('scene', '아직 제 작업 상태를 받지 못했어요.')]
 
 
@@ -609,7 +617,7 @@ def test_narrates_what_it_does_periodically_only_while_working():
     narrator.objects(['sign_green'])
     narrator.tick()
     run(narrator)
-    assert texts[-1] == ('scene', 'approach 중이에요. 지금 보이는 건 초록 신호 1개예요.')  # no step_names
+    assert texts[-1] == ('scene', '작업하고 있어요. 지금 보이는 건 초록 신호 1개예요.')  # step id never read
     clock.now += 10.0                                         # within narrate_period_s: quiet
     narrator.planning_state('Run.Execute')
     narrator.tick()
@@ -629,3 +637,125 @@ def test_sensors_reach_the_gpt_prompt():
     assert '[센서가 확인한 것]' in prompt and '앞으로 초속 0.12 m로 이동 중' in prompt
     assert '초록 신호 1개' in prompt and '퍽 1개(누운 것 1' in prompt and 'AprilTag 5번' in prompt
     assert texts == [('state', '목표로 가는 중이고 앞에 초록 신호가 보여요.')]
+
+
+# ---- QA round on narration (e42da8f) ----------------------------------------------------------------
+class SlowNarration(Backend):
+    """GPT that takes `scene_delay` seconds for narrations only, and can run a hook while it works."""
+
+    def __init__(self, scene_delay=0.0, hook=None, **kwargs):
+        super().__init__(**kwargs)
+        self.scene_delay, self.hook = scene_delay, hook
+
+    def generate(self, instructions, prompt, jpeg=None):
+        if '지금 무엇을 하고 있는지 먼저' in prompt:
+            if self.hook:
+                self.hook()
+            time.sleep(self.scene_delay)
+            self.calls.append((instructions, prompt, jpeg))
+            return '목표 지점으로 이동하고 있어요.'
+        return super().generate(instructions, prompt, jpeg)
+
+
+@pytest.mark.parametrize('mode', ['gpt', 'template'])
+def test_narration_written_before_a_fault_or_state_change_is_not_spoken(mode):
+    clock = Clock()
+
+    def change():
+        narrator.diagnostics('planning/state_machine', 2, 'Fault: Run.Execute: localization lost', {})
+        narrator.planning_state('Fault')
+
+    def complete():
+        narrator.planning_state('Run.Complete')
+
+    backend = SlowNarration(hook=change if mode == 'gpt' else complete, reply='상태 문장')
+    narrator, texts = make(backend, clock=clock, state_mode=mode)
+    narrator.planning_state('Run.Execute')
+    run(narrator)
+    texts.clear()
+    clock.now += 6.0
+    narrator.planning_state('Run.Execute')
+    narrator.tick()                                           # periodic narration -> GPT, situation changes
+    clock.now += 2.0
+    narrator.tick()
+    run(narrator)
+    assert all(kind != 'scene' for kind, _ in texts), texts
+    expected = ('fault', '제 위치를 놓쳐서 멈춰 있어요.') if mode == 'gpt' else ('state', '작업 하나를 끝냈어요.')
+    assert expected in texts
+
+
+def test_threads_state_change_does_not_wait_for_a_slow_narration():
+    """QA F2: one think thread; a narration hanging in GPT must not hold the state announcement."""
+    clock = Clock()
+    player = Player(block=False)
+    backend = SlowNarration(scene_delay=5.0, reply='출발할게요.')
+    narrator, texts = make(backend, player=player, clock=clock, start=True)   # state sentences via GPT too
+    try:
+        narrator.planning_state('Run.Execute')
+        deadline = time.monotonic() + 3.0
+        while ('state', '출발할게요.') not in texts and time.monotonic() < deadline:
+            time.sleep(0.01)
+        while narrator.status()['speaking'] and time.monotonic() < deadline:
+            time.sleep(0.01)
+        backend.reply = '이제 멈출게요.'
+        clock.now += 6.0
+        narrator.planning_state('Run.Execute')
+        narrator.tick()                                       # narration starts, GPT hangs 5 s
+        time.sleep(0.3)
+        started = time.monotonic()
+        narrator.planning_state('Run.Stopping')               # its GPT job must not queue behind the narration
+        while ('state', '이제 멈출게요.') not in texts and time.monotonic() - started < 4.0:
+            time.sleep(0.02)
+        assert time.monotonic() - started < 1.0, texts
+    finally:
+        narrator.close()
+
+
+def test_threads_state_change_cuts_a_playing_narration():
+    clock = Clock()
+    player = Player(block=True)
+    narrator, texts = make(Backend('목표로 가고 있어요.'), player=player, clock=clock, start=True,
+                           state_mode='template')
+    try:
+        narrator.planning_state('Run.Execute')
+        assert player.wait_playing(1)
+        player.stop()
+        deadline = time.monotonic() + 3.0
+        while narrator.status()['speaking'] and time.monotonic() < deadline:
+            time.sleep(0.01)                                  # let the speak thread finish the first sentence
+        clock.now += 6.0
+        narrator.planning_state('Run.Execute')
+        narrator.tick()                                       # narration plays
+        assert player.wait_playing(2)
+        narrator.planning_state('Run.Stopping')               # what I am doing changed: cut it
+        assert player.wait_playing(3)
+        player.stop()
+        assert [kind for kind, _ in texts] == ['state', 'scene', 'state']
+    finally:
+        narrator.close()
+
+
+def test_narration_gpt_deadline_falls_back_to_fixed_words():
+    narrator, texts = make(SlowNarration(scene_delay=3.0), clock=time.monotonic, gpt_narrate_deadline_s=0.3,
+                           state_mode='template')
+    narrator.planning_state('Ready')
+    run(narrator)
+    started = time.monotonic()
+    narrator.command('describe')
+    run(narrator)
+    assert time.monotonic() - started < 1.5 and texts[-1] == ('scene', '출발 신호를 기다리고 있어요.')
+
+
+def test_fixed_narration_keeps_its_period_without_gpt():
+    """QA F4: identical fixed sentences are not dropped as repeats, so it really speaks every period."""
+    clock = Clock()
+    narrator, texts = make(None, clock=clock, narrate_period_s=20.0, min_interval_s=5.0, state_mode='template')
+    narrator.diagnostics('planning/state_machine', 0, 'Run.Execute: ', {'step': 'base_goal'})
+    narrator.planning_state('Run.Execute')
+    run(narrator)
+    for _ in range(1200):                                     # 120 s at 10 Hz
+        clock.now += 0.1
+        narrator.planning_state('Run.Execute')
+        narrator.tick()
+        run(narrator)
+    assert sum(1 for kind, _ in texts if kind == 'scene') == 6

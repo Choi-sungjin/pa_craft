@@ -49,6 +49,7 @@ class NarratorConfig:
     state_max_age_s: float = 8.0     # a state sentence later than this is dropped
     fault_tts_deadline_s: float = 5.0  # give up on OpenAI speech for a fault after this (even a DNS hang)
     gpt_state_deadline_s: float = 6.0  # a state sentence uses its template if GPT has not answered by then
+    gpt_narrate_deadline_s: float = 10.0  # a narration uses its fixed sentence if GPT has not answered by then
     tts_deadline_s: float = 8.0        # other speech uses the fallback TTS if OpenAI has not answered by then
     scene_max_age_s: float = 10.0
     max_pending_questions: int = 3
@@ -61,6 +62,7 @@ class Job:
     text: str = ''
     event: StateEvent | None = None
     requested: bool = False  # asked for on /voice/command, so a failure is spoken too
+    cancelled: bool = False  # a narration whose situation changed while GPT was still writing it
 
     @property
     def priority(self) -> int:
@@ -75,7 +77,8 @@ class Utterance:
     generation: int = 0
     label: str = ''            # state label a 'state' sentence is about
     cancelled: bool = False    # preempted by a fault or 'stop' (possibly before playback started)
-    retried: bool = False      # a stale 'status' answer was already replaced once
+    retried: bool = False      # a stale 'status'/requested 'scene' answer was already replaced once
+    requested: bool = False    # asked for (describe/status): replaced by the current facts if stale
 
     @property
     def priority(self) -> int:
@@ -119,6 +122,7 @@ class Narrator:
         self._utterances: list[Utterance] = []
         self._current: Utterance | None = None
         self._thinking = False
+        self._thinking_job: Job | None = None
         self._calls: deque = deque()
         self._latest_state_generation = 0
         self._last_text = ''
@@ -138,6 +142,10 @@ class Narrator:
         with self._lock:
             generation = self.tracker.generation
             event = self.tracker.update_planning(label, self.clock())
+            if self.tracker.generation != generation:
+                # What the robot does changed: a narration of the old situation (queued, being written by
+                # GPT, in TTS or playing) is no longer true, and must not hold up the announcement.
+                self._preempt_narration()
             if self.tracker.label == 'Fault' and self.tracker.generation != generation:
                 # The fault sentence may wait for its reason; nothing older may be said meanwhile.
                 self._latest_state_generation = self.tracker.generation
@@ -227,7 +235,8 @@ class Narrator:
                     now - self._last_activity >= cfg.min_interval_s):
                 self._last_scene_at = now
                 if self.backend is None:  # no GPT: say what I do and what my sensors see, in fixed words
-                    self._enqueue(Utterance('scene', self.tracker.current_template(now), now))
+                    self._enqueue(Utterance('scene', self.tracker.current_template(now), now,
+                                            self.tracker.generation))
                 else:
                     self._submit(Job('scene', now))
 
@@ -294,6 +303,17 @@ class Narrator:
             self._utterances.append(utterance)
             self._speak_cv.notify()
 
+    def _preempt_narration(self):
+        """Lock held. Drop and cut off periodic narration (not requested answers)."""
+        job = self._thinking_job
+        if job is not None and job.kind == 'scene' and not job.requested:
+            job.cancelled = True  # the think thread stops waiting for GPT at once
+        self._jobs = [j for j in self._jobs if j.kind != 'scene' or j.requested]
+        self._utterances = [u for u in self._utterances if u.kind != 'scene' or u.requested]
+        current = self._current
+        if current is not None and current.kind == 'scene' and not current.requested:
+            self._cancel_current()
+
     def _cancel_current(self):
         """Cut off the sentence being synthesized or played (call with the lock held)."""
         if self._current is not None:
@@ -323,18 +343,19 @@ class Narrator:
                 return False
             job = self._pop_best(self._jobs)
             self._thinking = True
-        with self._lock:
+            self._thinking_job = job
             generation = job.event.generation if job.event else self.tracker.generation
         try:
             text, from_gpt = self._compose(job)
         finally:
             with self._lock:
                 self._thinking = False
-        if text:
-            # A template/apology made after a slow failure is new: its age starts now, not at the request.
+                self._thinking_job = None
+        if text and not job.cancelled:
+            # A fixed sentence made after a slow failure is new: its age starts now, not at the request.
             created = job.created if from_gpt else self.clock()
             self._enqueue(Utterance(job.kind, text, created, generation,
-                                    label=job.event.label if job.event else ''))
+                                    label=job.event.label if job.event else '', requested=job.requested))
         return True
 
     def _fallback(self, job: Job, why: str) -> str | None:
@@ -343,10 +364,11 @@ class Narrator:
                 return self.tracker.template(job.event)
             if job.kind == 'status':
                 return self.tracker.current_template(self.clock())
+        with self._lock:  # never talk about the failure: say what I do and what my sensors see instead
+            now_doing = self.tracker.current_template(self.clock())
         if job.kind == 'ask':
-            return f'지금은 대답할 수 없어요. {why}'
-        with self._lock:  # scene: still say what I do and what my sensors see, without GPT
-            return self.tracker.current_template(self.clock())
+            return f'지금은 그 질문에 답하기 어려워요. {now_doing}'
+        return now_doing
 
     def _compose(self, job: Job) -> tuple[str | None, bool]:
         """(sentence, came from GPT)."""
@@ -358,8 +380,10 @@ class Narrator:
         jpeg = self._grab_jpeg() if self.config.use_image else None
         instructions, prompt = self._prompt(job, jpeg is not None)
         started = time.monotonic()
-        deadline = self.config.gpt_state_deadline_s if job.kind == 'state' else None
-        result, value = self._call(lambda: self.backend.generate(instructions, prompt, jpeg), deadline)
+        deadline = {'state': self.config.gpt_state_deadline_s, 'scene': self.config.gpt_narrate_deadline_s,
+                    'status': self.config.gpt_narrate_deadline_s}.get(job.kind)
+        result, value = self._call(lambda: self.backend.generate(instructions, prompt, jpeg), deadline,
+                                   lambda: job.cancelled)
         if result == 'cancelled':
             return None, False
         if result != 'ok':  # network, quota, bad model name, too slow: say the template instead
@@ -448,13 +472,12 @@ class Narrator:
                 return 'state moved on'
             if not after_tts and now - u.created > cfg.state_max_age_s:
                 return 'too late'
-        if u.kind == 'status' and self.tracker.generation != u.generation:
-            return 'state moved on'
+        if u.kind in ('status', 'scene') and self.tracker.generation != u.generation:
+            return 'state moved on'  # "what I am doing now" became wrong
         if u.kind == 'scene' and not after_tts and now - u.created > cfg.scene_max_age_s:
             return 'too late'
-        if (u.kind in ('state', 'scene') and u.text == self._last_text and
-                now - self._last_text_at < cfg.repeat_window_s):
-            return 'repeat'
+        if u.kind == 'state' and u.text == self._last_text and now - self._last_text_at < cfg.repeat_window_s:
+            return 'repeat'  # periodic narration may repeat: its timer already spaces it out
         return ''
 
     def speak_once(self, timeout: float | None = 0.0):
@@ -487,10 +510,11 @@ class Narrator:
         """Lock held. A stale status answer is replaced once by the current state's template."""
         self.stats['dropped'] += 1
         self.log.debug(f'dropped {u.kind} ({why}): {u.text}')
-        if u.kind == 'status' and not u.retried and not u.cancelled and not self._closed:
+        if (u.kind == 'status' or (u.kind == 'scene' and u.requested)) and not u.retried and \
+                not u.cancelled and not self._closed:
             now = self.clock()
-            self._utterances.append(Utterance('status', self.tracker.current_template(now), now,
-                                              self.tracker.generation, retried=True))
+            self._utterances.append(Utterance(u.kind, self.tracker.current_template(now), now,
+                                              self.tracker.generation, retried=True, requested=u.requested))
 
     def _call(self, fn, deadline_s: float | None, cancelled=lambda: False):
         """Run one GPT/TTS call on a helper thread so a cancel (fault, stop, close) never waits for it.

@@ -84,7 +84,11 @@ ros2 topic echo /voice/utterance                                              # 
   `/voice/utterance`에는 실제로 내보낸 문장만 나간다.
 - 비용 상한: GPT 호출 `max_gpt_calls_per_min`(12). 넘으면 고정 문장("접근 중이에요. 지금 보이는 건 퍽 2개예요.")으로 말한다.
   키가 없을 때도 같은 고정 문장으로 중계한다.
-- 같은 상태/장면 문장은 `repeat_window_s`(30 s) 안에 반복하지 않는다.
+- 같은 상태 안내는 `repeat_window_s`(30 s) 안에 반복하지 않는다. 상황 중계는 주기가 간격을 정하므로 같은 문장이어도 말한다.
+- 상황 중계는 "지금" 이야기라서, 하는 일이 한 번이라도 바뀌면 GPT가 쓰는 중이든 TTS 중이든 재생 중이든 버리고 끊는다.
+  그래서 중계가 상태 안내나 멈춤 안내를 막거나 늦추지 않는다. GPT가 `gpt_narrate_deadline_s`(10 s) 안에 답하지 않으면 고정 문장.
+- 이름이 없는 단계 ID(예: `approach`)는 소리 내 읽지 않는다("작업하고 있어요"). `step_names`에 이름을 주면 그 이름으로 말한다.
+- 질문에 답할 수 없을 때도 오류 얘기 대신 "지금은 그 질문에 답하기 어려워요." + 지금 하는 일을 말한다.
 - 단계 이름: diagnostics `step`(`base_goal`, `tcp_goal`, 미션 step id)을 `step_names: "approach:접근,grasp_pose:잡기 자세"`로 읽기 좋게.
   diagnostics는 1 Hz라 새 단계가 시작된 뒤 아직 안 왔으면 이름 없이 "작업을 시작할게요"라고 한다(이전 단계 이름을 잘못 말하지 않게).
 
@@ -103,7 +107,7 @@ ros2 topic echo /voice/utterance                                              # 
 | `gpt_state_deadline_s` / `tts_deadline_s` | `6.0` / `8.0` | 상태 문장 GPT 대기 → 템플릿, 일반 음성 OpenAI 대기 → fallback |
 | `persona` | `""` | 말투 추가 지시, 예: `반말로 친구처럼 말해.` |
 | `narrate_period_s` / `narrate_idle_period_s` | `20.0` / `0.0` | 일하는 동안 / 대기·멈춤 중 상황 중계 주기 |
-| `odom_topic`, `objects_topic`, `pucks_topic`, `tags_topic` | perception 토픽 | 센서가 확인한 것(이동, YOLO 물체·신호, 퍽, 태그). `""`이면 안 받음 |
+| `odom_topic`, `objects_topic`, `pucks_topic`, `tags_topic` | perception 토픽 | 센서가 확인한 것(이동, YOLO 물체·신호, 퍽, 태그). `""`이면 안 받음. 깊이 축이 없는 퍽은 거리·자세 "모름"으로 |
 
 float 파라미터는 소수점을 붙인다(`10.0`). 리스트는 쉼표로 구분한 문자열이다.
 

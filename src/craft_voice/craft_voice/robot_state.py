@@ -38,8 +38,8 @@ STEP_KO = {'base_goal': '목표 지점 이동', 'tcp_goal': '팔 목표 자세 �
 REASON_KO = (
     ('initialization timeout', '초기화 시간 초과', '준비가 끝나지 않아서 아직 출발하지 못하고 있어요.'),
     ('task preparation timeout', '작업 준비 시간 초과', '작업 준비가 늦어져서 멈춰 있어요.'),
-    ('compute timeout', '계산 시간 초과', '갈 길을 찾지 못해서 멈춰 있어요.'),
-    ('calculation failed', '경로나 자세 계산 실패', '갈 길을 찾지 못해서 멈춰 있어요.'),
+    ('compute timeout', '계산 시간 초과', '다음 동작을 정하지 못해서 멈춰 있어요.'),
+    ('calculation failed', '경로나 자세 계산 실패', '다음 동작을 정하지 못해서 멈춰 있어요.'),
     ('execution timeout', '실행 시간 초과', '목표까지 너무 오래 걸려서 멈춰 있어요.'),
     ('stop acknowledgement timeout', '정지 확인 시간 초과', '멈췄는지 확인이 늦어져서 그 자리에 서 있어요.'),
     ('localization lost', '위치 추정 실패', '제 위치를 놓쳐서 멈춰 있어요.'),
@@ -83,8 +83,10 @@ def reason_ko(reason: str) -> str:
 def copula(word: str) -> str:
     """'이에요' after a final consonant (받침), '예요' otherwise: '3번이에요', '2개예요'."""
     last = word.rstrip()[-1:] or '가'
+    if last.isdigit():
+        return '이에요' if last in '013678' else '예요'  # 영 일 삼 육 칠 팔 end in a consonant; 이 사 오 구 do not
     has_batchim = '가' <= last <= '힣' and (ord(last) - 0xAC00) % 28 != 0
-    return '이에요' if has_batchim or last.isdigit() else '예요'
+    return '이에요' if has_batchim else '예요'
 
 
 def fault_situation(reason: str) -> str:
@@ -161,6 +163,8 @@ class StateTracker:
         if label == self.label:
             return None
         previous, self.label, self.label_since = self.label, label, now
+        if previous == 'Fault':
+            self.fault_reason, self.fault_reason_at = '', -math.inf  # a later fault must not reuse this cause
         if previous is not None and (label == 'Run.PrepareTask' or
                                      (label in ACTIVE_PHASES and previous not in ACTIVE_PHASES)):
             # A new step begins: PrepareTask only ever starts one, and entering Compute/Execute from
@@ -209,8 +213,9 @@ class StateTracker:
         self.objects = (Counter(label for label in labels if label), now)
 
     def update_pucks(self, pucks, now: float):
-        """pucks: [(standing: bool, distance from the camera in m)]."""
-        self.pucks = (sorted(((bool(st), float(d)) for st, d in pucks), key=lambda p: p[1]), now)
+        """pucks: [(standing, distance from the camera in m)]; None where perception has no depth/axis."""
+        items = [(None if st is None else bool(st), None if d is None else float(d)) for st, d in pucks]
+        self.pucks = (sorted(items, key=lambda p: math.inf if p[1] is None else p[1]), now)
 
     def update_tags(self, ids, now: float):
         self.tags = (sorted({int(i) for i in ids}), now)
@@ -234,8 +239,9 @@ class StateTracker:
         return self.diag_at >= self.step_started_at
 
     def step_name(self) -> str:
+        """Spoken name of the current step; '' for ids without a name (ids are never read out)."""
         step = self.diag.get('step', '') if self.step_known() else ''
-        return self.step_names.get(step, STEP_KO.get(step, step))
+        return self.step_names.get(step, STEP_KO.get(step, ''))
 
     def planning_fresh(self, now: float) -> bool:
         return now - self.label_at <= self.stale_s
@@ -250,7 +256,7 @@ class StateTracker:
             'Ready': '준비됐어요. 출발 신호를 기다리고 있어요.',
             'Run.AwaitRequest': '다음 할 일을 기다리고 있어요.',
             'Run.PrepareTask': f'{step} 준비를 하고 있어요.' if step else '다음 작업을 준비하고 있어요.',
-            'Run.Compute': '가는 길을 계산하고 있어요.',
+            'Run.Compute': '다음 동작을 계산하고 있어요.',
             'Run.Execute': f'{step}, 시작할게요.' if step else '작업을 시작할게요.',
             'Run.Complete': f'{step}, 끝났어요.' if step else '작업 하나를 끝냈어요.',
             'Run.Stopping': '멈추는 중이에요.',
@@ -268,7 +274,7 @@ class StateTracker:
             'Ready': '출발 신호를 기다리고 있어요.',
             'Run.AwaitRequest': '다음 할 일을 기다리고 있어요.',
             'Run.PrepareTask': f'{step} 준비를 하고 있어요.' if step else '다음 작업을 준비하고 있어요.',
-            'Run.Compute': '가는 길을 계산하고 있어요.',
+            'Run.Compute': '다음 동작을 계산하고 있어요.',
             'Run.Execute': f'{step} 중이에요.' if step else '작업하고 있어요.',
             'Run.Complete': f'{step}, 방금 끝났어요.' if step else '방금 작업 하나를 끝냈어요.',
             'Run.Stopping': '멈추는 중이에요.',
@@ -301,11 +307,15 @@ class StateTracker:
             items += [f'{OBJECT_KO.get(label, label)} {count}개' for label, count in sorted(objects[0].items())]
         pucks = self._fresh(self.pucks, now)
         if pucks is not None and pucks[0]:
-            standing = sum(1 for st, _ in pucks[0] if st)
-            lying = len(pucks[0]) - standing
-            kinds = ', '.join(t for t in (f'선 것 {standing}' if standing else '', f'누운 것 {lying}' if lying else '')
-                              if t)
-            items.append(f'퍽 {len(pucks[0])}개({kinds}, 가장 가까운 것 약 {pucks[0][0][1]:.1f} m)')
+            standing = sum(1 for st, _ in pucks[0] if st is True)
+            lying = sum(1 for st, _ in pucks[0] if st is False)
+            unknown = len(pucks[0]) - standing - lying
+            parts = [f'선 것 {standing}' if standing else '', f'누운 것 {lying}' if lying else '',
+                     f'자세 모름 {unknown}' if unknown else '']
+            nearest = pucks[0][0][1]
+            if nearest is not None:
+                parts.append(f'가장 가까운 것 약 {nearest:.1f} m')
+            items.append(f'퍽 {len(pucks[0])}개(' + ', '.join(p for p in parts if p) + ')')
         tags = self._fresh(self.tags, now)
         if tags is not None and tags[0]:
             items.append('AprilTag ' + ', '.join(str(i) for i in tags[0]) + '번')
@@ -354,7 +364,8 @@ class StateTracker:
         if now - self.diag_at <= self.stale_s:
             step = self.diag.get('step', '') if self.step_known() else ''
             if step:
-                lines.append(f'- 현재 단계: {step} ({self.step_name()}), task {self.diag.get("task_id", "?")}, '
+                lines.append(f'- 현재 단계: {step} ({self.step_name() or "이름 없음"}), '
+                             f'task {self.diag.get("task_id", "?")}, '
                              f'남은 단계 {self.diag.get("queued", "?")}개')
             waiting = self.diag.get('waiting_for', '')
             if waiting and self.label in ('Idle', 'Run.PrepareTask'):

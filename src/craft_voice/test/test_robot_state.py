@@ -94,7 +94,7 @@ def test_step_from_previous_step_is_not_used():
     assert event.step == '' and t.template(event) == '작업을 시작할게요.'
     assert '현재 단계' not in t.context_text(10.5)
     diag(t, 'Run.Execute: ', 10.98, step='grasp')
-    assert t.step_name() == 'grasp' and '현재 단계: grasp' in t.context_text(11.0)
+    assert t.step_name() == '' and '현재 단계: grasp (이름 없음)' in t.context_text(11.0)  # id not spoken
 
 
 def test_new_step_detected_without_prepare_task_sample():
@@ -172,3 +172,33 @@ def test_fault_is_told_as_a_situation_never_as_raw_error_text():
     assert sentence == '지금은 멈춰 있어요. 다시 움직이려면 확인이 필요해요.' and 'XYZ' not in sentence
     assert 'XYZ-42' in t.context_text(0.2)                      # GPT still gets the fact, told not to read codes
     assert copula('2개') == '예요' and copula('3번') == '이에요' and copula('7') == '이에요'
+
+
+def test_pucks_without_depth_are_not_placed_at_zero_metres():
+    t = StateTracker()
+    t.update_pucks([(None, None), (True, 0.6)], 0.0)
+    assert '퍽 2개(선 것 1, 자세 모름 1, 가장 가까운 것 약 0.6 m)' in t.perception_text(0.1)
+    t.update_pucks([(None, None)], 0.2)
+    assert '퍽 1개(자세 모름 1)' in t.perception_text(0.3)
+
+
+def test_unnamed_step_ids_are_never_spoken():
+    t = StateTracker()
+    diag(t, 'Run.Execute: ', 0.0, step='approach')
+    assert t.template(t.update_planning('Run.Execute', 0.1)) == '작업을 시작할게요.'
+    assert t.doing(0.2) == '작업하고 있어요.' and 'approach' in t.context_text(0.2)
+
+
+def test_new_fault_does_not_reuse_the_previous_reason():
+    t = StateTracker(fault_reason_wait_s=1.0)
+    t.update_planning('Fault', 0.0)
+    diag(t, 'Fault: Run.Execute: localization lost', 0.1)
+    assert t.doing(0.2) == '제 위치를 놓쳐서 멈춰 있어요.'
+    t.update_planning('Idle', 1.0)
+    t.update_planning('Fault', 5.0)                           # new fault, its reason not here yet
+    assert t.doing(5.1) == '지금은 멈춰 있어요.' and 'localization' not in t.context_text(5.1)
+
+
+def test_copula_digits():
+    expected = ['이에요', '이에요', '예요', '이에요', '예요', '예요', '이에요', '이에요', '이에요', '예요']
+    assert [copula(d) for d in '0123456789'] == expected
