@@ -24,9 +24,21 @@ def split_command(text: str, windows: bool | None = None) -> list[str]:
         windows = os.name == 'nt'
     if not windows:
         return shlex.split(text)
-    parts = shlex.split(text, posix=False)  # keeps backslashes; quotes stay on the token
-    return [part[1:-1] if len(part) >= 2 and part[0] == part[-1] and part[0] in '"\'' else part
-            for part in parts]
+    # Windows rules (simplified): backslashes are literal, "..." groups spaces anywhere in an argument.
+    parts, current, quoted, started = [], [], False, False
+    for char in text:
+        if char == '"':
+            quoted, started = not quoted, True
+        elif char.isspace() and not quoted:
+            if started:
+                parts.append(''.join(current))
+            current, started = [], False
+        else:
+            current.append(char)
+            started = True
+    if started:
+        parts.append(''.join(current))
+    return parts
 
 
 def pcm_to_wav(pcm: bytes, sample_rate: int, channels: int = 1, sample_width: int = 2) -> bytes:

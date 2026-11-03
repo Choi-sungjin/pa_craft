@@ -163,3 +163,25 @@ def test_non_utf8_console_keeps_talking(encoding):
     out = result.stdout.decode(encoding, errors='replace')
     assert result.returncode == 0 and b'Traceback' not in result.stderr, result.stderr
     assert out.count('>> [') == 2 and 'pending_speech' in out  # Ready and Fault both went out
+
+
+def test_raw_mjpeg_plays_as_video_and_non_ascii_picture_path(tmp_path):
+    import time
+    from craft_voice.demo import Camera
+    raw = tmp_path / 'clip.mjpeg'                              # concatenated JPEGs, no container
+    with open(raw, 'wb') as out:
+        for i in range(30):
+            out.write(cv2.imencode('.jpg', np.full((48, 64, 3), i * 8, np.uint8))[1].tobytes())
+    camera = Camera(str(raw))
+    try:
+        assert camera._thread is not None                      # not mistaken for a still picture
+        time.sleep(1.0)
+        first = camera.frame()
+        time.sleep(0.5)
+        assert first is not None and int(camera.frame()[24, 32, 0]) != int(first[24, 32, 0])
+    finally:
+        camera.close()
+    picture = tmp_path / '로봇 사진.png'
+    cv2.imwrite(str(picture), np.full((10, 20, 3), 77, np.uint8))
+    still = Camera(str(picture))
+    assert still._thread is None and int(still.frame()[5, 5, 0]) == 77

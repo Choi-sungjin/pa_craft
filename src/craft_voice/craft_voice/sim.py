@@ -84,6 +84,8 @@ class SimStateMachine:
         """Steps still waiting after the current one, like planning_master's remaining.size()."""
         if self.override is not None or self._index < 0:
             return 0
+        if self.steps[self._index].label in ('Idle', 'Ready', 'Fault', 'Run.Stopping'):
+            return 0  # planning_master accepts steps only while running; fault and stop clear them
         count = 0
         for step in self.steps[self._index + 1:]:
             if step.label in ('Idle', 'Ready', 'Fault', 'Run.Stopping'):

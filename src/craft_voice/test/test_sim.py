@@ -67,3 +67,11 @@ def test_queued_counts_remaining_steps_like_planning_master():
     sim = SimStateMachine(parse_scenario(DEFAULT_SCENARIO), loop=False)
     assert sim.diagnostics(sim.at(10.0))[3]['queued'] == '1'   # base_goal running, approach waiting
     assert sim.diagnostics(sim.at(22.0))[3]['queued'] == '0'   # approach running
+
+
+def test_queued_is_zero_outside_running_phases():
+    sim = SimStateMachine(parse_scenario(DEFAULT_SCENARIO), loop=False)
+    assert sim.diagnostics(sim.at(3.05))[3]['queued'] == '0'   # Ready
+    sim = SimStateMachine(parse_scenario('Run.Execute@a:1, Fault@a!x:1, Run.AwaitRequest:1, '
+                                         'Run.PrepareTask@b:1'), loop=False)
+    assert sim.diagnostics(sim.at(1.5))[3]['queued'] == '0'    # Fault clears remaining

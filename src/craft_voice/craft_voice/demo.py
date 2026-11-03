@@ -23,12 +23,15 @@ import sys
 import threading
 import time
 
+import numpy as np
+
 from .audio import CommandPlayer, CommandTts, WinsoundPlayer, split_command
 from .narrator import Narrator, NarratorConfig
 from .robot_state import StateTracker, parse_list, parse_mapping
 from .sim import DEFAULT_SCENARIO, SimStateMachine, parse_item, parse_scenario
 
 log = logging.getLogger('craft_voice')
+IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.bmp', '.webp', '.tif', '.tiff')
 
 
 class Camera:
@@ -43,18 +46,21 @@ class Camera:
         self._thread = None
         self._stop = threading.Event()
         self._source = source
-        self._is_file = False
+        self._is_video = False  # anything but a webcam index: reopen at the end
         if source.lower() in ('', 'none'):
             return
         if source.isdigit():
             self._capture = cv2.VideoCapture(int(source))
         else:
-            image = cv2.imread(source) if os.path.isfile(source) else None
-            if image is not None:
+            if os.path.isfile(source) and os.path.splitext(source)[1].lower() in IMAGE_EXTENSIONS:
+                # imdecode(fromfile) instead of imread: imread fails on non-ASCII paths on Windows
+                image = cv2.imdecode(np.fromfile(source, np.uint8), cv2.IMREAD_COLOR)
+                if image is None:
+                    raise RuntimeError(f'picture {source!r} could not be read')
                 self._frame = image
                 return
-            self._capture = cv2.VideoCapture(source)
-            self._is_file = os.path.isfile(source)
+            self._capture = cv2.VideoCapture(source)  # video file (incl. GIF, raw MJPEG) or stream URL
+            self._is_video = True
         if not self._capture.isOpened():
             raise RuntimeError(f'camera source {source!r} could not be opened')
         self._thread = threading.Thread(target=self._read, name='camera', daemon=True)
@@ -63,13 +69,17 @@ class Camera:
     def _read(self):
         """Only this thread touches the VideoCapture (it is not thread safe); close() joins it first."""
         cv2 = self._cv2
-        fps = self._capture.get(cv2.CAP_PROP_FPS) if self._is_file else 0
-        period = 1.0 / fps if 0 < fps < 240 else (1.0 / 30 if self._is_file else 0.0)
+        # Pace a recording (local file, or a URL with a known length) at its own fps; a live stream
+        # and a webcam already deliver in real time, so they are read as they come.
+        recording = self._is_video and (os.path.isfile(self._source) or
+                                        self._capture.get(cv2.CAP_PROP_FRAME_COUNT) > 0)
+        fps = self._capture.get(cv2.CAP_PROP_FPS) if recording else 0
+        period = 1.0 / fps if 0 < fps < 240 else (1.0 / 30 if recording else 0.0)
         next_at = time.monotonic()
         while not self._stop.is_set():
             ok, frame = self._capture.read()
             if not ok:
-                if self._is_file:
+                if self._is_video:
                     # End of a video file: reopen (seeking back fails on MPEG-TS, unknown-length WebM, MJPEG).
                     self._capture.release()
                     self._capture = cv2.VideoCapture(self._source)

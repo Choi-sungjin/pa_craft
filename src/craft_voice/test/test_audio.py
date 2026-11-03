@@ -115,3 +115,9 @@ def test_split_command_windows_paths():
         [r'C:\ffmpeg\bin\ffplay.exe', '-nodisp', '-autoexit', '{file}']
     assert split_command(r'"C:\Program Files\VLC\vlc.exe" --play-and-exit {file}', windows=True) == \
         [r'C:\Program Files\VLC\vlc.exe', '--play-and-exit', '{file}']
+
+
+def test_split_command_windows_quotes_inside_an_argument():
+    assert split_command('espeak-ng --voice="Microsoft Heami" -- {text}', windows=True) == \
+        ['espeak-ng', '--voice=Microsoft Heami', '--', '{text}']
+    assert split_command('a "" b', windows=True) == ['a', '', 'b']
