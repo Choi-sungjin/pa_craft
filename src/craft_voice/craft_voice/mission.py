@@ -6,8 +6,17 @@ MISSION_CONTEXT = (
     '12·13·14)에 퍽을 주사위 눈 모양으로 내려놓는다. 놓은 자리를 다시 확인하고 출발 구역으로 돌아와 3초 멈추면 끝난다.'
 )
 
-# Spoken names of the proposed planning step ids ('*' copies that part of the id). They must match the
-# step ids in planning's missions.yaml once the mission is written there.
+# Step ids of the dice mission, agreed 2026-11-03: planning's missions.yaml uses exactly these.
+MISSION_STEP_IDS = (
+    ['read_barcode', 'observe_signal', 'count_sort']
+    + [f'load_S{i}' for i in range(1, 7)]
+    + ['allocate']
+    + [f'place_L{i}' for i in range(1, 4)]
+    + [f'verify_L{i}' for i in range(1, 4)]
+    + ['return_home']
+)
+
+# Spoken names of those step ids ('*' copies that part of the id: load_S3 -> 시작 박스 3 퍽 싣기).
 STEP_NAMES = (
     'read_barcode:바코드 읽기,observe_signal:신호등 관측,count_sort:횟수 계산과 정렬,load_S*:시작 박스 * 퍽 싣기,allocate:장소별 퍽 '
     '배정,place_L*:L* 주사위 눈 놓기,verify_L*:L* 다시 확인,return_home:출발 구역으로 복귀'

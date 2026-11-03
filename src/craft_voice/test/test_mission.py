@@ -66,3 +66,14 @@ def test_step_start_waits_for_its_name_then_gives_up():
     tracker.update_planning('Run.Execute', 5.2)
     tracker.update_planning('Run.Complete', 5.4)                          # moved on before the name came
     assert tracker.poll(7.0) is None
+
+
+def test_every_agreed_step_id_has_a_spoken_name():
+    from craft_voice.mission import MISSION_STEP_IDS
+    names = parse_mapping(STEP_NAMES)
+    assert len(MISSION_STEP_IDS) == 17 and len(set(MISSION_STEP_IDS)) == 17
+    spoken = {step: name_step(step, names) for step in MISSION_STEP_IDS}
+    assert all(spoken.values()), [step for step, name in spoken.items() if not name]
+    assert spoken['load_S6'] == '시작 박스 6 퍽 싣기' and spoken['verify_L3'] == 'L3 다시 확인'
+    used = {item.split('@', 1)[1].split(':', 1)[0] for item in DICE_SCENARIO.split(', ') if '@' in item}
+    assert used <= set(MISSION_STEP_IDS)                          # the demo scenario uses only agreed ids
