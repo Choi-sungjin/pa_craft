@@ -183,8 +183,11 @@ python -m craft_voice.bench --fallback-tts "espeak-ng -v ko --stdout -- {text}" 
 GPT 모델 고르기: 로봇의 실제 중계 프롬프트와 사진(없으면 그린 장면)으로 모델 × reasoning을 나란히 잰다.
 
 ```bash
-python -m craft_voice.bench --compare "gpt-6-luna,gpt-5.4-mini,gpt-5.5,gpt-5.6-luna" --efforts none,low --runs 3 --camera 사진.jpg
+python -m craft_voice.bench --compare "gpt-6-luna,gpt-5.4-mini,gpt-5.5,gpt-5.6-luna" --efforts none,low --runs 3 --camera test/images
 ```
+
+`--camera`에 폴더를 주면 실행마다 사진을 돌려 쓴다. `test/images/`에는 OpenCV `samples/data`의 사진 3장
+(실내 사무실 바닥, 바닥의 둥근 물체들, 상자, Apache-2.0)이 들어 있다.
 
 이 저장소의 개발 컨테이너(Xeon 2.8 GHz, 사운드 카드 없이 `aplay -D null`)에서 잰 값, 10회 중앙값:
 코드 자체 오버헤드(TTS 0 s로 둠) `to_play` 0.00 s, espeak-ng `tts` 0.02 s·`to_play` 0.01 s, 말 길이 2.5~5.0 s.

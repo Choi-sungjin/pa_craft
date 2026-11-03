@@ -251,3 +251,29 @@ def test_bench_compare_against_fake_server(monkeypatch):
     assert result.returncode == 0, result.stderr
     assert 'missing          effort none     FAILED  NotFoundError' in result.stdout
     assert 'fast-one' in result.stdout and 'n=2' in result.stdout and '접근 중이에요' in result.stdout
+
+
+def test_bench_compare_cycles_through_a_picture_folder():
+    import base64 as b64
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+    sizes = []
+
+    def reply(body):
+        url = body['input'][0]['content'][1]['image_url']
+        sizes.append(len(b64.b64decode(url.split(',', 1)[1])))
+        return 200, response_json('사무실 바닥이 보여요.')
+
+    server = ModelServer(reply)
+    package = Path(__file__).resolve().parents[1]
+    env = dict(os.environ, OPENAI_API_KEY='test-key-not-real', CRAFT_VOICE_ENV='/nonexistent',
+               PYTHONPATH=str(package))
+    result = subprocess.run([sys.executable, '-m', 'craft_voice.bench', '--compare', 'one', '--efforts', 'none',
+                             '--runs', '3', '--base-url', server.url, '--camera', str(package / 'test' / 'images')],
+                            capture_output=True, text=True, timeout=60, env=env)
+    server.httpd.shutdown()
+    assert result.returncode == 0, result.stderr
+    assert 'pictures: boxes.png' in result.stdout and 'office_floor.jpg' in result.stdout
+    assert len(sizes) == 3 and len(set(sizes)) == 3 and all(s > 5000 for s in sizes)   # three different JPEGs

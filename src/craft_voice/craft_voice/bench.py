@@ -154,8 +154,21 @@ def main(argv=None) -> int:
     return 0
 
 
+PICTURE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.bmp', '.webp')
+
+
+def picture_files(path: str) -> list[str]:
+    """--camera: one picture, or every picture in a folder (sorted); runs cycle through them."""
+    if path and os.path.isdir(path):
+        files = sorted(os.path.join(path, f) for f in os.listdir(path) if f.lower().endswith(PICTURE_EXTENSIONS))
+        if not files:
+            raise SystemExit(f'no pictures in {path!r}')
+        return files
+    return [path] if path else []
+
+
 def scene_picture(path: str):
-    """--camera picture, or a drawn arena scene (floor, wall, green signal, two pucks) so images are exercised."""
+    """A picture file, or a drawn arena scene (floor, wall, green signal, two pucks) so images are exercised."""
     import cv2
     import numpy as np
     if path:
@@ -183,7 +196,10 @@ def compare(args) -> int:
     tracker.update_motion(0.12, 0.0, 100.0)
     tracker.update_objects(['sign_green'], 100.0)
     tracker.update_pucks([(False, 0.9), (True, 1.3)], 100.0)
-    jpeg = encode_jpeg(scene_picture(args.camera), 512, 80)
+    files = picture_files(args.camera)
+    jpegs = [(os.path.basename(f), encode_jpeg(scene_picture(f), 512, 80)) for f in files] or \
+        [('drawn scene', encode_jpeg(scene_picture(''), 512, 80))]
+    print('pictures: ' + ', '.join(f'{name} ({len(data) // 1024} KB JPEG)' for name, data in jpegs))
     from .narrator import Job
     instructions, prompt = narrator._prompt(Job('scene', 100.0), has_image=True)
     efforts = [e.strip() for e in args.efforts.split(',')] if args.efforts.strip() else ['']
@@ -193,10 +209,13 @@ def compare(args) -> int:
             backend = OpenAIBackend(model=model, tts_model=args.tts_model, voice=args.voice,
                                     reasoning_effort=effort, base_url=args.base_url)
             times, answer, error = [], '', ''
-            for _ in range(args.runs):
+            for run in range(args.runs):
+                name, jpeg = jpegs[run % len(jpegs)]
                 started = time.monotonic()
                 try:
                     answer = backend.generate(instructions, prompt, jpeg)
+                    print(f'    {model} [{effort or "-"}] {name}: {time.monotonic() - started:.2f} s  "{answer[:70]}"',
+                          flush=True)
                 except Exception as exc:  # report and move on to the next model
                     error = f'{type(exc).__name__}: {str(exc).splitlines()[0][:90]}'
                     break
@@ -220,9 +239,10 @@ def compare(args) -> int:
 def time_gpt(args, backend, player):
     """GPT answer, then the event -> player start path with GPT state sentences."""
     from .demo import Camera
-    camera = Camera(args.camera or 'none')
+    files = picture_files(args.camera)
+    camera = Camera(files[0] if files else 'none')
     tracker = StateTracker(cooldown_s=0.0)
-    narrator = Narrator(NarratorConfig(state_mode='gpt', narrate_period_s=0, use_image=bool(args.camera)),
+    narrator = Narrator(NarratorConfig(state_mode='gpt', narrate_period_s=0, use_image=bool(files)),
                         tracker, backend=backend, player=player, frame_provider=camera.frame)
     gpt_times, event_to_play = [], []
     try:
