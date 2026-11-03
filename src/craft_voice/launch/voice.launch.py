@@ -1,4 +1,4 @@
-"""ros2 launch craft_voice voice.launch.py [camera:=d435|c310|topic|none] [scene_period_s:=30]
+"""ros2 launch craft_voice voice.launch.py [camera:=d435|c310|topic|none] [narrate_period_s:=20]
 
 Arguments left empty keep the value from params_file (config/voice.yaml).
 Needs OPENAI_API_KEY in the environment of this terminal.
@@ -13,7 +13,7 @@ from launch_ros.actions import Node
 
 OVERRIDES = {  # launch argument -> type of the node parameter
     'camera': str, 'image_topic': str, 'image_transport': str, 'state_mode': str,
-    'scene_period_s': float, 'model': str, 'tts_voice': str,
+    'narrate_period_s': float, 'model': str, 'tts_voice': str,
 }
 
 

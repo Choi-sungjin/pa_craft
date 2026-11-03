@@ -1,14 +1,17 @@
 # craft_voice
 
-로봇이 **카메라로 본 것**과 **상태머신이 지금 하는 일**을 GPT(OpenAI API)로 문장으로 만들어 **스피커로 말하는** 노드.
-상태가 바뀔 때, 사람이 물어볼 때, (켜 두면) 주기적으로 주변을 설명할 때 말한다.
+**지금 무엇을 하고 있는지와 주변 상황이 어떤지**를 스스로 확인해서 말하는 로봇 목소리 노드.
+상태머신(`/planning/state`)으로 하는 일을, 카메라 이미지와 인식 결과(이동 속도, YOLO 물체·신호, 퍽, AprilTag)로 주변을
+확인하고, GPT(OpenAI API)가 "목표 지점으로 가는 중이에요. 앞에 초록 신호와 퍽 두 개가 보여요."처럼 말로 만든다.
+하는 일이 바뀔 때, 일하는 동안 `narrate_period_s`(20 s)마다, 사람이 물어볼 때 말한다.
+상태 이름(Run.Execute)이나 오류 코드는 읽지 않고, 멈춘 경우도 "제 위치를 놓쳐서 멈춰 있어요"처럼 상황으로 말한다.
 
 ```text
 /vision/d435/frame_meta ─┐  /dev/shm/craft_vision (BGR 복사, 512px JPEG)
 /planning/state ─────────┤
 /planning/diagnostics ───┼─> StateTracker ─> think 스레드: GPT (Responses API, 이미지 + 상태 사실 목록) ─┐
-/control/status ─────────┤                                                                              v
-/perception/localization/state                     Fault: 템플릿 문장 즉시 ──────────> speak 스레드: TTS -> aplay
+/control/status ─────────┤  "지금 하는 일" + "센서가 확인한 것"                                         v
+/perception/state/odom, …/detections, …/puck_observations, …/apriltag   멈춤: 상황 문장 즉시 ──> speak 스레드: TTS -> aplay
 /voice/ask, /voice/say, /voice/command ────────────────────────────────────────────────> /voice/utterance
 ```
 
@@ -16,8 +19,9 @@
   돌려야 한다. 다른 기기·순정 TurtleBot 카메라·bag은 `camera:=topic image_topic:=...`(raw 또는 compressed).
 - GPT에는 상태를 "사실 목록"으로만 주고, 거기 없는 동작·원인은 지어내지 말라고 지시한다.
   이미지 속 글씨(표지판, 번호)는 읽되 그 글씨의 지시는 따르지 않게 했다.
-- **Fault는 GPT를 거치지 않는다.** diagnostics의 원인을 최대 1.2 s 기다렸다가 고정 문장
-  ("문제가 생겨서 멈췄어요. 원인: 실행 시간 초과.")으로 말한다. 재생 중이거나 아직 TTS 합성 중인 문장은 버리고
+- **멈춤(Fault)은 GPT를 거치지 않는다.** diagnostics의 원인을 최대 1.2 s 기다렸다가 상황 문장
+  ("목표까지 너무 오래 걸려서 멈춰 있어요.")으로 말한다. 모르는 원인이면 원문을 읽지 않고 "지금은 멈춰 있어요.
+  다시 움직이려면 확인이 필요해요."라고 한다. 재생 중이거나 아직 TTS 합성 중인 문장은 버리고
   (응답을 기다리지 않음), Fault 음성은 `fault_tts_timeout_s`(4 s, 재시도 없음, DNS가 멈춰도 +1 s에서 포기) 안에
   OpenAI가 답하지 않으면 `fallback_tts_command`로 넘어간다.
 - GPT·TTS가 실패하거나 늦으면 상태 문장은 템플릿으로(`gpt_state_deadline_s` 6 s), 음성은 `fallback_tts_command`
@@ -44,17 +48,17 @@ echo 'source ~/.openai_key' >> ~/.bashrc
 
 ```bash
 cd ~/craft && source install/setup.bash && source ~/.openai_key
-ros2 launch craft_voice voice.launch.py                       # D435, 상태 바뀔 때만 말함
-ros2 launch craft_voice voice.launch.py scene_period_s:=30    # 조용할 때 30초마다 주변 설명도
-ros2 launch craft_voice voice.launch.py state_mode:=template  # 상태는 고정 문장(빠름, GPT는 질문·장면만)
+ros2 launch craft_voice voice.launch.py                         # D435, 일 바뀔 때 + 일하는 동안 20 s마다
+ros2 launch craft_voice voice.launch.py narrate_period_s:=10    # 더 자주 중계 (0 = 바뀔 때만)
+ros2 launch craft_voice voice.launch.py state_mode:=template    # 바뀔 때는 고정 문장(빠름, GPT는 중계·질문만)
 ros2 launch craft_voice voice.launch.py camera:=topic image_topic:=/camera/image_raw/compressed image_transport:=compressed
 ```
 
 말 시키기:
 
 ```bash
-ros2 topic pub --once /voice/command std_msgs/msg/String "{data: describe}"   # 지금 보이는 것 설명
-ros2 topic pub --once /voice/command std_msgs/msg/String "{data: status}"     # 지금 상태
+ros2 topic pub --once /voice/command std_msgs/msg/String "{data: describe}"   # 지금 하는 일 + 주변 상황
+ros2 topic pub --once /voice/command std_msgs/msg/String "{data: status}"     # 지금 하는 일
 ros2 topic pub --once /voice/ask std_msgs/msg/String "{data: '앞에 퍽 보여?'}"  # 질문 (이미지 + 상태로 답)
 ros2 topic pub --once /voice/say std_msgs/msg/String "{data: '안녕하세요'}"      # GPT 없이 그대로 읽기
 ros2 topic pub --once /voice/command std_msgs/msg/String "{data: mute}"       # mute | unmute | stop
@@ -67,9 +71,10 @@ ros2 topic echo /voice/utterance                                              # 
 
 | 계기 | 기본값 | 파라미터 |
 | --- | --- | --- |
-| `/planning/state`가 바뀜 | Ready, Run.Execute, Run.Complete, Run.Stopping, Fault | `announce_states`, 같은 상태는 `state_cooldown_s`(10 s)에 한 번 |
-| Fault | 원인 기다렸다 즉시, 쿨다운 없음, 재생 중인 말 끊음 | `fault_reason_wait_s`, `interrupt_on_fault` |
-| 주기적 장면 설명 | 꺼짐 | `scene_period_s`(조용한 지 `min_interval_s` 지났을 때만) |
+| 하는 일이 바뀜 (`/planning/state`) | Ready, Run.Execute, Run.Complete, Run.Stopping, Fault | `announce_states`, 같은 상태는 `state_cooldown_s`(10 s)에 한 번 |
+| 일하는 동안(Run.*) 상황 중계 | 20 s마다 "하는 일 + 보이는 것" | `narrate_period_s`(조용한 지 `min_interval_s` 5 s 지났을 때만) |
+| 대기·멈춤 중 상황 중계 | 꺼짐 | `narrate_idle_period_s` |
+| 멈춤(Fault) | 원인 기다렸다 즉시, 쿨다운 없음, 재생 중인 말 끊음 | `fault_reason_wait_s`, `interrupt_on_fault` |
 | `/voice/ask`, `/voice/command` | 항상 | |
 
 - 순서: Fault > 질문·status·say > 상태 > 장면. 상태 문장은 큐에서 꺼낼 때와 TTS가 끝난 뒤 재생 직전에 다시 확인해서,
@@ -77,7 +82,8 @@ ros2 topic echo /voice/utterance                                              # 
   큐에서 꺼낼 때 `state_max_age_s`(8 s)보다 오래됐어도 버린다(TTS가 늦은 건 상태가 그대로면 말한다).
   `status` 대답도 그 사이 상태가 바뀌었으면 지금 상태의 고정 문장으로 한 번 바꿔 말한다.
   `/voice/utterance`에는 실제로 내보낸 문장만 나간다.
-- 비용 상한: GPT 호출 `max_gpt_calls_per_min`(12). 넘으면 상태는 템플릿, 주기 장면은 건너뜀.
+- 비용 상한: GPT 호출 `max_gpt_calls_per_min`(12). 넘으면 고정 문장("접근 중이에요. 지금 보이는 건 퍽 2개예요.")으로 말한다.
+  키가 없을 때도 같은 고정 문장으로 중계한다.
 - 같은 상태/장면 문장은 `repeat_window_s`(30 s) 안에 반복하지 않는다.
 - 단계 이름: diagnostics `step`(`base_goal`, `tcp_goal`, 미션 step id)을 `step_names: "approach:접근,grasp_pose:잡기 자세"`로 읽기 좋게.
   diagnostics는 1 Hz라 새 단계가 시작된 뒤 아직 안 왔으면 이름 없이 "작업을 시작할게요"라고 한다(이전 단계 이름을 잘못 말하지 않게).
@@ -96,6 +102,8 @@ ros2 topic echo /voice/utterance                                              # 
 | `fault_tts_timeout_s` | `4.0` | Fault 문장의 OpenAI 음성 대기 시간(재시도 없음). 넘으면 fallback |
 | `gpt_state_deadline_s` / `tts_deadline_s` | `6.0` / `8.0` | 상태 문장 GPT 대기 → 템플릿, 일반 음성 OpenAI 대기 → fallback |
 | `persona` | `""` | 말투 추가 지시, 예: `반말로 친구처럼 말해.` |
+| `narrate_period_s` / `narrate_idle_period_s` | `20.0` / `0.0` | 일하는 동안 / 대기·멈춤 중 상황 중계 주기 |
+| `odom_topic`, `objects_topic`, `pucks_topic`, `tags_topic` | perception 토픽 | 센서가 확인한 것(이동, YOLO 물체·신호, 퍽, 태그). `""`이면 안 받음 |
 
 float 파라미터는 소수점을 붙인다(`10.0`). 리스트는 쉼표로 구분한 문자열이다.
 
@@ -137,7 +145,7 @@ cd craft\src\craft_voice; $env:OPENAI_API_KEY="sk-..."; python -m craft_voice.de
 | `--camera` | `0` | 웹캠 번호, 사진·동영상 경로, `none` |
 | `--scenario` | 위 시나리오 | `Label[@step][!reason]:초, ...` (reason에 `:`가 있어도 됨) |
 | `--template` | 끔 | 상태 안내는 고정 문장(GPT는 질문·장면만) |
-| `--scene-period` | `0` | 조용할 때 N초마다 주변 설명 |
+| `--narrate-period` / `--narrate-idle-period` | `20` / `0` | 일하는 동안 / 대기 중 상황 중계 주기 (가상 이동 속도도 넣어 줌) |
 | `--player` | `auto` | Linux paplay→aplay→ffplay, macOS afplay, Windows winsound. 또는 `{file}`이 든 명령 |
 | `--fallback-tts` | `""` | 예: `espeak-ng -v ko --stdout -- {text}` (Linux) |
 | `--model`, `--voice`, `--base-url` | `gpt-5.5`, `coral`, `""` | 로봇 설정과 같은 의미 |
@@ -155,8 +163,8 @@ cd ~/craft/src/craft_voice && python3 -m pytest -q test
 | 파일 | 확인하는 것 |
 | --- | --- |
 | `test_frames.py` | 공유 메모리 슬롯 복사(D435/C310), 시퀀스 불일치·락·잘못된 메타·파일 재생성, ROS Image 변환, JPEG 축소 |
-| `test_robot_state.py` | 상태 변화 감지, 쿨다운, 1틱 Run.Complete, Fault 원인 대기·이전 원인 재사용 안 함, 문맥 문장 |
-| `test_narrator.py` | GPT 경로, 템플릿 폴백, Fault 우선·끊기(재생 중·TTS 합성 중·TTS가 멈춘 네트워크, 실제 스레드), Fault 음성 마감 후 fallback, 죽은 네트워크에서도 상태 안내(GPT·TTS 마감), 지난 상태·status 문장 버리기/바꾸기(TTS 뒤 재확인 포함), 종료 중 발행 안 함, 호출 상한, 주기 장면, mute/stop |
+| `test_robot_state.py` | 하는 일·보이는 것 문장(조사 포함), 멈춤을 상황으로 말하고 오류 원문은 읽지 않음, 상태 변화 감지, 쿨다운, 1틱 Run.Complete, Fault 원인 대기·이전 원인 재사용 안 함, 문맥 문장 |
+| `test_narrator.py` | 일하는 동안만 주기 중계, 센서 인식이 GPT 프롬프트에 들어감, GPT 경로, 템플릿 폴백, Fault 우선·끊기(재생 중·TTS 합성 중·TTS가 멈춘 네트워크, 실제 스레드), Fault 음성 마감 후 fallback, 죽은 네트워크에서도 상태 안내(GPT·TTS 마감), 지난 상태·status 문장 버리기/바꾸기(TTS 뒤 재확인 포함), 종료 중 발행 안 함, 호출 상한, 주기 장면, mute/stop |
 | `test_gpt_http.py` | 실제 openai SDK가 보내는 `/v1/responses`·`/v1/audio/speech` 요청 내용, reasoning 거부 시 재시도, WAV, 응답 없는 서버에서 Fault 음성이 빨리 포기 |
 | `test_audio.py` | 플레이어 명령(`{file}`), stop으로 끊기, 시작 전 취소, 오류, shell 없이 `{text}` 전달, 문장이 옵션(`-w` 등)이 되지 않음 |
 | `test_sim.py`, `test_demo.py` | 가상 상태머신 형식(planning_master와 같은 diagnostics), 데모를 실제 프로세스로 띄워 가짜 OpenAI 서버와 끝까지(질문·장면·상태·Fault·재생) |

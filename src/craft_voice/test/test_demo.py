@@ -81,7 +81,7 @@ def test_demo_runs_end_to_end(tmp_path):
     assert out.count('>> [state] 상태 알림') == 2                 # Ready, Run.Execute(approach)
     assert '>> [ask] 앞에 파란 상자가 보여요.' in out
     assert '>> [scene] 주변이 밝은 방이에요.' in out
-    assert '>> [fault] 문제가 생겨서 멈췄어요. 원인: 실행 시간 초과.' in out
+    assert '>> [fault] 목표까지 너무 오래 걸려서 멈춰 있어요.' in out
     assert 'commands:' in out                                   # unknown command shows help
     responses = [body for path, body in server.requests if path.endswith('/responses')]
     assert responses and all(b['input'][0]['content'][1]['image_url'].startswith('data:image/jpeg;base64,')
@@ -185,3 +185,12 @@ def test_raw_mjpeg_plays_as_video_and_non_ascii_picture_path(tmp_path):
     cv2.imwrite(str(picture), np.full((10, 20, 3), 77, np.uint8))
     still = Camera(str(picture))
     assert still._thread is None and int(still.frame()[5, 5, 0]) == 77
+
+
+def test_demo_narrates_while_working_without_a_key():
+    result, _ = demo(['--camera', 'none', '--once', '--seconds', '8', '--narrate-period', '2',
+                      '--keep-running-without-input', '--scenario', 'Run.Execute@approach:9'], b'')
+    out = result.stdout.decode()
+    assert result.returncode == 0, result.stderr
+    assert '>> [state] 작업을 시작할게요.' in out             # first label: step not in diagnostics yet
+    assert '>> [scene] 접근 중이에요.' in out                  # periodic: now with the step name

@@ -95,7 +95,7 @@ pa_craft/
 | `src/craft_perception` | C++ PerceptionMaster + D435/C310 클래스 (ncnn·AprilTag·깊이·레버·puck 인지) ([실행·주기 설정](src/craft_perception/README.md)) |
 | `src/craft_planning` | 주행 경로 계획 |
 | `src/craft_control` | 로봇 팔·시계 조작 계획, 주행 및 조작 목표를 제어 입력으로 연결 |
-| `src/craft_voice` | 카메라 이미지와 `/planning/state`를 GPT(OpenAI API)로 문장화해 스피커로 말함 ([실행 안내](src/craft_voice/README.md)) |
+| `src/craft_voice` | 지금 하는 일(`/planning/state`)과 주변 상황(카메라·인식 결과)을 GPT(OpenAI API)로 문장화해 스피커로 말함 ([실행 안내](src/craft_voice/README.md)) |
 | `firmware/wheel_clock`, `firmware/lm_arm` | OpenCR 두 대의 모터 펌웨어 ([설정·빌드 안내](firmware/README.md)) |
 
 ## 실행

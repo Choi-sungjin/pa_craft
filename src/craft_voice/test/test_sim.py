@@ -50,7 +50,7 @@ def test_diagnostics_match_planning_master_and_feed_the_tracker():
     name, level, message, values = sim.diagnostics(sim.at(3.5))
     assert (name, level, message) == ('planning/state_machine', 2, 'Fault: Run.Execute: compute timeout')
     assert values['task_id'] == '2' and values['step'] == 'grasp'
-    assert events[-1] == '문제가 생겨서 멈췄어요. 원인: 계산 시간 초과.'
+    assert events[-1] == '갈 길을 찾지 못해서 멈춰 있어요.'
 
 
 def test_fault_command_like_state_machine_fail():

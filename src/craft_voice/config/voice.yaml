@@ -17,6 +17,11 @@ voice_node:
     planning_diagnostics_topic: /planning/diagnostics
     control_status_topic: /control/status
     context_topics: /perception/localization/state   # comma separated std_msgs/String topics, context only
+    # What perception sees, told to GPT next to the camera picture ("" = do not subscribe)
+    odom_topic: /perception/state/odom                         # moving / turning / stopped
+    objects_topic: /perception/vision/d435/detections          # YOLO labels (knob, signs)
+    pucks_topic: /perception/vision/d435/puck_observations     # pucks: standing/lying, distance
+    tags_topic: /perception/vision/d435/apriltag               # AprilTag ids
     # Labels that are announced when /planning/state changes to them (Fault is never rate limited).
     # All labels: Idle, Ready, Run.AwaitRequest, Run.PrepareTask, Run.Compute, Run.Execute,
     #             Run.Complete, Run.Stopping, Fault
@@ -26,8 +31,9 @@ voice_node:
     state_mode: gpt               # gpt: GPT phrases it (with the image) | template: fixed sentence, faster
     fault_reason_wait_s: 1.2      # wait this long for the diagnostics fault reason before speaking
 
-    # ---- when to talk ---------------------------------------------------------------------------
-    scene_period_s: 0.0           # describe the surroundings every N s while quiet, 0 = off (try 30.0)
+    # ---- when to talk (when the action changes, and periodically while working) -------------------
+    narrate_period_s: 20.0        # while working: "what I am doing + what I see" every N s, 0 = off
+    narrate_idle_period_s: 0.0    # the same while Idle / Ready / stopped, 0 = off
     min_interval_s: 5.0           # quiet time needed before a periodic scene
     max_gpt_calls_per_min: 12     # cost guard; over it state changes fall back to templates
     repeat_window_s: 30.0

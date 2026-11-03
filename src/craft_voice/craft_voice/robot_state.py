@@ -6,15 +6,17 @@ Run.Execute, Run.Complete (one loop only), Run.Stopping, Fault. The fault
 reason and current step come about once a second on /planning/diagnostics
 (status 'planning/state_machine', message 'Fault: <phase>: <reason>').
 
-StateTracker turns that stream into a snapshot for the GPT prompt and into
-announcement events on label changes. A Fault event waits up to
-fault_reason_wait_s for the diagnostics reason so it can say why.
+StateTracker turns that stream, plus what perception sees (motion, YOLO
+detections, pucks, AprilTags), into "what I am doing and what is around me":
+facts for the GPT prompt, and announcement events on label changes. Spoken
+sentences describe actions and situations, never state labels or error codes.
+A Fault event waits up to fault_reason_wait_s for the reason so it can say why.
 """
 
 from __future__ import annotations
 
 import math
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass, field
 
 STATE_KO = {
@@ -31,21 +33,26 @@ STATE_KO = {
 
 STEP_KO = {'base_goal': '목표 지점 이동', 'tcp_goal': '팔 목표 자세 이동'}
 
-# Substrings of planning fault reasons (state_machine.cpp, planning_master.cpp) -> spoken Korean.
+# Substrings of planning fault reasons (state_machine.cpp, planning_master.cpp) ->
+# (short Korean for the GPT facts, spoken situation: what happened and what the robot is doing now).
 REASON_KO = (
-    ('initialization timeout', '초기화 시간 초과'),
-    ('task preparation timeout', '작업 준비 시간 초과'),
-    ('compute timeout', '계산 시간 초과'),
-    ('calculation failed', '경로나 자세 계산 실패'),
-    ('execution timeout', '실행 시간 초과'),
-    ('stop acknowledgement timeout', '정지 확인 시간 초과'),
-    ('localization lost', '위치 추정 실패'),
-    ('control unavailable', '제어기 응답 없음'),
-    ('stale odom/lidar input', '오도메트리나 라이다 입력 끊김'),
-    ('stale control task result', '제어 결과 응답 끊김'),
-    ('no progress', '진행 없음'),
-    ('module/feedback fault', '모듈 피드백 이상'),
+    ('initialization timeout', '초기화 시간 초과', '준비가 끝나지 않아서 아직 출발하지 못하고 있어요.'),
+    ('task preparation timeout', '작업 준비 시간 초과', '작업 준비가 늦어져서 멈춰 있어요.'),
+    ('compute timeout', '계산 시간 초과', '갈 길을 찾지 못해서 멈춰 있어요.'),
+    ('calculation failed', '경로나 자세 계산 실패', '갈 길을 찾지 못해서 멈춰 있어요.'),
+    ('execution timeout', '실행 시간 초과', '목표까지 너무 오래 걸려서 멈춰 있어요.'),
+    ('stop acknowledgement timeout', '정지 확인 시간 초과', '멈췄는지 확인이 늦어져서 그 자리에 서 있어요.'),
+    ('localization lost', '위치 추정 실패', '제 위치를 놓쳐서 멈춰 있어요.'),
+    ('control unavailable', '제어기 응답 없음', '바퀴와 팔 제어 연결이 끊겨서 멈춰 있어요.'),
+    ('stale odom/lidar input', '오도메트리나 라이다 입력 끊김', '센서 정보가 끊겨서 멈춰 있어요.'),
+    ('stale control task result', '제어 결과 응답 끊김', '제어 쪽 응답이 끊겨서 멈춰 있어요.'),
+    ('no progress', '진행 없음', '앞으로 나아가지 못해서 멈춰 있어요.'),
+    ('module/feedback fault', '모듈 피드백 이상', '장치 응답이 이상해서 멈춰 있어요.'),
 )
+
+# craft_perception YOLO labels (perception.yaml class_names) -> Korean.
+OBJECT_KO = {'knob': '손잡이', 'sign_red': '빨간 신호', 'sign_yellow': '노란 신호', 'sign_green': '초록 신호',
+             'sign_off': '꺼진 신호', 'puck': '퍽', 'lever': '레버'}
 
 DIAGNOSTIC_NAME = 'planning/state_machine'
 ACTIVE_PHASES = ('Run.PrepareTask', 'Run.Compute', 'Run.Execute')  # one step, start to finish
@@ -67,10 +74,26 @@ def parse_mapping(text: str) -> dict[str, str]:
 
 def reason_ko(reason: str) -> str:
     lowered = reason.lower()
-    for needle, spoken in REASON_KO:
+    for needle, short, _ in REASON_KO:
         if needle in lowered:
-            return spoken
+            return short
     return reason.strip()
+
+
+def copula(word: str) -> str:
+    """'이에요' after a final consonant (받침), '예요' otherwise: '3번이에요', '2개예요'."""
+    last = word.rstrip()[-1:] or '가'
+    has_batchim = '가' <= last <= '힣' and (ord(last) - 0xAC00) % 28 != 0
+    return '이에요' if has_batchim or last.isdigit() else '예요'
+
+
+def fault_situation(reason: str) -> str:
+    """Spoken sentence for a fault: the situation, never the raw error text."""
+    lowered = reason.lower()
+    for needle, _, situation in REASON_KO:
+        if needle in lowered:
+            return situation
+    return '지금은 멈춰 있어요. 다시 움직이려면 확인이 필요해요.' if reason else '지금은 멈춰 있어요.'
 
 
 @dataclass(frozen=True)
@@ -103,6 +126,7 @@ class StateTracker:
     cooldown_s: float = 10.0
     fault_reason_wait_s: float = 1.2
     stale_s: float = 3.0
+    perception_stale_s: float = 2.0
     step_names: dict = field(default_factory=dict)
 
     def __post_init__(self):
@@ -118,6 +142,10 @@ class StateTracker:
         self.fault_reason_at = -math.inf
         self.control = ControlSnapshot()
         self.context: dict[str, tuple[str, float]] = {}
+        self.motion: tuple[float, float, float] | None = None       # (v m/s, w rad/s, at)
+        self.objects: tuple[Counter, float] | None = None           # YOLO labels seen in the last frame
+        self.pucks: tuple[list, float] | None = None                # [(standing, distance m)]
+        self.tags: tuple[list, float] | None = None                 # AprilTag ids
         self.history: deque = deque(maxlen=8)
         self.generation = 0
         self._announced_at: dict[str, float] = {}
@@ -173,6 +201,20 @@ class StateTracker:
     def update_context(self, topic: str, value: str, now: float):
         self.context[topic] = (value.strip(), now)
 
+    # ---- what perception sees ------------------------------------------------------------
+    def update_motion(self, linear_x: float, angular_z: float, now: float):
+        self.motion = (float(linear_x), float(angular_z), now)
+
+    def update_objects(self, labels, now: float):
+        self.objects = (Counter(label for label in labels if label), now)
+
+    def update_pucks(self, pucks, now: float):
+        """pucks: [(standing: bool, distance from the camera in m)]."""
+        self.pucks = (sorted(((bool(st), float(d)) for st, d in pucks), key=lambda p: p[1]), now)
+
+    def update_tags(self, ids, now: float):
+        self.tags = (sorted({int(i) for i in ids}), now)
+
     def poll(self, now: float) -> StateEvent | None:
         """Pending Fault event, once its reason arrived or the wait ran out."""
         event = self._pending_fault
@@ -199,33 +241,109 @@ class StateTracker:
         return now - self.label_at <= self.stale_s
 
     def template(self, event: StateEvent) -> str:
-        """Deterministic spoken sentence for an event (no GPT)."""
-        step = f'{event.step} ' if event.step else ''
+        """Spoken sentence for a change (no GPT): the action that starts or ends, or the situation."""
+        step = event.step
         if event.label == 'Fault':
-            if event.reason:
-                return f'문제가 생겨서 멈췄어요. 원인: {reason_ko(event.reason)}.'
-            return '문제가 생겨서 멈췄어요.'
+            return fault_situation(event.reason)
         return {
-            'Idle': '시스템을 초기화하고 있어요.',
-            'Ready': '준비 완료. 미션 시작을 기다리고 있어요.',
-            'Run.AwaitRequest': '다음 작업을 기다리고 있어요.',
-            'Run.PrepareTask': f'{step}작업을 준비하고 있어요.',
-            'Run.Compute': '경로를 계산하고 있어요.',
-            'Run.Execute': f'{step}작업을 시작할게요.',
-            'Run.Complete': f'{step}작업을 마쳤어요.',
-            'Run.Stopping': '정지하는 중이에요.',
-        }.get(event.label, f'상태가 바뀌었어요: {event.label}.')
+            'Idle': '시작할 준비를 하고 있어요.',
+            'Ready': '준비됐어요. 출발 신호를 기다리고 있어요.',
+            'Run.AwaitRequest': '다음 할 일을 기다리고 있어요.',
+            'Run.PrepareTask': f'{step} 준비를 하고 있어요.' if step else '다음 작업을 준비하고 있어요.',
+            'Run.Compute': '가는 길을 계산하고 있어요.',
+            'Run.Execute': f'{step}, 시작할게요.' if step else '작업을 시작할게요.',
+            'Run.Complete': f'{step}, 끝났어요.' if step else '작업 하나를 끝냈어요.',
+            'Run.Stopping': '멈추는 중이에요.',
+        }.get(event.label, '하는 일이 바뀌었어요.')
+
+    def doing(self, now: float) -> str:
+        """What the robot is doing right now, as a spoken sentence."""
+        if self.label is None or not self.planning_fresh(now):
+            return '아직 제 작업 상태를 받지 못했어요.'
+        step = self.step_name()
+        if self.label == 'Fault':
+            return fault_situation(self.fault_reason)
+        return {
+            'Idle': '시작할 준비를 하고 있어요.',
+            'Ready': '출발 신호를 기다리고 있어요.',
+            'Run.AwaitRequest': '다음 할 일을 기다리고 있어요.',
+            'Run.PrepareTask': f'{step} 준비를 하고 있어요.' if step else '다음 작업을 준비하고 있어요.',
+            'Run.Compute': '가는 길을 계산하고 있어요.',
+            'Run.Execute': f'{step} 중이에요.' if step else '작업하고 있어요.',
+            'Run.Complete': f'{step}, 방금 끝났어요.' if step else '방금 작업 하나를 끝냈어요.',
+            'Run.Stopping': '멈추는 중이에요.',
+        }.get(self.label, '작업하고 있어요.')
 
     def current_template(self, now: float) -> str:
-        if self.label is None or not self.planning_fresh(now):
-            return '상태머신 데이터가 들어오지 않고 있어요.'
-        reason = self.fault_reason if self.label == 'Fault' else ''
-        return self.template(StateEvent(self.label, None, self.label_since, self.step_name(), reason,
-                                        self.generation))
+        """What I am doing, plus what my sensors see (no GPT)."""
+        seen = self.seen_sentence(now)
+        return self.doing(now) + (' ' + seen if seen else '')
+
+    # ---- perception summaries -------------------------------------------------------------
+    def _fresh(self, item, now: float):
+        return item if item is not None and now - item[-1] <= self.perception_stale_s else None
+
+    def moving_text(self, now: float) -> str:
+        motion = self._fresh(self.motion, now)
+        if motion is None:
+            return ''
+        v, w, _ = motion
+        if abs(v) >= 0.02:
+            return f'{"앞으로" if v > 0 else "뒤로"} 초속 {abs(v):.2f} m로 이동 중' + (', 방향 바꾸는 중' if abs(w) >= 0.15 else '')
+        if abs(w) >= 0.15:
+            return '제자리에서 방향을 바꾸는 중'
+        return '멈춰 있음'
+
+    def object_items(self, now: float) -> list[str]:
+        items = []
+        objects = self._fresh(self.objects, now)
+        if objects is not None:
+            items += [f'{OBJECT_KO.get(label, label)} {count}개' for label, count in sorted(objects[0].items())]
+        pucks = self._fresh(self.pucks, now)
+        if pucks is not None and pucks[0]:
+            standing = sum(1 for st, _ in pucks[0] if st)
+            lying = len(pucks[0]) - standing
+            kinds = ', '.join(t for t in (f'선 것 {standing}' if standing else '', f'누운 것 {lying}' if lying else '')
+                              if t)
+            items.append(f'퍽 {len(pucks[0])}개({kinds}, 가장 가까운 것 약 {pucks[0][0][1]:.1f} m)')
+        tags = self._fresh(self.tags, now)
+        if tags is not None and tags[0]:
+            items.append('AprilTag ' + ', '.join(str(i) for i in tags[0]) + '번')
+        return items
+
+    def seen_sentence(self, now: float) -> str:
+        """Short spoken summary of what perception reports ('' if nothing fresh)."""
+        items = []
+        objects = self._fresh(self.objects, now)
+        if objects is not None:
+            items += [f'{OBJECT_KO.get(label, label)} {count}개' for label, count in sorted(objects[0].items())]
+        pucks = self._fresh(self.pucks, now)
+        if pucks is not None and pucks[0]:
+            items.append(f'퍽 {len(pucks[0])}개')
+        tags = self._fresh(self.tags, now)
+        if tags is not None and tags[0]:
+            items.append('태그 ' + ', '.join(str(i) for i in tags[0]) + '번')
+        if not items:
+            return ''
+        joined = ', '.join(items)
+        return f'지금 보이는 건 {joined}{copula(joined)}.'
+
+    def perception_text(self, now: float) -> str:
+        lines = []
+        moving = self.moving_text(now)
+        if moving:
+            lines.append(f'- 움직임(odom): {moving}')
+        objects = self._fresh(self.objects, now)
+        items = self.object_items(now)
+        if items:
+            lines.append('- 인식된 것: ' + ', '.join(items))
+        elif objects is not None:
+            lines.append('- 인식된 것: 없음 (카메라 인식이 아무것도 찾지 못함)')
+        return '\n'.join(lines)
 
     def context_text(self, now: float) -> str:
         """Facts block for the GPT prompt. Only what was received, with ages."""
-        lines = []
+        lines = [f'- 지금 하는 일: {self.doing(now)}']
         if self.label is None or not self.planning_fresh(now):
             lines.append('- 상태머신(/planning/state): 데이터 없음 (planning_master가 안 떠 있을 수 있음)')
         else:

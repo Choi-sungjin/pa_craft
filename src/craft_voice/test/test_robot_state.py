@@ -1,4 +1,4 @@
-from craft_voice.robot_state import StateTracker, parse_list, parse_mapping, reason_ko
+from craft_voice.robot_state import StateTracker, copula, parse_list, parse_mapping, reason_ko
 
 
 def diag(tracker, message, now, **values):
@@ -40,7 +40,7 @@ def test_fault_waits_for_reason():
     diag(t, 'Fault: Run.Execute: execution timeout', 5.6)
     event = t.poll(5.6)
     assert event.fault and event.reason == 'Run.Execute: execution timeout'
-    assert t.template(event) == '문제가 생겨서 멈췄어요. 원인: 실행 시간 초과.'
+    assert t.template(event) == '목표까지 너무 오래 걸려서 멈춰 있어요.'
     assert t.poll(6.0) is None                                # announced once
 
 
@@ -49,7 +49,7 @@ def test_fault_without_reason_after_wait_and_reset_cancels():
     t.update_planning('Fault', 0.0)
     assert t.poll(1.0) is None
     event = t.poll(1.3)
-    assert event.reason == '' and t.template(event) == '문제가 생겨서 멈췄어요.'
+    assert event.reason == '' and t.template(event) == '지금은 멈춰 있어요.'
     t.update_planning('Idle', 2.0)
     t.update_planning('Fault', 3.0)
     t.update_planning('Idle', 3.2)                            # RESET before the reason came
@@ -76,10 +76,10 @@ def test_reason_arriving_just_before_state():
 def test_step_names_in_templates():
     t = StateTracker(step_names=parse_mapping('approach:접근, grasp_pose : 잡기 자세'))
     diag(t, 'Run.Execute: ', 0.0, step='base_goal', task_id='3', queued='0')
-    assert t.template(t.update_planning('Run.Execute', 0.1)) == '목표 지점 이동 작업을 시작할게요.'
+    assert t.template(t.update_planning('Run.Execute', 0.1)) == '목표 지점 이동, 시작할게요.'
     diag(t, 'Run.Execute: ', 20.0, step='approach')
     t.update_planning('Run.Complete', 20.1)
-    assert t.current_template(20.2) == '접근 작업을 마쳤어요.'
+    assert t.current_template(20.2) == '접근, 방금 끝났어요.'
 
 
 def test_step_from_previous_step_is_not_used():
@@ -87,7 +87,7 @@ def test_step_from_previous_step_is_not_used():
     t = StateTracker(step_names=parse_mapping('approach:접근'), cooldown_s=0.0)
     t.update_planning('Run.Execute', 5.0)
     diag(t, 'Run.Execute: ', 9.98, step='approach')
-    assert t.template(t.update_planning('Run.Complete', 10.0)) == '접근 작업을 마쳤어요.'
+    assert t.template(t.update_planning('Run.Complete', 10.0)) == '접근, 끝났어요.'
     for at, label in ((10.05, 'Run.AwaitRequest'), (10.10, 'Run.PrepareTask'), (10.15, 'Run.Compute')):
         t.update_planning(label, at)
     event = t.update_planning('Run.Execute', 10.4)
@@ -141,3 +141,34 @@ def test_parsers():
     assert parse_list(' a, ,b ,') == ['a', 'b']
     assert parse_mapping('x:1, bad, :2, y: ') == {'x': '1'}
     assert reason_ko('weird thing') == 'weird thing'
+
+
+def test_doing_and_seen_sentences_from_perception():
+    t = StateTracker()
+    t.update_planning('Run.Execute', 0.0)
+    diag(t, 'Run.Execute: ', 0.1, step='base_goal')
+    t.update_motion(0.12, 0.0, 0.2)
+    t.update_objects(['knob', 'sign_red', 'knob'], 0.2)
+    t.update_pucks([(True, 0.62), (False, 0.41)], 0.2)
+    t.update_tags([7, 3], 0.2)
+    assert t.current_template(0.5) == ('목표 지점 이동 중이에요. '
+                                       '지금 보이는 건 손잡이 2개, 빨간 신호 1개, 퍽 2개, 태그 3, 7번이에요.')
+    text = t.perception_text(0.5)
+    assert '- 움직임(odom): 앞으로 초속 0.12 m로 이동 중' in text
+    assert '퍽 2개(선 것 1, 누운 것 1, 가장 가까운 것 약 0.4 m)' in text and 'AprilTag 3, 7번' in text
+    t.update_planning('Run.Execute', 4.9)                       # planning keeps publishing
+    assert t.perception_text(5.0) == '' and t.current_template(5.0) == '목표 지점 이동 중이에요.'  # stale
+    t.update_objects([], 6.0)
+    assert t.perception_text(6.1) == '- 인식된 것: 없음 (카메라 인식이 아무것도 찾지 못함)'
+    t.update_motion(0.0, 0.5, 6.0)
+    assert t.moving_text(6.1) == '제자리에서 방향을 바꾸는 중'
+
+
+def test_fault_is_told_as_a_situation_never_as_raw_error_text():
+    t = StateTracker(fault_reason_wait_s=0.5)
+    t.update_planning('Fault', 0.0)
+    diag(t, 'Fault: Run.Execute: weird internal code XYZ-42', 0.1)
+    sentence = t.template(t.poll(0.1))
+    assert sentence == '지금은 멈춰 있어요. 다시 움직이려면 확인이 필요해요.' and 'XYZ' not in sentence
+    assert 'XYZ-42' in t.context_text(0.2)                      # GPT still gets the fact, told not to read codes
+    assert copula('2개') == '예요' and copula('3번') == '이에요' and copula('7') == '이에요'

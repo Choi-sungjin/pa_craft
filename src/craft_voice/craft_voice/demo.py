@@ -1,6 +1,7 @@
 """Try the voice on a laptop: no ROS, no robot. Python venv + webcam (or a picture) + speaker.
 
     python -m craft_voice.demo                       # webcam 0, built-in scenario, GPT + OpenAI speech
+    python -m craft_voice.demo --narrate-period 10   # say what it does and sees every 10 s while working
     python -m craft_voice.demo --camera photo.jpg    # a picture or a video file instead of the webcam
     python -m craft_voice.demo --template            # state changes as fixed sentences (no GPT for them)
 
@@ -32,6 +33,7 @@ from .sim import DEFAULT_SCENARIO, SimStateMachine, parse_item, parse_scenario
 
 log = logging.getLogger('craft_voice')
 IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.bmp', '.webp', '.tif', '.tiff')
+SIM_MOTION = {'Run.Execute': (0.12, 0.0), 'Run.Stopping': (0.03, 0.0)}  # simulated odom (m/s, rad/s)
 
 
 class Camera:
@@ -135,7 +137,8 @@ def build(args) -> tuple[Narrator, SimStateMachine, Camera]:
     camera = Camera(args.camera)
     tracker = StateTracker(announce=tuple(parse_list(args.announce)), cooldown_s=args.cooldown,
                            step_names=parse_mapping(args.step_names))
-    config = NarratorConfig(state_mode='template' if args.template else 'gpt', scene_period_s=args.scene_period,
+    config = NarratorConfig(state_mode='template' if args.template else 'gpt', narrate_period_s=args.narrate_period,
+                            narrate_idle_period_s=args.narrate_idle_period,
                             persona=args.persona, use_image=args.camera.lower() not in ('', 'none'),
                             camera_description='노트북 카메라 (로봇 대신 시험 중)')
     narrator = Narrator(config, tracker, backend=backend, player=default_player(args.player),
@@ -195,6 +198,7 @@ def run(args) -> int:
             now = time.monotonic()
             current = sim.at(now - started)
             narrator.planning_state(current.label)            # like /planning/state at 20 Hz
+            narrator.motion(*SIM_MOTION.get(current.label, (0.0, 0.0)))  # like /perception/state/odom
             if now - last_diag >= 1.0:                         # like /planning/diagnostics at 1 Hz
                 narrator.diagnostics(*sim.diagnostics(current))
                 last_diag = now
@@ -221,7 +225,9 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument('--scenario', default=DEFAULT_SCENARIO, help='Label[@step][!reason]:seconds, ...')
     p.add_argument('--once', action='store_true', help='play the scenario once instead of looping')
     p.add_argument('--template', action='store_true', help='state changes as fixed sentences (no GPT)')
-    p.add_argument('--scene-period', type=float, default=0.0, help='describe the view every N s while quiet')
+    p.add_argument('--narrate-period', type=float, default=20.0,
+                   help='while working, say what it does and sees every N s (0 = off)')
+    p.add_argument('--narrate-idle-period', type=float, default=0.0, help='the same while idle/ready/stopped')
     p.add_argument('--announce', default='Ready,Run.Execute,Run.Complete,Run.Stopping,Fault')
     p.add_argument('--cooldown', type=float, default=10.0)
     p.add_argument('--step-names', default='approach:접근,grasp_pose:잡기 자세')

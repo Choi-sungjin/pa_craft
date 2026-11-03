@@ -104,8 +104,9 @@ def test_state_change_goes_through_gpt_with_image():
     run(narrator)
     instructions, prompt, jpeg = backend.calls[0]
     assert jpeg[:2] == b'\xff\xd8'
-    assert 'Idle에서 Ready' in prompt and '[로봇 상태]' in prompt and '이미지 첨부됨' in prompt
-    assert '지어내지 마' in instructions
+    assert 'Idle -> Ready' in prompt and '[로봇 상태]' in prompt and '이미지 첨부됨' in prompt
+    assert '[센서가 확인한 것]' in prompt and '- 지금 하는 일: 출발 신호를 기다리고 있어요.' in prompt
+    assert '지어내지 마' in instructions and '오류 코드' in instructions
     assert texts == [('state', '준비됐어요. 앞에 벽이 보여요.')]
     assert narrator.player.played == [b'RIFF' + '준비됐어요. 앞에 벽이 보여요.'.encode()]
 
@@ -115,11 +116,11 @@ def test_template_mode_and_no_backend_skip_gpt():
     narrator, texts = make(backend, state_mode='template')
     narrator.planning_state('Ready')
     run(narrator)
-    assert backend.calls == [] and texts == [('state', '준비 완료. 미션 시작을 기다리고 있어요.')]
+    assert backend.calls == [] and texts == [('state', '준비됐어요. 출발 신호를 기다리고 있어요.')]
     narrator, texts = make(None)
     narrator.planning_state('Ready')
     run(narrator)
-    assert texts == [('state', '준비 완료. 미션 시작을 기다리고 있어요.')]
+    assert texts == [('state', '준비됐어요. 출발 신호를 기다리고 있어요.')]
 
 
 def test_gpt_failure_falls_back_to_template():
@@ -127,7 +128,7 @@ def test_gpt_failure_falls_back_to_template():
     narrator, texts = make(backend)
     narrator.planning_state('Run.Stopping')
     run(narrator)
-    assert texts == [('state', '정지하는 중이에요.')] and narrator.stats['gpt_errors'] == 1
+    assert texts == [('state', '멈추는 중이에요.')] and narrator.stats['gpt_errors'] == 1
 
 
 def test_no_frame_means_no_image():
@@ -149,7 +150,7 @@ def test_fault_beats_pending_state_and_skips_gpt():
     narrator.tick()
     run(narrator)
     assert backend.calls == []                                # the state job was dropped, fault is a template
-    assert texts == [('fault', '문제가 생겨서 멈췄어요. 원인: 실행 시간 초과.')]
+    assert texts == [('fault', '목표까지 너무 오래 걸려서 멈춰 있어요.')]
 
 
 def test_state_sentence_dropped_when_newer_state_arrives():
@@ -175,7 +176,7 @@ def test_state_sentence_in_flight_is_not_spoken_after_fault():
     clock.now += 2.0
     narrator.tick()
     run(narrator)
-    assert texts == [('fault', '문제가 생겨서 멈췄어요.')]
+    assert texts == [('fault', '지금은 멈춰 있어요.')]
 
 
 def test_fault_drops_scene_queued_while_reason_pending():
@@ -187,7 +188,7 @@ def test_fault_drops_scene_queued_while_reason_pending():
     clock.now += 2.0
     narrator.tick()                                           # fault sentence (no reason) now
     run(narrator)
-    assert texts == [('fault', '문제가 생겨서 멈췄어요.')]
+    assert texts == [('fault', '지금은 멈춰 있어요.')]
 
 
 def test_gpt_call_in_flight_when_fault_arrives():
@@ -205,12 +206,12 @@ def test_gpt_call_in_flight_when_fault_arrives():
     clock.now += 2.0
     narrator.tick()
     run(narrator)
-    assert texts == [('fault', '문제가 생겨서 멈췄어요.')]
+    assert texts == [('fault', '지금은 멈춰 있어요.')]
 
 
 def test_state_sentence_dropped_when_state_moved_on_unannounced():
     clock = Clock()
-    narrator, texts = make(Backend('정지하는 중이에요.'), clock=clock)
+    narrator, texts = make(Backend('멈추는 중이에요.'), clock=clock)
     narrator.planning_state('Run.Stopping')
     narrator.think_once()
     for label in ('Run.AwaitRequest', 'Run.PrepareTask', 'Run.Compute'):  # none announced
@@ -250,7 +251,7 @@ def test_budget_limits_gpt_calls():
     run(narrator)
     narrator.planning_state('Run.Stopping')
     run(narrator)
-    assert len(backend.calls) == 1 and texts[-1] == ('state', '정지하는 중이에요.')
+    assert len(backend.calls) == 1 and texts[-1] == ('state', '멈추는 중이에요.')
     clock.now += 61.0
     narrator.planning_state('Run.Execute')
     run(narrator)
@@ -260,7 +261,7 @@ def test_budget_limits_gpt_calls():
 def test_periodic_scene_only_when_quiet():
     clock = Clock()
     backend = Backend()
-    narrator, texts = make(backend, clock=clock, scene_period_s=30.0, min_interval_s=5.0,
+    narrator, texts = make(backend, clock=clock, narrate_idle_period_s=30.0, min_interval_s=5.0,
                            repeat_window_s=0.0)
     narrator.tick()
     run(narrator)
@@ -301,7 +302,8 @@ def test_ask_and_say():
     narrator.ask('뭐 보여?')
     narrator.command('describe')
     run(narrator)
-    assert [kind for kind, _ in texts] == ['ask', 'scene'] and all('지금은' in t for _, t in texts)
+    assert texts == [('ask', '지금은 대답할 수 없어요. GPT 연결이 설정되지 않았어요.'),
+                     ('scene', '아직 제 작업 상태를 받지 못했어요.')]
 
 
 def test_mute_keeps_faults_and_stop_clears():
@@ -314,7 +316,7 @@ def test_mute_keeps_faults_and_stop_clears():
     clock.now += 2.0
     narrator.tick()
     run(narrator)
-    assert texts == [('fault', '문제가 생겨서 멈췄어요.')]
+    assert texts == [('fault', '지금은 멈춰 있어요.')]
     narrator.command('unmute')
     narrator.say('하나')
     narrator.ask('둘')
@@ -328,7 +330,7 @@ def test_status_command_template():
     narrator, texts = make(None)
     narrator.command('status')
     run(narrator)
-    assert texts == [('status', '상태머신 데이터가 들어오지 않고 있어요.')]
+    assert texts == [('status', '아직 제 작업 상태를 받지 못했어요.')]
 
 
 def test_tts_fallback_chain():
@@ -380,7 +382,7 @@ def test_threads_fault_during_speech_synthesis():
         narrator.tick()
         assert player.wait_playing(1)
         player.stop()
-        assert player.played == [b'RIFF' + '문제가 생겨서 멈췄어요.'.encode()]
+        assert player.played == [b'RIFF' + '지금은 멈춰 있어요.'.encode()]
     finally:
         narrator.close()
 
@@ -425,9 +427,9 @@ def test_threads_fault_not_delayed_by_hanging_tts():
         assert player.wait_playing(1, timeout=2.0)
         assert time.monotonic() - started < 1.0
         player.stop()
-        assert player.played == [b'RIFF' + '문제가 생겨서 멈췄어요.'.encode()]
+        assert player.played == [b'RIFF' + '지금은 멈춰 있어요.'.encode()]
         assert fallback.texts == []                           # the cancelled sentence never reached fallback
-        assert texts == [('fault', '문제가 생겨서 멈췄어요.')]
+        assert texts == [('fault', '지금은 멈춰 있어요.')]
     finally:
         narrator.close()
 
@@ -468,7 +470,7 @@ def test_same_label_after_unannounced_steps_is_not_the_same_state():
     narrator.planning_state('Run.Compute')
     narrator.planning_state('Run.Execute')                    # cooldown: not announced
     run(narrator)
-    assert texts == [('state', '작업을 마쳤어요.')]
+    assert texts == [('state', '작업 하나를 끝냈어요.')]
 
 
 def test_state_change_during_tts_drops_the_sentence():
@@ -504,7 +506,7 @@ def test_dead_network_template_state_goes_out_through_fallback():
     narrator.fallback_tts = fallback
     narrator.planning_state('Ready')
     run(narrator)
-    assert texts == [('state', '준비 완료. 미션 시작을 기다리고 있어요.')]
+    assert texts == [('state', '준비됐어요. 출발 신호를 기다리고 있어요.')]
     assert narrator.player.played == [b'FALLBACK']
 
 
@@ -512,7 +514,7 @@ def test_dead_network_gpt_state_falls_back_to_template_in_time():
     narrator, texts = make(Backend(gpt_delay=0.6, fail=True), clock=time.monotonic, state_max_age_s=0.3)
     narrator.planning_state('Ready')
     run(narrator)
-    assert texts == [('state', '준비 완료. 미션 시작을 기다리고 있어요.')]
+    assert texts == [('state', '준비됐어요. 출발 신호를 기다리고 있어요.')]
 
 
 def test_hanging_gpt_and_tts_hit_their_deadlines():
@@ -524,14 +526,14 @@ def test_hanging_gpt_and_tts_hit_their_deadlines():
     narrator.planning_state('Ready')
     run(narrator)
     assert time.monotonic() - started < 2.0
-    assert texts == [('state', '준비 완료. 미션 시작을 기다리고 있어요.')] and narrator.player.played == [b'FALLBACK']
+    assert texts == [('state', '준비됐어요. 출발 신호를 기다리고 있어요.')] and narrator.player.played == [b'FALLBACK']
 
 
 def test_requested_scene_failure_is_still_said():
     narrator, texts = make(Backend(gpt_delay=0.6, fail=True), clock=time.monotonic, scene_max_age_s=0.3)
     narrator.command('describe')
     run(narrator)
-    assert len(texts) == 1 and texts[0][0] == 'scene' and texts[0][1].startswith('지금은 주변을 설명할 수 없어요.')
+    assert texts == [('scene', '아직 제 작업 상태를 받지 못했어요.')]   # what it does, in fixed words
 
 
 def test_status_answer_refreshed_when_state_changes_during_tts():
@@ -551,13 +553,13 @@ def test_status_answer_refreshed_when_state_changes_during_tts():
     narrator.tracker.cooldown_s = 60.0
     narrator.planning_state('Run.Stopping')
     run(narrator)
-    assert texts == [('state', '정지하는 중이에요.')]
+    assert texts == [('state', '멈추는 중이에요.')]
     texts.clear()
     narrator.tracker.announce = ()                            # only the status answer is under test
     backend.move = True
-    narrator.command('status')                                # "정지하는 중이에요." goes to TTS ...
+    narrator.command('status')                                # "멈추는 중이에요." goes to TTS ...
     run(narrator)
-    assert texts == [('status', '작업을 시작할게요.')]       # ... robot moved on: the current state is said
+    assert texts == [('status', '작업하고 있어요.')]          # ... robot moved on: the current state is said
 
 
 def test_close_during_tts_publishes_nothing():
@@ -583,3 +585,47 @@ def test_failing_callbacks_do_not_stop_speech():
     narrator.say('또 말해요')
     run(narrator)
     assert len(narrator.player.played) == 2
+
+
+def test_narrates_what_it_does_periodically_only_while_working():
+    clock = Clock()
+    narrator, texts = make(None, clock=clock, narrate_period_s=20.0, min_interval_s=5.0, state_mode='template')
+    narrator.planning_state('Ready')
+    run(narrator)                                             # "준비됐어요..." announced
+    for _ in range(3):
+        clock.now += 10.0
+        narrator.planning_state('Ready')
+        narrator.tick()
+        run(narrator)
+    assert [kind for kind, _ in texts] == ['state']           # idle: no periodic narration by default
+    narrator.diagnostics('planning/state_machine', 0, 'Run.Execute: ', {'step': 'approach'})
+    narrator.planning_state('Run.Execute')
+    narrator.motion(0.12, 0.0)
+    narrator.objects(['sign_green'])
+    run(narrator)
+    clock.now += 6.0
+    narrator.planning_state('Run.Execute')
+    narrator.motion(0.12, 0.0)
+    narrator.objects(['sign_green'])
+    narrator.tick()
+    run(narrator)
+    assert texts[-1] == ('scene', 'approach 중이에요. 지금 보이는 건 초록 신호 1개예요.')  # no step_names
+    clock.now += 10.0                                         # within narrate_period_s: quiet
+    narrator.planning_state('Run.Execute')
+    narrator.tick()
+    assert narrator.think_once() is False and narrator.speak_once() is False
+
+
+def test_sensors_reach_the_gpt_prompt():
+    backend = Backend('목표로 가는 중이고 앞에 초록 신호가 보여요.')
+    narrator, texts = make(backend)
+    narrator.planning_state('Run.Execute')
+    narrator.motion(0.12, 0.0)
+    narrator.objects(['sign_green'])
+    narrator.pucks([(False, 0.8)])
+    narrator.tags([5])
+    run(narrator)
+    prompt = backend.calls[-1][1]
+    assert '[센서가 확인한 것]' in prompt and '앞으로 초속 0.12 m로 이동 중' in prompt
+    assert '초록 신호 1개' in prompt and '퍽 1개(누운 것 1' in prompt and 'AprilTag 5번' in prompt
+    assert texts == [('state', '목표로 가는 중이고 앞에 초록 신호가 보여요.')]

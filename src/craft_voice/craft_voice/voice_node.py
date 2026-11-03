@@ -1,7 +1,11 @@
 """voice_node: camera + planning state machine -> GPT -> speech.
 
+Narrates what the robot is doing and what it sees, when its action changes and
+every narrate_period_s while it works.
 sub: /planning/state (std_msgs/String, transient local), /planning/diagnostics,
      /control/status (craft_interfaces/ControlStatus, optional), context_topics (String),
+     what perception sees: odom_topic (nav_msgs/Odometry), objects_topic
+     (craft_perception/DetectionArray), pucks_topic (PuckObservationArray), tags_topic (Int32MultiArray),
      camera: /vision/d435/frame_meta + /dev/shm/craft_vision (camera:=d435),
              /vision/c310/frame_meta + /dev/shm/craft_c310 (camera:=c310),
              image_topic (camera:=topic, raw or compressed), or nothing (camera:=none)
@@ -15,6 +19,7 @@ from fixed templates through fallback_tts_command (or only published).
 
 from __future__ import annotations
 
+import math
 import os
 import threading
 import time
@@ -53,7 +58,12 @@ PARAMETERS = {
     'state_cooldown_s': 10.0,
     'state_mode': 'gpt',
     'fault_reason_wait_s': 1.2,
-    'scene_period_s': 0.0,
+    'narrate_period_s': 20.0,
+    'narrate_idle_period_s': 0.0,
+    'odom_topic': '/perception/state/odom',
+    'objects_topic': '/perception/vision/d435/detections',
+    'pucks_topic': '/perception/vision/d435/puck_observations',
+    'tags_topic': '/perception/vision/d435/apriltag',
     'min_interval_s': 5.0,
     'max_gpt_calls_per_min': 12,
     'repeat_window_s': 30.0,
@@ -93,7 +103,8 @@ class VoiceNode(Node):
                                step_names=parse_mapping(p['step_names']))
         config = NarratorConfig(
             language=p['language'], persona=p['persona'], camera_description=p['camera_description'],
-            max_chars=p['max_chars'], state_mode=p['state_mode'], scene_period_s=p['scene_period_s'],
+            max_chars=p['max_chars'], state_mode=p['state_mode'], narrate_period_s=p['narrate_period_s'],
+            narrate_idle_period_s=p['narrate_idle_period_s'],
             min_interval_s=p['min_interval_s'], max_gpt_calls_per_min=p['max_gpt_calls_per_min'],
             repeat_window_s=p['repeat_window_s'], use_image=p['use_image'] and p['camera'] != 'none',
             image_max_side=p['image_max_side'], jpeg_quality=p['jpeg_quality'],
@@ -150,6 +161,7 @@ class VoiceNode(Node):
             log.warning('craft_interfaces not found: control status is left out of the context')
         for topic in parse_list(p['context_topics']):  # volatile: matches latched and plain publishers
             self.create_subscription(String, topic, lambda m, t=topic: self.narrator.context(t, m.data), 10)
+        self._subscribe_perception(p)
         self.create_subscription(String, '/voice/ask', lambda m: self.narrator.ask(m.data), 10)
         self.create_subscription(String, '/voice/say', lambda m: self.narrator.say(m.data), 10)
         self.create_subscription(String, '/voice/command', self._on_command, 10)
@@ -157,7 +169,33 @@ class VoiceNode(Node):
         self.create_timer(1.0, self._publish_diagnostics)
         log.info(f"voice ready: camera={p['camera']} gpt={'on' if backend else 'off'} model={p['model']} "
                  f"tts={p['tts_model']}/{p['tts_voice']} state_mode={p['state_mode']} "
-                 f"scene_period={p['scene_period_s']}s player={' '.join(player) or 'none'}")
+                 f"narrate every {p['narrate_period_s']}s player={' '.join(player) or 'none'}")
+
+    # ---- what perception sees ---------------------------------------------------------------
+    def _subscribe_perception(self, p):
+        log = self.get_logger()
+        if p['odom_topic']:
+            from nav_msgs.msg import Odometry
+            self.create_subscription(Odometry, p['odom_topic'], lambda m: self.narrator.motion(
+                m.twist.twist.linear.x, m.twist.twist.angular.z), qos_profile_sensor_data)
+        if p['tags_topic']:
+            from std_msgs.msg import Int32MultiArray
+            self.create_subscription(Int32MultiArray, p['tags_topic'],
+                                     lambda m: self.narrator.tags(list(m.data)), qos_profile_sensor_data)
+        if not (p['objects_topic'] or p['pucks_topic']):
+            return
+        try:
+            from craft_perception.msg import DetectionArray, PuckObservationArray
+        except ImportError:
+            log.warning('craft_perception messages not found: YOLO objects and pucks are left out')
+            return
+        if p['objects_topic']:
+            self.create_subscription(DetectionArray, p['objects_topic'], lambda m: self.narrator.objects(
+                [d.label for d in m.detections]), qos_profile_sensor_data)
+        if p['pucks_topic']:
+            self.create_subscription(PuckObservationArray, p['pucks_topic'], lambda m: self.narrator.pucks(
+                [(o.standing, math.sqrt(o.center.x ** 2 + o.center.y ** 2 + o.center.z ** 2))
+                 for o in m.observations]), qos_profile_sensor_data)
 
     # ---- camera -----------------------------------------------------------------------------
     def _setup_camera(self, p):
