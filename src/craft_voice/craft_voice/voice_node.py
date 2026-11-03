@@ -29,7 +29,7 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from std_msgs.msg import Bool, String, UInt64MultiArray
 
-from .audio import CommandPlayer, CommandTts, StreamPlayer, split_command
+from .audio import CommandPlayer, CommandTts, StreamPlayer, split_command, stream_command_for
 from .frames import ShmFrameReader, compressed_to_bgr, image_to_bgr
 from .mission import MISSION_CONTEXT, STEP_NAMES
 from .narrator import Narrator, NarratorConfig
@@ -90,7 +90,7 @@ PARAMETERS = {
     'tts_deadline_s': 8.0,
     'player_command': 'aplay -q {file}',
     'tts_stream': True,
-    'stream_player_command': 'aplay -q -t raw -f S16_LE -r {rate} -c 1 -',
+    'stream_player_command': '',
     'fallback_tts_command': '',
 }
 
@@ -150,7 +150,12 @@ class VoiceNode(Node):
         self._camera = p['camera']
         self._setup_camera(p)
 
-        stream = split_command(p['stream_player_command']) if p['tts_stream'] and backend else []
+        # Streaming plays on the same speaker as player_command (device options kept); none without a speaker.
+        stream = []
+        if p['tts_stream'] and backend and player:
+            stream = split_command(p['stream_player_command']) or stream_command_for(player) or []
+            if not stream:
+                log.info(f'no raw-PCM variant of {player[0]!r}: speaking whole WAVs (set stream_player_command)')
         self.narrator = Narrator(
             config, tracker, backend=backend, player=CommandPlayer(player) if player else None,
             stream_player=StreamPlayer(stream) if stream else None,
@@ -179,7 +184,8 @@ class VoiceNode(Node):
         self.create_timer(1.0, self._publish_diagnostics)
         log.info(f"voice ready: camera={p['camera']} gpt={'on' if backend else 'off'} model={p['model']} "
                  f"tts={p['tts_model']}/{p['tts_voice']} state_mode={p['state_mode']} "
-                 f"narrate every {p['narrate_period_s']}s player={' '.join(player) or 'none'}")
+                 f"narrate every {p['narrate_period_s']}s player={' '.join(player) or 'none'} "
+                 f"stream={' '.join(stream) or 'off'}")
 
     # ---- what perception sees ---------------------------------------------------------------
     def _subscribe_perception(self, p):

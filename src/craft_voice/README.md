@@ -134,7 +134,7 @@ ros2 topic echo /voice/utterance                                              # 
 | `image_detail` | `low` | `low`/`high`/`auto`/`original`. 이미지는 긴 변 `image_max_side`(512) px로 줄여 보냄 |
 | `tts_model` / `tts_voice` | `gpt-4o-mini-tts` / `coral` | `tts_instructions`로 말투 지정(tts-1 계열은 무시) |
 | `player_command` | `aplay -q {file}` | `paplay {file}`, `aplay -q -D plughw:1,0 {file}` 등 |
-| `tts_stream` / `stream_player_command` | `true` / `aplay -q -t raw -f S16_LE -r {rate} -c 1 -` | OpenAI 음성을 받는 대로 재생(첫 소리 약 0.5 s 빨라짐, 실측) |
+| `tts_stream` / `stream_player_command` | `true` / `""` | OpenAI 음성을 받는 대로 재생(첫 소리 약 0.5 s 빨라짐, 실측). `""`이면 `player_command`에서 만든다(aplay → `-t raw …`, paplay → `--raw …`, 장치 옵션 유지). 그 외 플레이어나 스피커 없음이면 전체 WAV. 스트림 재생기가 실패하면 받은 음성을 WAV로 다시 재생하고, 2번 연속 실패하면 스트리밍을 끈다 |
 | `fallback_tts_command` | `""` | 오프라인 음성, 예: `espeak-ng -v ko --stdout -- {text}`(stdout으로 WAV). `--`를 꼭 넣고, 문장 앞의 `-`는 지운다 |
 | `fault_tts_timeout_s` | `4.0` | Fault 문장의 OpenAI 음성 대기 시간(재시도 없음). 넘으면 fallback |
 | `gpt_state_deadline_s` / `tts_deadline_s` | `6.0` / `8.0` | 상태 문장 GPT 대기 → 템플릿, 일반 음성 OpenAI 대기 → fallback |

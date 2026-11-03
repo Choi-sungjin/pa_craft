@@ -23,6 +23,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 
+from .audio import pcm_to_wav
 from .frames import encode_jpeg
 from .robot_state import STATE_KO, StateEvent, StateTracker
 
@@ -114,6 +115,7 @@ class Narrator:
         # OpenAI speech is played while it streams in (first audio ~0.6 s sooner); faults and the
         # fallback TTS still use `player` with a whole WAV.
         self.stream_player = stream_player
+        self._stream_failures = 0  # streaming is switched off after 2 player failures in a row
         self.frame_provider = frame_provider
         self.fallback_tts = fallback_tts
         self.on_text = on_text
@@ -256,6 +258,8 @@ class Narrator:
             self._speak_cv.notify_all()
         if self.player:
             self.player.stop()
+        if self.stream_player:
+            self.stream_player.stop()
         for thread in self._threads:
             thread.join(timeout=2.0)
 
@@ -694,6 +698,10 @@ class Narrator:
                 result, value = self._call(lambda: self.fallback_tts.synthesize(utterance.text), None,
                                            lambda: utterance.cancelled)
                 wav = value if result == 'ok' else None
+                if result in ('error', 'timeout'):
+                    self.stats['tts_errors'] += 1
+                    why = f'{type(value).__name__}: {value}' if result == 'error' else 'no answer in time'
+                    self.log.error(f'TTS (fallback) failed: {why}')
             return self._deliver(utterance, wav)
         if not self._still_true(utterance):
             abort.set()
@@ -701,25 +709,54 @@ class Narrator:
         self.log.info(f'say [{utterance.kind}] {utterance.text}')
         self._notify(self.on_text, utterance.kind, utterance.text)
         self._notify(self.on_speaking, True)
-        played = False
+        played, pcm, chunk = False, bytearray(first), first  # pcm: everything received, for the WAV fallback
+        rate = getattr(self.backend, 'sample_rate', 24000)
         try:
-            if self.stream_player.open(getattr(self.backend, 'sample_rate', 24000),
-                                       cancelled=lambda: utterance.cancelled):
-                chunk = first
-                while isinstance(chunk, bytes) and self.stream_player.write(chunk):
-                    chunk = next_chunk(self.config.tts_deadline_s)
+            try:
+                if self.stream_player.open(rate, cancelled=lambda: utterance.cancelled):
+                    while isinstance(chunk, bytes):
+                        if not self.stream_player.write(chunk):
+                            break
+                        chunk = next_chunk(self.config.tts_deadline_s)
+                        if isinstance(chunk, bytes):
+                            pcm += chunk
+                    abort.set()
+                    played = self.stream_player.finish()
+                    self._stream_failures = 0
+                    if chunk == 'timeout' or 'error' in failure:
+                        played = False  # the sentence was cut short
+                        why = failure.get('error', f'no audio for {self.config.tts_deadline_s} s')
+                        self.log.error(f'TTS stream broke off: {why}')
+            except Exception as error:  # the stream player failed: say it with the WAV player instead
                 abort.set()
-                played = self.stream_player.finish()
-                if 'error' in failure:
-                    self.log.error(f'TTS stream broke off: {failure["error"]}')
-        except Exception as error:
-            abort.set()
-            self.log.error(f'audio playback failed: {error}')
+                self.log.error(f'audio playback failed (stream): {error}')
+                self._stream_failures += 1
+                if self._stream_failures >= 2:
+                    self.log.error('stream player failed twice in a row: speaking whole WAVs from now on')
+                    self.stream_player = None
+                played = self._play_whole(utterance, pcm, chunk, next_chunk, rate)
         finally:
+            abort.set()
             self._notify(self.on_speaking, False)
         if played:
             self.stats['spoken'] += 1
         return True
+
+    def _play_whole(self, utterance, pcm: bytearray, chunk, next_chunk, rate: int) -> bool:
+        """Stream player broke: collect the rest of the speech and play it as one WAV."""
+        if self.player is None or utterance.cancelled:
+            return False
+        while isinstance(chunk, bytes):
+            chunk = next_chunk(self.config.tts_deadline_s)
+            if isinstance(chunk, bytes):
+                pcm += chunk
+        if chunk == 'cancelled' or not pcm:
+            return False
+        try:
+            return bool(self.player.play(pcm_to_wav(bytes(pcm), rate), cancelled=lambda: utterance.cancelled))
+        except Exception as error:
+            self.log.error(f'audio playback failed: {error}')
+            return False
 
     def _notify(self, callback, *args):
         """Callbacks (ROS publish, print) must never take the speak thread down with them."""

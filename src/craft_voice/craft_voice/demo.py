@@ -26,7 +26,7 @@ import time
 
 import numpy as np
 
-from .audio import CommandPlayer, CommandTts, StreamPlayer, WinsoundPlayer, split_command
+from .audio import CommandPlayer, CommandTts, StreamPlayer, WinsoundPlayer, split_command, stream_command_for
 from .narrator import Narrator, NarratorConfig
 from .robot_state import StateTracker, parse_list, parse_mapping
 from .mission import DICE_SCENARIO, MISSION_CONTEXT, STEP_NAMES
@@ -125,16 +125,16 @@ def default_player(command: str):
     return None
 
 
-def default_stream_player(args):
-    """Stream OpenAI speech into aplay on Linux (auto); elsewhere whole WAVs as before."""
-    if args.stream == 'off' or args.player == 'none':
+def default_stream_player(args, player):
+    """Stream OpenAI speech through the raw-PCM variant of the chosen player (aplay/paplay); others: whole WAVs."""
+    if args.stream == 'off' or player is None:
         return None
-    command = args.stream_player or ('aplay -q -t raw -f S16_LE -r {rate} -c 1 -' if shutil.which('aplay') else '')
+    command = split_command(args.stream_player) or stream_command_for(getattr(player, 'command', []))
     if not command:
         if args.stream == 'on':
-            log.warning('--stream on but no stream player (aplay not found, no --stream-player)')
+            log.warning('--stream on but the player has no raw-PCM variant (give --stream-player)')
         return None
-    return StreamPlayer(split_command(command))
+    return StreamPlayer(command)
 
 
 def build(args) -> tuple[Narrator, SimStateMachine, Camera]:
@@ -156,8 +156,9 @@ def build(args) -> tuple[Narrator, SimStateMachine, Camera]:
                             persona=args.persona, use_image=args.camera.lower() not in ('', 'none'),
                             mission_context='' if args.mission_context == 'none' else args.mission_context,
                             camera_description='노트북 카메라 (로봇 대신 시험 중)')
-    narrator = Narrator(config, tracker, backend=backend, player=default_player(args.player),
-                        stream_player=default_stream_player(args) if backend else None,
+    player = default_player(args.player)
+    narrator = Narrator(config, tracker, backend=backend, player=player,
+                        stream_player=default_stream_player(args, player) if backend else None,
                         frame_provider=camera.frame, fallback_tts=CommandTts(fallback) if fallback else None,
                         on_text=lambda kind, text: print(f'\n>> [{kind}] {text}', flush=True))
     scenario = {'dice': DICE_SCENARIO, 'default': DEFAULT_SCENARIO}.get(args.scenario, args.scenario)

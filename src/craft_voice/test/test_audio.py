@@ -146,3 +146,44 @@ def test_stream_player_stop_and_cancel():
     threading.Timer(0.3, player.stop).start()
     assert player.finish() is False and time.monotonic() - started < 3
     assert player.write(b'more') is False
+
+
+def test_stream_command_follows_the_chosen_player():
+    from craft_voice.audio import stream_command_for
+    assert stream_command_for(['aplay', '-q', '-D', 'plughw:1,0', '{file}']) == \
+        ['aplay', '-q', '-D', 'plughw:1,0', '-t', 'raw', '-f', 'S16_LE', '-r', '{rate}', '-c', '1', '-']
+    assert stream_command_for(['/usr/bin/paplay', '--device=usb', '{file}']) == \
+        ['/usr/bin/paplay', '--device=usb', '--raw', '--format=s16le', '--rate={rate}', '--channels=1']
+    assert stream_command_for(['afplay', '{file}']) is None and stream_command_for([]) is None
+
+
+def test_stream_player_hands_each_chunk_over_at_once(tmp_path):
+    """bufsize=0: a 2 KiB chunk reaches the player before finish() (QA: a Python buffer used to hold it)."""
+    from craft_voice.audio import StreamPlayer
+    out = tmp_path / 'got'
+    code = (f'import sys; data = sys.stdin.buffer.read(2048); open({str(out)!r}, "wb").write(data); '
+            'sys.stdin.buffer.read()')
+    player = StreamPlayer([PY, '-c', code])
+    assert player.open(24000)
+    assert player.write(b'\x01' * 2048)
+    deadline = time.monotonic() + 3
+    while not out.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert out.exists() and out.read_bytes() == b'\x01' * 2048       # arrived while still open
+    assert player.finish()
+
+
+def test_stream_player_watchdog_and_failures():
+    from craft_voice.audio import StreamPlayer
+    stuck = StreamPlayer([PY, '-c', 'import time; time.sleep(30)'], write_timeout_s=0.5)
+    assert stuck.open(24000)
+    started = time.monotonic()
+    assert stuck.write(b'\0' * (4 << 20)) is False                    # never read: watchdog kills it
+    assert time.monotonic() - started < 3
+    with pytest.raises(RuntimeError, match='took no audio'):
+        stuck.finish()
+    failing = StreamPlayer([PY, '-c', 'import sys; sys.stderr.write("audio open error"); sys.exit(1)'])
+    assert failing.open(24000)
+    failing.write(b'xx')
+    with pytest.raises(RuntimeError, match='exited 1: audio open error'):
+        failing.finish()

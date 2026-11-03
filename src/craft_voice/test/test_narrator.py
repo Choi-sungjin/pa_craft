@@ -1042,3 +1042,54 @@ def test_step_start_announced_with_its_name_after_diagnostics():
     narrator.tick()
     run(narrator)
     assert texts[-1] == ('state', '바코드 읽기, 시작할게요.')
+
+
+def test_close_cuts_a_streaming_sentence():
+    """QA: close() stopped the WAV player only; a streaming sentence kept playing (or stuck in write)."""
+    backend = StreamingBackend(chunks=(b'a',) * 50, chunk_delay=0.05)
+    stream = FakeStreamPlayer(block=True)
+    narrator = Narrator(NarratorConfig(state_mode='template'), StateTracker(), backend=backend, player=Player(),
+                        stream_player=stream, clock=Clock(), start=True)
+    narrator.planning_state('Run.Execute')
+    deadline = time.monotonic() + 3
+    while not stream.data and time.monotonic() < deadline:
+        time.sleep(0.01)
+    started = time.monotonic()
+    narrator.close()
+    assert stream.stops >= 1 and time.monotonic() - started < 1.5
+
+
+class BrokenStreamPlayer(FakeStreamPlayer):
+    def finish(self):
+        raise RuntimeError('stream player exited 1: audio open error')
+
+
+def test_stream_player_failure_is_logged_replayed_as_wav_then_streaming_off(caplog):
+    backend = StreamingBackend(chunks=(b'\x01\x00', b'\x02\x00'))
+    stream = BrokenStreamPlayer()
+    narrator, texts = make_streaming(backend, stream, state_mode='template', repeat_window_s=0.0)
+    with caplog.at_level('ERROR', logger='craft_voice'):
+        narrator.planning_state('Ready')
+        run(narrator)
+        assert 'audio playback failed (stream): stream player exited 1: audio open error' in caplog.text
+        wav = narrator.player.played[-1]
+        from craft_voice.audio import wav_seconds
+        assert wav.startswith(b'RIFF') and wav_seconds(wav) > 0         # what was received, as a WAV
+        assert narrator.stream_player is stream                          # one failure: still streaming
+        narrator.planning_state('Run.Stopping')
+        run(narrator)
+        assert narrator.stream_player is None and 'speaking whole WAVs from now on' in caplog.text
+    assert len(narrator.player.played) == 2 and narrator.stats['spoken'] == 2
+
+
+def test_demo_streams_only_through_the_chosen_player():
+    import argparse
+    import sys
+    from craft_voice.audio import CommandPlayer
+    from craft_voice.demo import default_stream_player
+    args = argparse.Namespace(stream='auto', stream_player='')
+    custom = CommandPlayer([sys.executable, '-c', 'pass', '{file}'])
+    assert default_stream_player(args, custom) is None                   # custom player: whole WAVs to it
+    aplay = CommandPlayer(['aplay', '-q', '-D', 'plughw:1,0', '{file}'])
+    assert default_stream_player(args, aplay).command[:4] == ['aplay', '-q', '-D', 'plughw:1,0']
+    assert default_stream_player(args, None) is None

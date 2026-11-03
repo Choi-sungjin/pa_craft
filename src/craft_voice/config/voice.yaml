@@ -71,5 +71,7 @@ voice_node:
     tts_sample_rate: 24000        # raw PCM rate of the speech endpoint (16-bit mono)
     player_command: aplay -q {file}          # or: paplay {file}  /  aplay -q -D plughw:1,0 {file}
     tts_stream: true              # play OpenAI speech while it arrives (first audio ~0.6 s sooner, measured)
-    stream_player_command: aplay -q -t raw -f S16_LE -r {rate} -c 1 -   # raw 16-bit mono on stdin; paplay --raw --format=s16le --rate={rate} --channels=1
+    # "" = derived from player_command with its device options (aplay -> -t raw ..., paplay -> --raw ...);
+    # other players speak whole WAVs. Explicit example: aplay -q -t raw -f S16_LE -r {rate} -c 1 -
+    stream_player_command: ""
     fallback_tts_command: ""      # offline speech when OpenAI is unreachable, e.g. espeak-ng -v ko --stdout -- {text}
