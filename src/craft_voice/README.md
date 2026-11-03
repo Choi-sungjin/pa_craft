@@ -15,6 +15,9 @@
 /voice/ask, /voice/say, /voice/command ────────────────────────────────────────────────> /voice/utterance
 ```
 
+작동 원리를 장면별 애니메이션으로 보려면 [`docs/how_it_works.html`](docs/how_it_works.html)을 브라우저로 연다
+(9장면, 1분 30초, 수치는 2026-11-03 측정값. 글꼴은 Google Fonts에서 받고, 오프라인이면 시스템 글꼴로 나온다).
+
 - 카메라는 DDS로 이미지를 보내지 않는다(`craft_sensors`가 공유 메모리에 쓴다). 그래서 이 노드는 **카메라와 같은 Jetson**에서
   돌려야 한다. 다른 기기·순정 TurtleBot 카메라·bag은 `camera:=topic image_topic:=...`(raw 또는 compressed).
 - GPT에는 상태를 "사실 목록"으로만 주고, 거기 없는 동작·원인은 지어내지 말라고 지시한다.

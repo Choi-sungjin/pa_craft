@@ -1,0 +1,718 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<!-- craft_voice 작동 원리 애니메이션. 브라우저로 바로 열면 된다 (글꼴은 Google Fonts, 오프라인이면 시스템 글꼴). -->
+<style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0}img{max-width:100%}[hidden]{display:none!important}</style>
+<title>보이스 로봇 작동 원리</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Black+Han+Sans&family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans+KR:wght@400;500;700&display=swap">
+<style>
+/* Layout: a 4:3 SVG stage (the "film") beside a caption column; controls under the stage, chapter rail and code map below.
+   Phone: stage, controls, caption, chapters stacked in one column. Lane colors: 눈 teal, 생각 cobalt, 목소리 coral, 고장 hazard. */
+:root{
+  --paper:#EEF2F5; --stage:#FAFBFC; --card:#FFFFFF; --ink:#13202A; --muted:#55636F; --line:#C7D1D9;
+  --eye:#087572; --think:#2A55BE; --voice:#BD3E29; --hazard:#E3A600;
+  --eye-soft:#DCEFEE; --think-soft:#E0E8F8; --voice-soft:#F7E1DC; --hazard-soft:#FFF1C7; --ink-soft:#E3E8EC;
+  --on-accent:#FFFFFF; --on-hazard:#13202A;
+  --f-display:"Black Han Sans","IBM Plex Sans KR","Noto Sans KR","Apple SD Gothic Neo","Malgun Gothic",sans-serif;
+  --f-body:"IBM Plex Sans KR","Noto Sans KR","Apple SD Gothic Neo","Malgun Gothic",sans-serif;
+  --f-mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --r-stage:14px; --r-ctl:10px; --dur-ui:160ms;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --paper:#0D1419; --stage:#111B22; --card:#17232C; --ink:#E2E9EE; --muted:#93A2AE; --line:#2B3A45;
+    --eye:#3FC5BC; --think:#8AA9FF; --voice:#FF8466; --hazard:#FFC93C;
+    --eye-soft:#12322F; --think-soft:#1A2648; --voice-soft:#3B201A; --hazard-soft:#3A3010; --ink-soft:#1E2B35;
+    --on-accent:#0D1419; --on-hazard:#13202A; color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#0D1419; --stage:#111B22; --card:#17232C; --ink:#E2E9EE; --muted:#93A2AE; --line:#2B3A45;
+  --eye:#3FC5BC; --think:#8AA9FF; --voice:#FF8466; --hazard:#FFC93C;
+  --eye-soft:#12322F; --think-soft:#1A2648; --voice-soft:#3B201A; --hazard-soft:#3A3010; --ink-soft:#1E2B35;
+  --on-accent:#0D1419; --on-hazard:#13202A; color-scheme:dark;
+}
+*{box-sizing:border-box}
+body{background:var(--paper);color:var(--ink);font-family:var(--f-body);font-size:16px;line-height:1.6}
+.page{max-width:1160px;margin:0 auto;padding-block:28px 56px;
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));
+  display:flex;flex-direction:column;gap:28px}
+.head{display:flex;flex-direction:column;gap:8px;max-width:68ch}
+.eyebrow{margin:0;font-family:var(--f-mono);font-size:13px;letter-spacing:.06em;color:var(--muted)}
+h1{margin:0;font-family:var(--f-display);font-weight:400;font-size:clamp(30px,5vw,46px);line-height:1.15;text-wrap:balance}
+.lede{margin:0;font-size:17px;color:var(--ink)}
+.lede b{font-weight:700}
+
+/* player */
+.player{display:grid;grid-template-columns:minmax(0,760px) minmax(260px,340px);
+  grid-template-areas:"stage cap" "ctl cap" "nav nav";gap:14px 28px;justify-content:center}
+.stage-wrap{grid-area:stage;background:var(--stage);border:1px solid var(--line);border-radius:var(--r-stage);overflow:hidden;min-width:0}
+#stage{display:block;width:100%;height:auto;max-width:100%;aspect-ratio:4/3}
+.ctl{grid-area:ctl;display:flex;align-items:center;gap:10px;min-width:0}
+.btn{flex:none;inline-size:44px;block-size:44px;display:grid;place-items:center;border-radius:var(--r-ctl);
+  border:1px solid var(--line);background:var(--card);color:var(--ink);cursor:pointer;
+  transition:border-color var(--dur-ui) ease-out,background-color var(--dur-ui) ease-out}
+.btn:hover{border-color:var(--ink)}
+.btn svg{width:18px;height:18px;fill:currentColor}
+.btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}
+:is(button,input,a):focus-visible{outline:3px solid var(--think);outline-offset:2px}
+.scrub{flex:1;min-width:0;display:flex;align-items:center}
+.scrub input{width:100%;margin:0;height:44px;accent-color:var(--voice);cursor:pointer;background:transparent}
+.clock{flex:none;font-family:var(--f-mono);font-size:14px;font-variant-numeric:tabular-nums;color:var(--muted);min-width:11ch;text-align:right}
+.cap{grid-area:cap;align-self:start;display:flex;flex-direction:column;gap:12px;min-width:0}
+.cap-no{margin:0;font-family:var(--f-mono);font-size:13px;color:var(--muted);letter-spacing:.06em;font-variant-numeric:tabular-nums}
+.cap-word{margin:0;font-family:var(--f-display);font-weight:400;font-size:64px;line-height:1}
+.cap-bar{display:block;width:72px;height:6px;border-radius:3px;background:var(--tone,var(--ink))}
+.cap-bar.hz{background:repeating-linear-gradient(45deg,var(--hazard) 0 7px,var(--on-hazard) 7px 14px)}
+.cap-body{margin:0;font-size:16.5px;line-height:1.65}
+.cap-facts{margin:0;padding:12px 0 0;border-top:1px solid var(--line);list-style:none;display:flex;flex-direction:column;gap:8px;font-size:14.5px;line-height:1.55;color:var(--ink)}
+.cap-facts li{padding-left:14px;position:relative;overflow-wrap:anywhere}
+.cap-facts li::before{content:"";position:absolute;left:0;top:.62em;width:6px;height:6px;border-radius:50%;background:var(--tone,var(--ink))}
+code{font-family:var(--f-mono);font-size:.9em;background:var(--ink-soft);padding:1px 5px;border-radius:4px}
+.rm-note{margin:0;font-size:14px;color:var(--muted)}
+.chapters{grid-area:nav;display:grid;grid-template-columns:repeat(9,minmax(0,1fr));gap:8px}
+.ch{position:relative;display:flex;flex-direction:column;align-items:flex-start;gap:2px;text-align:left;
+  padding:9px 10px 13px;border:1px solid var(--line);border-radius:var(--r-ctl);background:var(--card);color:var(--ink);
+  cursor:pointer;overflow:hidden;min-height:58px;font:inherit;transition:border-color var(--dur-ui) ease-out}
+.ch:hover{border-color:var(--ink)}
+.ch .n{font-family:var(--f-mono);font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+.ch .w{font-family:var(--f-display);font-size:18px;line-height:1.1;white-space:nowrap}
+.ch::after{content:"";position:absolute;left:0;bottom:0;height:4px;width:calc(var(--p,0) * 100%);background:var(--tone,var(--ink))}
+.ch[aria-current="step"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+
+/* code map */
+.map{display:flex;flex-direction:column;gap:12px}
+.map h2{margin:0;font-size:20px;font-weight:700}
+.map p{margin:0;max-width:68ch;color:var(--muted)}
+.tbl{overflow-x:auto;border:1px solid var(--line);border-radius:var(--r-ctl);background:var(--card)}
+table{border-collapse:collapse;width:100%;min-width:560px;font-size:15px}
+th,td{text-align:left;padding:10px 14px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:13px;letter-spacing:.04em;color:var(--muted);font-weight:500}
+tr:last-child td{border-bottom:0}
+td:first-child{white-space:nowrap}
+.tbl:focus-visible{outline:3px solid var(--think);outline-offset:2px}
+.foot{margin:0;font-size:13.5px;color:var(--muted);max-width:76ch}
+
+@media (max-width:900px){
+  .player{grid-template-columns:minmax(0,1fr);grid-template-areas:"stage" "ctl" "cap" "nav"}
+  .cap-word{font-size:48px}
+  .chapters{grid-template-columns:repeat(5,minmax(0,1fr))}
+}
+@media (max-width:560px){ .chapters{grid-template-columns:repeat(3,minmax(0,1fr))} .clock{min-width:0} }
+@media (prefers-reduced-motion:reduce){ *{transition:none!important;animation:none!important} }
+
+/* stage drawing */
+#stage text{font-family:var(--f-body);fill:var(--ink)}
+#stage .mono{font-family:var(--f-mono)}
+#stage .b{font-weight:700}
+#stage .t19{font-size:19px} #stage .t20{font-size:20px} #stage .t21{font-size:21px} #stage .t22{font-size:22px}
+#stage .t24{font-size:24px} #stage .t28{font-size:28px}
+#stage .muted{fill:var(--muted)}
+#stage .tone-eye{fill:var(--eye)} #stage .tone-think{fill:var(--think)} #stage .tone-voice{fill:var(--voice)}
+#stage .on{fill:var(--on-accent)} #stage .on-hz{fill:var(--on-hazard)}
+.bg{fill:var(--stage)} .grid-dot{fill:var(--line)}
+.card{fill:var(--card);stroke:var(--line);stroke-width:1.5}
+.zone{fill:none;stroke:var(--line);stroke-width:1.5;stroke-dasharray:6 6}
+.hl{stroke-width:3}
+.hl-eye{fill:var(--eye-soft);stroke:var(--eye)} .hl-think{fill:var(--think-soft);stroke:var(--think)}
+.hl-voice{fill:var(--voice-soft);stroke:var(--voice)} .hl-ink{fill:var(--ink-soft);stroke:var(--ink)}
+.hl-hazard{fill:var(--hazard-soft);stroke:var(--hazard)}
+.wire{fill:none;stroke:var(--line);stroke-width:2.5;stroke-linecap:round}
+.wire.hz{stroke:var(--hazard);stroke-dasharray:8 6}
+.f-eye{fill:var(--eye)} .f-think{fill:var(--think)} .f-voice{fill:var(--voice)} .f-ink{fill:var(--ink)}
+.f-hazard{fill:var(--hazard)} .f-line{fill:var(--line)} .f-card{fill:var(--card)} .f-muted{fill:var(--muted)}
+.st-ink{fill:none;stroke:var(--ink);stroke-width:2.2;stroke-linecap:round}
+.st-eye{fill:none;stroke:var(--eye);stroke-width:2.5;stroke-linecap:round;stroke-linejoin:round}
+.st-on{fill:none;stroke:var(--on-accent);stroke-width:2.6;stroke-linecap:round;stroke-linejoin:round}
+.arc-v{fill:none;stroke:var(--voice);stroke-width:3;stroke-linecap:round}
+.halo{opacity:.22}
+.track{fill:var(--ink-soft)}
+.tick{fill:var(--muted);opacity:.45}
+.pill{fill:var(--card);stroke:var(--line);stroke-width:1.5}
+.pk{fill:var(--ink)}
+.strike{stroke:var(--voice);stroke-width:3;stroke-linecap:round}
+.dot-done{fill:var(--ink)} .dot-now{fill:var(--eye)} .dot-todo{fill:var(--card);stroke:var(--muted);stroke-width:2}
+.bubble{fill:var(--card);stroke:var(--line);stroke-width:1.5} .bubble-fill{fill:var(--card)} .bubble-edge{fill:none;stroke:var(--line);stroke-width:1.5}
+.blk{fill:var(--think-soft);stroke:var(--think);stroke-width:1.5} .blk.dash{fill:var(--card);stroke:var(--muted);stroke-dasharray:5 5}
+.ring-track{fill:none;stroke:var(--ink-soft);stroke-width:10}
+.ring-fill{fill:none;stroke:var(--think);stroke-width:10;stroke-linecap:round}
+.ring-fill.ink{stroke:var(--ink)} .thin{stroke-width:7}
+.frame-edge{fill:none;stroke:var(--eye);stroke-width:3}
+.wv-recv{fill:var(--voice);fill-opacity:.3} .wv-play{fill:var(--voice)}
+.playhead{stroke:var(--ink);stroke-width:2}
+.mark{stroke:var(--ink);stroke-width:2.5}
+.divider{stroke:var(--line);stroke-width:1.5}
+.art-bg{fill:var(--ink-soft)} .art-floor{fill:var(--line)} .art-wall{fill:var(--muted);opacity:.55}
+.art-pole{fill:var(--ink)} .art-puck{fill:var(--ink);opacity:.85} .art-puck-top{fill:var(--muted)} .art-tag{fill:var(--ink)}
+.hz-a{fill:var(--hazard)} .hz-b{fill:var(--on-hazard)}
+</style>
+</head>
+<body>
+
+<main class="page">
+  <header class="head">
+    <p class="eyebrow">craft_voice · ROS 2 · voice 브랜치</p>
+    <h1>로봇이 보고, 읽고, 말하기까지</h1>
+    <p class="lede">카메라 사진과 상태머신, 센서가 확인한 사실을 모아 GPT가 한 문장을 만들고, OpenAI 음성이 받는 대로 스피커에서 나와요. 아홉 장면으로 따라가 보세요. 숫자는 <b>2026-11-03 실측</b>이고, 말풍선 문장은 예시예요.</p>
+  </header>
+
+  <section class="player" aria-label="작동 원리 애니메이션">
+    <div class="stage-wrap">
+      <svg id="stage" viewBox="0 0 640 480" role="img" aria-labelledby="capWord capBody">
+        <defs>
+          <pattern id="dots" width="32" height="32" patternUnits="userSpaceOnUse"><circle class="grid-dot" cx="16" cy="16" r="1.2"></circle></pattern>
+          <pattern id="hz" width="18" height="18" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+            <rect class="hz-a" x="0" y="0" width="9" height="18"></rect><rect class="hz-b" x="9" y="0" width="9" height="18"></rect>
+          </pattern>
+          <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path class="f-muted" d="M0 0 L10 5 L0 10 z"></path>
+          </marker>
+        </defs>
+        <rect class="bg" x="0" y="0" width="640" height="480"></rect>
+        <rect x="0" y="0" width="640" height="480" fill="url(#dots)"></rect>
+        <g id="scene"></g>
+      </svg>
+    </div>
+
+    <div class="ctl">
+      <button class="btn primary" id="play" type="button" aria-label="일시정지">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path id="playIcon" d="M5 3h3.5v14H5zM11.5 3H15v14h-3.5z"></path></svg>
+      </button>
+      <button class="btn" id="restart" type="button" aria-label="처음부터">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3a7 7 0 1 1-6.6 4.7l1.9.7A5 5 0 1 0 10 5v2.6L5.8 4.3 10 1z"></path></svg>
+      </button>
+      <div class="scrub"><input id="scrub" type="range" min="0" max="9000" step="1" value="0" aria-label="재생 위치"></div>
+      <output class="clock" id="clock" for="scrub">0:00 / 1:30</output>
+    </div>
+
+    <div class="cap" id="cap">
+      <p class="cap-no" id="capNo">00 / 08</p>
+      <h2 class="cap-word" id="capWord">한눈에</h2>
+      <span class="cap-bar" id="capBar"></span>
+      <p class="cap-body" id="capBody"></p>
+      <ul class="cap-facts" id="capFacts"></ul>
+      <p class="rm-note" id="rmNote" hidden>움직임 줄이기 설정이 켜져 있어서 자동 재생을 멈췄어요. 장면 버튼을 누르면 그 장면의 완성된 모습이 나오고, 재생 버튼을 누르면 움직여요.</p>
+    </div>
+
+    <nav class="chapters" id="chapters" aria-label="장면 고르기"></nav>
+  </section>
+
+  <section class="map" aria-labelledby="mapTitle">
+    <h2 id="mapTitle">코드에서 찾기</h2>
+    <p>장면마다 실제로 일하는 파일이에요. 경로는 <code>src/craft_voice/</code> 아래 기준이에요.</p>
+    <div class="tbl" tabindex="0" role="region" aria-label="장면별 코드 파일 표">
+      <table>
+        <thead><tr><th>장면</th><th>파일</th><th>하는 일</th></tr></thead>
+        <tbody>
+          <tr><td>눈</td><td><code>craft_voice/frames.py</code></td><td>공유메모리 칸에서 최근 사진 복사, JPEG로 줄이기</td></tr>
+          <tr><td>상태 · 센서</td><td><code>craft_voice/robot_state.py</code></td><td>StateTracker: 상태, 단계 이름, 센서 사실, 고장 상황 문장</td></tr>
+          <tr><td>생각 · 언제 · 고장</td><td><code>craft_voice/narrator.py</code></td><td>생각 스레드와 말하기 스레드, 프롬프트, 우선순위, 낡은 말 버리기</td></tr>
+          <tr><td>생각 · 목소리</td><td><code>craft_voice/gpt.py</code></td><td>OpenAI Responses·음성 호출, 모델 순서, 스트리밍</td></tr>
+          <tr><td>목소리</td><td><code>craft_voice/audio.py</code></td><td>aplay 재생, raw stdin 스트리밍, espeak-ng 대체 음성</td></tr>
+          <tr><td>전체</td><td><code>craft_voice/voice_node.py</code></td><td>ROS 토픽 구독, <code>/voice/utterance</code> · <code>/voice/speaking</code> 발행, 설정 51개</td></tr>
+          <tr><td>단계 이름</td><td><code>craft_voice/mission.py</code></td><td>주사위 미션 단계 ID 17개와 말할 이름</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="foot">측정값 출처는 <code>src/craft_voice/README.md</code>(2026-11-03, 클라우드 컨테이너에서 OpenAI 직접 호출)예요. Jetson과 경기장 Wi-Fi에서는 다시 재야 해요. 말풍선과 GPT 답은 예시 문장이고, 고장 문장과 단계 이름은 코드에 있는 그대로예요.</p>
+  </section>
+</main>
+
+<script>
+(function(){
+'use strict';
+var NS='http://www.w3.org/2000/svg';
+
+/* ---------- small helpers ---------- */
+function E(tag,a,p){var e=document.createElementNS(NS,tag);if(a)for(var k in a)e.setAttribute(k,a[k]);if(p)p.appendChild(e);return e;}
+function X(p,x,y,s,c,a){var o={x:x,y:y,'class':c||''};if(a)for(var k in a)o[k]=a[k];var e=E('text',o,p);e.textContent=s;return e;}
+function R(p,x,y,w,h,c,rx){return E('rect',{x:x,y:y,width:w,height:h,rx:rx==null?10:rx,'class':c},p);}
+function clamp(v,a,b){a=a==null?0:a;b=b==null?1:b;return Math.min(b,Math.max(a,v));}
+function lin(t,a,b){return clamp((t-a)/(b-a));}
+function ez(p){return p<.5?4*p*p*p:1-Math.pow(-2*p+2,3)/2;}
+function seg(t,a,b){return ez(lin(t,a,b));}
+function bump(t,a,b){return(t<=a||t>=b)?0:Math.sin(Math.PI*(t-a)/(b-a));}
+function lerp(a,b,p){return a+(b-a)*p;}
+function op(e,v){v=Math.round(clamp(v)*1000)/1000;if(e._o!==v){e._o=v;e.setAttribute('opacity',v);}}
+function tr(e,x,y){var v='translate('+x.toFixed(1)+' '+y.toFixed(1)+')';if(e._t!==v){e._t=v;e.setAttribute('transform',v);}}
+function tx(e,s){if(e._s!==s){e._s=s;e.textContent=s;}}
+function at(e,k,v){v=String(v);if(e['_'+k]!==v){e['_'+k]=v;e.setAttribute(k,v);}}
+function cl(e,c){if(e._c!==c){e._c=c;e.setAttribute('class',c);}}
+function chars(s){return Array.from(s);}
+function typed(s,p){var c=chars(s);return c.slice(0,Math.round(c.length*clamp(p))).join('');}
+function typeLines(els,lines,p){
+  var lens=lines.map(function(l){return chars(l).length;}),tot=lens.reduce(function(a,b){return a+b;},0);
+  var n=Math.round(tot*clamp(p));
+  lines.forEach(function(l,i){var k=Math.min(lens[i],n);tx(els[i],chars(l).slice(0,k).join(''));n-=k;});
+}
+function wire(p,d,extra){var a={d:d,'class':'wire'};if(extra)for(var k in extra)a[k]=extra[k];return E('path',a,p);}
+function mkDot(p,tone,r){r=r||7;var g=E('g',{opacity:0},p);E('circle',{r:r*2,'class':'halo f-'+tone},g);E('circle',{r:r,'class':'f-'+tone},g);return g;}
+function along(path,dot,p){
+  if(p<=0||p>=1){op(dot,0);return;}
+  if(!path._L)path._L=path.getTotalLength();
+  var pt=path.getPointAtLength(path._L*p);tr(dot,pt.x,pt.y);op(dot,1);
+}
+function card(p,x,y,w,h,tone,rx){rx=rx==null?12:rx;var g=E('g',{},p);R(g,x,y,w,h,'card',rx);var hl=R(g,x,y,w,h,'hl hl-'+tone,rx);op(hl,0);return{g:g,hl:hl};}
+function kf(t,F){
+  if(t<=F[0][0])return F[0].slice(1);
+  for(var i=1;i<F.length;i++){if(t<=F[i][0]){var p=ez((t-F[i-1][0])/(F[i][0]-F[i-1][0]));return F[i].slice(1).map(function(v,j){return lerp(F[i-1][j+1],v,p);});}}
+  return F[F.length-1].slice(1);
+}
+function speaker(p,x,y){
+  E('path',{d:'M'+(x-14)+' '+(y-6)+'h8l10-9v30l-10-9h-8z','class':'f-ink'},p);
+  var a1=E('path',{d:'M'+(x+9)+' '+(y-7)+'q6 7 0 14','class':'arc-v'},p);
+  var a2=E('path',{d:'M'+(x+14)+' '+(y-13)+'q11 13 0 26','class':'arc-v'},p);
+  return{arcs:[a1,a2]};
+}
+function speakerMini(p,x,y){var g=E('g',{},p);E('path',{d:'M'+(x-10)+' '+(y-4)+'h6l7-6v20l-7-6h-6z','class':'f-ink'},g);E('path',{d:'M'+(x+6)+' '+(y-5)+'q4 5 0 10','class':'arc-v'},g);return g;}
+function badge(p,x,y,n,tone,r){
+  r=r||16;var f={muted:'f-muted',ink:'f-ink',think:'f-think',hazard:'f-hazard'}[tone];
+  E('circle',{cx:x,cy:y,r:r,'class':f},p);X(p,x,y+7,String(n),'t20 b '+(tone==='hazard'?'on-hz':'on'),{'text-anchor':'middle'});
+}
+function icon(p,kind,cx,cy){
+  var g=E('g',{},p);
+  if(kind==='cam'){R(g,cx-19,cy-9,38,18,'f-ink',5);[[-12,4],[-4,2.2],[4,2.2],[12,4]].forEach(function(c){E('circle',{cx:cx+c[0],cy:cy,r:c[1],'class':'f-card'},g);});}
+  else if(kind==='state'){E('path',{d:'M'+(cx-12)+' '+(cy+7)+'L'+cx+' '+(cy-8)+'L'+(cx+12)+' '+(cy+7)+'Z','class':'st-ink'},g);[[-12,7],[0,-8],[12,7]].forEach(function(c){E('circle',{cx:cx+c[0],cy:cy+c[1],r:4.5,'class':'f-ink'},g);});}
+  else if(kind==='radar'){E('path',{d:'M'+(cx-14)+' '+(cy+8)+'a14 14 0 0 1 28 0','class':'st-eye'},g);E('path',{d:'M'+(cx-7)+' '+(cy+8)+'a7 7 0 0 1 14 0','class':'st-eye'},g);E('circle',{cx:cx,cy:cy+8,r:2.6,'class':'f-eye'},g);}
+  return g;
+}
+function frameArt(p,x,y,w,h){
+  var s=E('svg',{x:x,y:y,width:w,height:h,viewBox:'0 0 160 90',preserveAspectRatio:'xMidYMid slice'},p);
+  E('rect',{x:0,y:0,width:160,height:90,'class':'art-bg'},s);
+  var g=E('g',{},s);
+  E('polygon',{points:'-30,90 200,90 200,54 -30,54','class':'art-floor'},g);
+  E('rect',{x:4,y:30,width:58,height:26,'class':'art-wall'},g);
+  E('rect',{x:104,y:24,width:76,height:32,'class':'art-wall'},g);
+  E('rect',{x:80,y:14,width:8,height:42,'class':'art-pole'},g);
+  [['f-voice',20],['f-hazard',29],['f-eye',38]].forEach(function(c){E('circle',{cx:84,cy:c[1],r:3.4,'class':c[0]},g);});
+  [[36,74],[58,79],[126,70]].forEach(function(c){R(g,c[0]-8,c[1]-7,16,9,'art-puck',0);E('ellipse',{cx:c[0],cy:c[1]-7,rx:8,ry:2.8,'class':'art-puck-top'},g);});
+  R(g,132,32,16,16,'art-tag',1);R(g,136,36,8,8,'f-card',0);
+  return{svg:s,g:g,seq:null};
+}
+
+var STATE_KO={'Run.AwaitRequest':'다음 작업 대기','Run.PrepareTask':'다음 작업 준비','Run.Compute':'경로·팔 자세 계산','Run.Execute':'작업 실행'};
+
+/* ---------- scenes (canvas 640 x 480; times in seconds from scene start) ---------- */
+var scenes=[
+{word:'한눈에',tone:'ink',dur:9,rest:8.6,
+ body:'카메라 사진, 상태머신이 알려 주는 지금 할 일, 센서가 확인한 사실을 voice_node가 모아요. GPT가 이걸 한두 문장으로 만들고, OpenAI 음성이 받는 대로 스피커에서 나와요.',
+ facts:['입력: 카메라 사진 · <code>/planning/state</code> · <code>/perception/*</code>','문장: <code>gpt-5.4-mini</code> (Responses API, 사진 첨부)','소리: <code>gpt-4o-mini-tts</code> → <code>aplay</code>','상태 변화 → 첫 소리 <b>1.88초</b> (중앙값)'],
+ build:function(g){
+  X(g,16,24,'사진 · 상태 · 센서 → 문장 → 소리','t20 muted');
+  var clock=X(g,624,24,'첫 소리까지 1.88초','t20 b tone-voice',{'text-anchor':'end'});
+  var gw=E('g',{},g);
+  var P=[wire(gw,'M200 80 C224 80 226 112 248 112'),wire(gw,'M200 190 C224 190 226 112 248 112'),wire(gw,'M200 300 C224 300 226 112 248 112')];
+  var p12=wire(gw,'M324 144 L324 168'),pTh=wire(gw,'M400 200 C434 200 436 108 470 108'),p23=wire(gw,'M324 232 L324 256');
+  var pSp=wire(gw,'M400 288 C434 288 436 184 470 184'),pTs=wire(gw,'M540 214 L540 256');
+  var ins=[[36,'카메라','보이는 장면','eye','cam'],[146,'상태머신','지금 하는 일','ink','state'],[256,'센서 인식','확인된 사실','eye','radar']];
+  var inC=ins.map(function(d){var c=card(g,16,d[0],184,88,d[3]);X(c.g,32,d[0]+38,d[1],'t24 b');X(c.g,32,d[0]+68,d[2],'t20 muted');icon(c.g,d[4],166,d[0]+28);return c;});
+  R(g,232,36,184,308,'zone',14);
+  X(g,248,64,'voice_node','t20 mono b');
+  var rows=[[80,'모으기','ink'],[168,'생각하기','think'],[256,'말하기','voice']].map(function(d){var c=card(g,248,d[0],152,64,d[2],10);X(c.g,264,d[0]+40,d[1],'t22 b');return c;});
+  R(g,456,36,168,190,'zone',14);
+  X(g,472,64,'OpenAI','t20 muted');
+  var gpt=card(g,470,78,140,60,'think',10);X(gpt.g,486,104,'GPT','t22 b');X(gpt.g,486,128,'문장 만들기','t19 muted');
+  var tts=card(g,470,154,140,60,'voice',10);X(tts.g,486,180,'TTS','t22 b');X(tts.g,486,204,'음성 만들기','t19 muted');
+  var spk=card(g,456,256,168,88,'voice');var sp=speaker(spk.g,490,300);X(spk.g,522,294,'스피커','t22 b');X(spk.g,522,322,'aplay','t20 mono muted');
+  R(g,16,372,608,92,'bubble',18);
+  E('path',{d:'M516 373.5 L540 350 L564 373.5 Z','class':'bubble-fill'},g);
+  E('path',{d:'M516 372.5 L540 350 L564 372.5','class':'bubble-edge'},g);
+  var b1=X(g,40,412,'','t24'),b2=X(g,40,446,'','t24');
+  X(g,604,400,'예시','t19 muted',{'text-anchor':'end'});
+  var L=['시작 박스 3에서 퍽을 싣기 시작할게요.','앞에 퍽 두 개가 서 있는 게 보여요.'];
+  var think=[0,1,2].map(function(i){return E('circle',{cx:568+i*12,cy:98,r:3.5,'class':'f-think',opacity:0},g);});
+  var gd=E('g',{},g);
+  var dIn=[mkDot(gd,'eye'),mkDot(gd,'ink'),mkDot(gd,'eye')];
+  var d12=mkDot(gd,'ink',6),dTh=mkDot(gd,'think'),dBk=mkDot(gd,'think'),d23=mkDot(gd,'think',6),dSp=mkDot(gd,'voice');
+  var chunks=[0,1,2,3].map(function(){return mkDot(gd,'voice',5);});
+  return function(t){
+   [0,1,2].forEach(function(i){var a=0.2+i*0.25;along(P[i],dIn[i],seg(t,a,a+1.0));op(inC[i].hl,bump(t,a-0.1,a+0.8));});
+   op(rows[0].hl,bump(t,1.0,2.2));
+   along(p12,d12,seg(t,1.7,2.05));
+   op(rows[1].hl,bump(t,1.9,4.9));
+   along(pTh,dTh,seg(t,2.05,2.85));
+   op(gpt.hl,bump(t,2.6,4.0));
+   think.forEach(function(c,i){var on=t>2.85&&t<3.6;op(c,on?1:0);at(c,'cy',on?(98-4*Math.abs(Math.sin((t-2.85)*7+i*0.9))).toFixed(1):98);});
+   along(pTh,dBk,1-seg(t,3.6,4.3));
+   along(p23,d23,seg(t,4.3,4.65));
+   op(rows[2].hl,bump(t,4.4,6.2));
+   along(pSp,dSp,seg(t,4.65,5.4));
+   op(tts.hl,bump(t,5.1,6.5));
+   chunks.forEach(function(c,k){along(pTs,c,lin(t,5.5+k*0.18,5.9+k*0.18));});
+   var talk=t>=6.0;
+   op(spk.hl,talk?Math.min(1,(t-6)/0.3):0);
+   sp.arcs.forEach(function(a,k){op(a,talk?0.35+0.65*Math.abs(Math.sin((t-6)*5-k*0.6)):0.25);});
+   typeLines([b1,b2],L,lin(t,6.1,8.3));
+   op(clock,seg(t,6.0,6.5));
+  };
+ }},
+
+{word:'눈',tone:'eye',dur:9,rest:6.9,
+ body:'D435 사진은 ROS 토픽이 아니라 공유메모리 칸 4개에 돌아가며 써져요. voice_node는 가장 최근 칸만 잠깐 잠그고 복사한 뒤, 긴 변 512px JPEG로 줄여서 GPT에 붙여요.',
+ facts:['<code>/dev/shm/craft_vision</code>, 칸 4개를 돌아가며 씀','<code>/vision/d435/frame_meta</code>: 몇 번 칸, 몇 번째 사진','640×360 → 512×288 JPEG, 품질 80, <code>detail low</code>','찍은 지 2초 넘은 사진은 안 보냄 (<code>frame_max_age_s</code>)'],
+ build:function(g){
+  var cam=E('g',{},g);R(cam,16,50,124,40,'f-ink',10);
+  [[38,10],[62,5],[90,10],[116,7]].forEach(function(c){E('circle',{cx:c[0],cy:70,r:c[1],'class':'f-card'},cam);if(c[1]>6)E('circle',{cx:c[0],cy:70,r:c[1]-5,'class':'f-ink'},cam);});
+  X(g,16,122,'D435','t22 b');X(g,16,150,'640×360','t20 mono muted');X(g,16,176,'30 fps','t20 mono muted');
+  X(g,168,34,'/dev/shm/craft_vision','t20 mono b');
+  var slots=[0,1,2,3].map(function(i){var x=168+i*116;var c=card(g,x,46,104,84,'eye',10);var art=frameArt(c.g,x+6,52,92,52);var sq=X(c.g,x+52,122,'','t19 mono muted',{'text-anchor':'middle'});return{x:x,c:c,art:art,sq:sq,seq:null};});
+  var ptr=E('path',{d:'M-9 12 L0 0 L9 12 Z','class':'f-eye'},g);
+  var meta=X(g,168,176,'','t20 mono');
+  X(g,16,214,'voice_node가 가져가기','t22 b');
+  var big=frameArt(g,16,228,288,162);
+  var fb=R(g,16,228,288,162,'frame-edge',6);
+  var flab=X(g,16,416,'','t20 mono');
+  var lock=E('g',{opacity:0},g);E('circle',{cx:0,cy:0,r:14,'class':'f-card'},lock);R(lock,-7,-3,14,11,'f-ink',2);E('path',{d:'M-4 -3 v-4 a4 4 0 0 1 8 0 v4','class':'st-ink'},lock);
+  var items=['최근 칸만 잠그고 복사','긴 변 512px로 줄이기','JPEG 품질 80으로 압축','찍은 지 2초 안이면 보냄'].map(function(s,i){var y=262+i*44;var gi=E('g',{opacity:0},g);E('circle',{cx:350,cy:y-7,r:11,'class':'f-eye'},gi);E('path',{d:'M344 '+(y-7)+' l4 4 l7 -8','class':'st-on'},gi);X(gi,370,y,s,'t20');return gi;});
+  var sub=X(g,370,424,'오래된 사진은 안 붙여요','t19 muted',{opacity:0});
+  var out=X(g,624,462,'→ GPT 프롬프트 [카메라] 칸','t20 b tone-think',{'text-anchor':'end',opacity:0});
+  return function(t){
+   var k=Math.floor(Math.max(0,t)/0.4);
+   slots.forEach(function(s,i){var kk=k-(((k-i)%4)+4)%4;var seq=1281+kk;if(s.seq!==seq){s.seq=seq;tx(s.sq,'#'+seq);tr(s.art.g,-((seq%5)*3),0);}op(s.c.hl,i===k%4?1:0);});
+   tr(ptr,slots[k%4].x+52,134);
+   tx(meta,'frame_meta → 칸 '+(k%4)+' · #'+(1281+k));
+   op(lock,(t>=3.2&&t<4.5)?1:0);tr(lock,slots[0].x+92,56);
+   var pF=seg(t,3.6,4.6),pS=seg(t,4.8,5.8),pO=seg(t,7.0,8.0);
+   var vis=t>=3.6&&pO<1;
+   var x=lerp(174,16,pF),y=lerp(52,228,pF),w=lerp(92,288,pF),h=lerp(52,162,pF);
+   w=lerp(w,230,pS);h=lerp(h,130,pS);x=lerp(x,660,pO);
+   [big.svg,fb].forEach(function(e){at(e,'x',x.toFixed(1));at(e,'y',y.toFixed(1));at(e,'width',w.toFixed(1));at(e,'height',h.toFixed(1));});
+   if(big.seq!==1289){big.seq=1289;tr(big.g,-((1289%5)*3),0);}
+   op(big.svg,vis?1-pO:0);op(fb,vis?1-pO:0);
+   tx(flab,t<5.3?'원본 640×360':'512×288 JPEG');at(flab,'y',(y+h+26).toFixed(1));op(flab,(vis&&pF>0.6)?1-pO:0);
+   [3.4,4.9,5.6,6.3].forEach(function(a,i){op(items[i],seg(t,a,a+0.4));});
+   op(sub,seg(t,6.5,6.9));op(out,seg(t,7.5,8.0));
+  };
+ }},
+
+{word:'상태',tone:'ink',dur:10,rest:9.6,
+ body:'상태 이름은 1초에 20번, 지금 단계 ID는 1초에 한 번 와요. 새 단계가 시작되면 지난 단계 이름은 버리고, 새 이름이 올 때까지 최대 1.2초 기다렸다가 말해요. 상태 이름이나 ID를 그대로 읽지는 않아요.',
+ facts:['상태 <code>/planning/state</code> 20 Hz, 단계 ID <code>/planning/diagnostics</code> 1 Hz','<code>load_S*</code> → “시작 박스 * 퍽 싣기” (별표 자리를 그대로 옮김)','말하는 상태: Ready · Execute · Complete · Stopping · Fault','같은 상태는 10초에 한 번만 (<code>state_cooldown_s</code>)'],
+ build:function(g){
+  var src=card(g,16,40,124,150,'ink');
+  E('path',{d:'M48 96 L78 70 L108 96 Z','class':'st-ink'},src.g);
+  [[48,96],[78,70],[108,96]].forEach(function(c){E('circle',{cx:c[0],cy:c[1],r:8,'class':'f-ink'},src.g);});
+  X(src.g,30,150,'상태머신','t22 b');X(src.g,30,176,'planning','t19 mono muted');
+  X(g,156,52,'/planning/state · 20 Hz','t20 mono b');
+  R(g,156,62,468,44,'track',10);
+  var ticks=[];for(var i=0;i<24;i++)ticks.push(E('rect',{y:72,width:4,height:24,rx:2,'class':'tick'},g));
+  R(g,280,66,220,36,'pill',18);var pillHl=R(g,280,66,220,36,'hl hl-ink',18);op(pillHl,0);
+  var lab=X(g,390,91,'','t21 mono b',{'text-anchor':'middle'});
+  X(g,156,136,'/planning/diagnostics · 1 Hz','t20 mono b');
+  R(g,156,146,468,44,'track',10);
+  var Lt=[0.2,2.1,4.0,5.9,7.8];
+  var pk=Lt.map(function(l){var gg=E('g',{opacity:0},g);R(gg,0,0,112,32,'pk',8);X(gg,56,23,l<1.25?'load_S2':'load_S3','t20 mono b on',{'text-anchor':'middle'});return gg;});
+  wire(g,'M390 198 L390 220',{'marker-end':'url(#arr)'});
+  X(g,16,214,'StateTracker','t20 mono muted');
+  var B1=card(g,16,226,212,124,'ink');X(B1.g,30,256,'지금 상태','t20 muted');var b1a=X(B1.g,30,292,'','t20 mono b'),b1b=X(B1.g,30,326,'','t21');
+  var B2=card(g,236,226,170,124,'ink');X(B2.g,250,256,'말할 준비','t20 muted');var b2a=X(B2.g,250,292,'','t20');R(B2.g,250,306,142,12,'track',6);var bar=R(B2.g,250,306,0,12,'f-ink',6);X(B2.g,250,342,'최대 1.2초','t19 muted');
+  var B3=card(g,414,226,210,124,'eye');X(B3.g,428,256,'단계 이름','t20 muted');var sid=X(B3.g,428,292,'','t20 mono b');var strike=E('line',{x1:426,y1:285,x2:516,y2:285,'class':'strike',opacity:0},B3.g);var n1=X(B3.g,428,328,'','t20');
+  X(g,16,388,'말할 문장','t20 muted');var out=X(g,112,388,'','t22 b');
+  var groups=[[0,3,'읽고 세기'],[3,6,'퍽 싣기 S1–S6'],[9,1,'배정'],[10,3,'놓기 L1–L3'],[13,3,'확인 L1–L3'],[16,1,'복귀']];
+  var cx=[],gx=34;groups.forEach(function(d){for(var k=0;k<d[1];k++){cx.push(gx);gx+=32;}gx+=14;});
+  var dots=cx.map(function(x){return E('circle',{cx:x,cy:424,r:7,'class':'dot-todo',opacity:0},g);});
+  var glab=groups.map(function(d,i){return X(g,(cx[d[0]]+cx[d[0]+d[1]-1])/2,458,d[2],i===1?'t20 b tone-eye':'t20 muted',{'text-anchor':'middle',opacity:0});});
+  var changes=[1.25,1.8,2.3],labels=['Run.AwaitRequest','Run.PrepareTask','Run.Compute','Run.Execute'];
+  var SENT='“시작 박스 3 퍽 싣기, 시작할게요.”';
+  return function(t){
+   ticks.forEach(function(r,i){at(r,'x',(160+((i*19+t*60)%456)).toFixed(1));});
+   var li=0,fl=0;changes.forEach(function(c){if(t>=c){li++;fl=Math.max(fl,1-lin(t,c,c+0.7));}});
+   var label=labels[li];tx(lab,label);tx(b1a,label);tx(b1b,STATE_KO[label]);
+   op(pillHl,fl);op(B1.hl,fl);
+   pk.forEach(function(gg,i){var p=lin(t,Lt[i],Lt[i]+0.9),fade=1-lin(t,Lt[i]+0.9,Lt[i]+1.15);tr(gg,160+p*348,152);op(gg,(t>=Lt[i]&&fade>0)?fade:0);});
+   if(t<1.25){tx(sid,'load_S2');cl(sid,'t20 mono b');tx(n1,'시작 박스 2 퍽 싣기');cl(n1,'t20');op(strike,0);}
+   else if(t<3.0){tx(sid,'load_S2');cl(sid,'t20 mono b muted');tx(n1,'이전 단계라서 안 씀');cl(n1,'t20 muted');op(strike,1);}
+   else{tx(sid,'load_S3');cl(sid,'t20 mono b');tx(n1,'시작 박스 3 퍽 싣기');cl(n1,'t20 b tone-eye');op(strike,0);}
+   op(B3.hl,t>=3.0?1-0.6*lin(t,3.0,3.8):0);
+   if(t<2.3){tx(b2a,'말할 일 없음');cl(b2a,'t20 muted');at(bar,'width',0);}
+   else if(t<3.0){tx(b2a,'이름 기다림');cl(b2a,'t20 b');at(bar,'width',(142*(t-2.3)/1.2).toFixed(1));}
+   else{tx(b2a,'도착 → 말하기');cl(b2a,'t20 b tone-eye');at(bar,'width',(142*0.7/1.2).toFixed(1));}
+   op(B2.hl,bump(t,2.3,3.6));
+   tx(out,typed(SENT,lin(t,3.2,4.3)));
+   dots.forEach(function(d,i){op(d,seg(t,4.4+i*0.06,4.7+i*0.06));cl(d,i<5?'dot-done':i===5?'dot-now':'dot-todo');if(i===5)at(d,'r',(t>5.5?8+2*Math.sin((t-5.5)*5):8).toFixed(2));});
+   glab.forEach(function(e,i){op(e,seg(t,4.6+i*0.12,5.0+i*0.12));});
+  };
+ }},
+
+{word:'센서',tone:'eye',dur:9,rest:8.6,
+ body:'움직임, YOLO가 찾은 물체, 퍽이 서 있는지 누웠는지, AprilTag 번호를 짧은 사실로 바꿔요. 2초 넘게 새 소식이 없는 줄은 빼서, 지난 일을 지금 일처럼 말하지 않게 해요.',
+ facts:['<code>/perception/state/odom</code> → 움직임','<code>…/d435/detections</code> → YOLO 물체와 신호','<code>…/puck_observations</code> · <code>…/apriltag</code>','2초 넘게 안 온 정보는 빼고 보냄'],
+ build:function(g){
+  X(g,16,30,'/perception/…','t20 mono muted');
+  var rows=[['움직임','state/odom'],['물체 (YOLO)','d435/detections'],['퍽','d435/puck_observations'],['AprilTag','d435/apriltag']].map(function(d,i){var y=44+i*80;var c=card(g,16,y,280,68,'eye',10);X(c.g,30,y+28,d[0],'t21 b');X(c.g,30,y+54,d[1],'t19 mono muted');var age=X(c.g,282,y+28,'','t19 mono',{'text-anchor':'end',opacity:0});var ch=E('path',{d:'M300 '+(y+26)+' l8 8 l-8 8','class':'st-eye',opacity:0},g);return{c:c,age:age,ch:ch};});
+  var C=card(g,316,44,308,308,'think',12);
+  X(C.g,332,76,'[센서가 확인한 것]','t20 b tone-think');
+  var lines=[[110,'- 움직임(odom)','t19 muted'],[138,'앞으로 초속 0.18 m로 이동 중','t21'],[176,'- 인식된 것','t19 muted'],[204,'초록 신호 1개,','t21'],[232,'퍽 3개(선 것 2, 누운 것 1,','t21'],[260,'가장 가까운 것 약 0.6 m),','t21'],[288,'AprilTag 13번','t21']].map(function(d){return X(C.g,332,d[0],d[1],d[2],{opacity:0});});
+  var fs=E('line',{x1:330,y1:281,x2:330,y2:281,'class':'strike',opacity:0},C.g);
+  var n1=X(g,16,396,'2초 넘게 새 소식이 없는 줄은 빼요.','t21 b',{opacity:0});
+  var n2=X(g,16,430,'지난 일을 지금 일처럼 말하지 않게요.','t21',{opacity:0});
+  var foot=X(g,624,466,'→ 프롬프트 [센서가 확인한 것] 칸','t19 b tone-think',{'text-anchor':'end',opacity:0});
+  var act=[0.3,1.3,2.3,3.3],map=[[0,1],[2,3],[4,5],[6]];
+  return function(t){
+   rows.forEach(function(r,i){
+    op(r.c.hl,bump(t,act[i]-0.1,act[i]+0.9));op(r.ch,bump(t,act[i],act[i]+0.9));
+    map[i].forEach(function(j){var v=seg(t,act[i]+0.3,act[i]+0.7);if(j===6)v*=1-0.75*lin(t,6.9,7.4);op(lines[j],v);});
+   });
+   var ag=seg(t,4.2,4.6);
+   rows.forEach(function(r,i){var a=i===3?(t<4.6?0.1:0.1+(t-4.6)):0.03+((t*1.7+i*0.37)%0.3);tx(r.age,a.toFixed(1)+'초');op(r.age,ag);cl(r.age,(i===3&&a>2.0)?'t19 mono b tone-voice':'t19 mono');});
+   op(rows[3].c.g,t>6.5?0.45:1);
+   at(fs,'x2',(330+seg(t,6.5,6.9)*146).toFixed(1));op(fs,t>6.5?1-0.6*lin(t,7.2,7.6):0);
+   op(n1,seg(t,6.6,7.0));op(n2,seg(t,6.9,7.3));op(foot,seg(t,7.6,8.0));
+  };
+ }},
+
+{word:'생각',tone:'think',dur:10,rest:9.6,
+ body:'모은 사실을 칸이 나뉜 프롬프트로 만들고 사진을 붙여 GPT에 보내요. 미션 설명은 배경일 뿐이고, 말의 근거는 상태·센서·사진에서만 찾게 해요. 6초 안에 답이 없으면 정해진 문장으로 바로 말해요.',
+ facts:['모델 순서 <code>gpt-5.4-mini → gpt-6-luna → gpt-5.5</code> (안 되면 다음)','<code>reasoning none</code> · <code>store false</code> · 150자 이내','답 1.02초 (중앙값, n=6, 사진 포함)','마감: 상태 6초 · 주기 설명 10초 · 질문 15초'],
+ build:function(g){
+  var gw=E('g',{},g);
+  var pGo=wire(gw,'M336 240 C350 240 344 72 356 72'),pBk=wire(gw,'M608 120 C620 200 620 280 608 336');
+  R(g,16,24,320,432,'card',14);
+  X(g,32,52,'프롬프트','t20 b');X(g,320,52,'GPT로 가는 글','t19 muted',{'text-anchor':'end'});
+  var S=[['[미션] 배경만','주사위 기억 미션 설명',true],['[요청]','무엇을 시작했는지 말해'],['[로봇 상태]','시작 박스 3 퍽 싣기 중'],['[센서가 확인한 것]','이동 중 · 퍽 3개 · 태그 13'],['[카메라]','사진 1장']];
+  var blocks=S.map(function(d,i){var y=64+i*76;var gg=E('g',{opacity:0},g);R(gg,28,y,296,68,d[2]?'blk dash':'blk',10);X(gg,42,y+28,d[0],d[2]?'t20 b muted':'t20 b tone-think');X(gg,42,y+56,d[1],'t21');return gg;});
+  frameArt(blocks[4],200,378,108,48);
+  var chip=card(g,356,24,268,96,'think',12);X(chip.g,372,62,'gpt-5.4-mini','t22 mono b');X(chip.g,372,94,'reasoning none','t19 mono muted');
+  X(g,372,148,'안 되면 다음 모델로','t19 muted');X(g,372,174,'gpt-6-luna → gpt-5.5','t19 mono muted');
+  var C=2*Math.PI*46;
+  E('circle',{cx:490,cy:240,r:46,'class':'ring-track'},g);
+  var arc=E('circle',{cx:490,cy:240,r:46,'class':'ring-fill',transform:'rotate(-90 490 240)',opacity:0},g);
+  var num=X(g,490,248,'0.00초','t24 mono b',{'text-anchor':'middle'});
+  var med=X(g,490,272,'중앙값','t19 muted',{'text-anchor':'middle',opacity:0});
+  X(g,490,316,'6초 넘으면 정해진 문장','t19 muted',{'text-anchor':'middle'});
+  var outC=card(g,356,336,268,120,'think',12);X(outC.g,372,362,'GPT 답 (예시)','t19 muted');
+  var o=[X(outC.g,372,392,'','t20'),X(outC.g,372,420,'','t20'),X(outC.g,372,448,'','t20')];
+  var OL=['시작 박스 3에서 퍽을','싣기 시작할게요. 앞에','퍽 두 개가 서 있어요.'];
+  var gd=E('g',{},g);var dGo=mkDot(gd,'think'),dBk=mkDot(gd,'think');
+  return function(t){
+   blocks.forEach(function(b,i){var a=0.2+i*0.6,p=seg(t,a,a+0.5);tr(b,(1-p)*36,0);op(b,p);});
+   along(pGo,dGo,seg(t,3.4,4.2));
+   op(chip.hl,bump(t,4.0,6.0));
+   var el=clamp(t-4.2,0,1.02);
+   at(arc,'stroke-dasharray',(C*el/6).toFixed(2)+' '+C.toFixed(2));op(arc,t>=4.2?1:0);
+   tx(num,el.toFixed(2)+'초');op(med,seg(t,5.3,5.7));
+   along(pBk,dBk,seg(t,5.4,6.0));
+   op(outC.hl,bump(t,5.8,8.8));
+   typeLines(o,OL,lin(t,6.0,8.4));
+  };
+ }},
+
+{word:'목소리',tone:'voice',dur:11,rest:10.6,
+ body:'문장을 gpt-4o-mini-tts(목소리 coral)에 보내면 소리가 4 KB 조각으로 와요. 조각이 오는 대로 aplay에 흘려 넣어서, 다 받기 전에 말이 시작돼요. 소리가 말하는 속도보다 빨리 와서 끊기지 않아요.',
+ facts:['PCM 24 kHz · 16-bit · mono, 4 KB씩 (약 0.085초 분량)','<code>aplay -t raw -f S16_LE -r 24000 -c 1 -</code>','문장 → 첫 소리 1.38초 → <b>0.89초</b> (중앙값, n=6)','재생기가 실패하면 WAV로 다시, 두 번 실패하면 스트리밍 끔'],
+ build:function(g){
+  var gw=E('g',{},g);var pIn=wire(gw,'M124 80 L124 112');
+  R(g,16,24,608,56,'card',28);
+  X(g,40,60,'“시작 박스 3에서 퍽을 싣기 시작할게요.”','t22');X(g,604,60,'GPT 문장','t19 muted',{'text-anchor':'end'});
+  var T=card(g,16,112,216,104,'voice',12);X(T.g,32,146,'gpt-4o-mini-tts','t20 mono b');X(T.g,32,176,'목소리 coral','t20');X(T.g,32,204,'PCM 24 kHz','t19 mono muted');
+  R(g,240,150,176,28,'track',14);
+  var A=card(g,424,112,200,104,'voice',12);X(A.g,440,146,'aplay','t22 mono b');X(A.g,440,176,'받는 대로 재생','t20');X(A.g,440,204,'stdin raw','t19 mono muted');var sp=speaker(A.g,592,148);
+  X(g,320,244,'4 KB 조각 하나 = 약 0.085초 소리','t19 muted',{'text-anchor':'middle'});
+  var bars=[];
+  for(var i=0;i<60;i++){
+   var env=Math.sin(Math.PI*((i%20)+0.5)/20);
+   var h=8+64*env*(0.55+0.45*Math.abs(Math.sin(i*1.7)+0.5*Math.sin(i*0.63)))/1.5;
+   bars.push(E('rect',{x:20+i*10,y:(300-h/2).toFixed(1),width:6,height:h.toFixed(1),rx:3,'class':'wv-recv',opacity:0},g));
+  }
+  var ph=E('line',{x1:20,y1:258,x2:20,y2:342,'class':'playhead',opacity:0},g);
+  R(g,16,350,14,14,'wv-recv',3);X(g,36,363,'받은 소리','t19');R(g,130,350,14,14,'wv-play',3);X(g,150,363,'재생한 소리','t19');
+  var fast=X(g,624,363,'약 5초 분량이 1.4초 안에 도착','t19 muted',{'text-anchor':'end',opacity:0});
+  var race=[['전체 받고 재생',1.38,'ink'],['받는 대로 재생',0.89,'voice']].map(function(d,i){var y=380+i*34;X(g,16,y+18,d[0],'t20'+(i?' b':''));R(g,176,y,432,24,'track',6);var bar=R(g,176,y,0,24,'f-'+d[2],6);var val=X(g,176+d[1]*270-8,y+18,d[1].toFixed(2)+'초','t19 mono b on',{'text-anchor':'end',opacity:0});return{bar:bar,val:val,v:d[1]};});
+  var rt=X(g,176,466,'문장 → 첫 소리 (중앙값, 실제 속도)','t19 muted',{opacity:0});
+  var gd=E('g',{},g);var dIn=mkDot(gd,'think',6);
+  var chunks=[];for(var c=0;c<20;c++){var cg=E('g',{opacity:0},gd);R(cg,0,0,22,20,'f-voice',4);chunks.push(cg);}
+  return function(t){
+   along(pIn,dIn,seg(t,0.4,1.2));
+   op(T.hl,bump(t,0.9,6.0));
+   chunks.forEach(function(cg,i){var a=1.4+i*0.19,p=lin(t,a,a+0.5);if(p>0&&p<1){op(cg,1);tr(cg,244+p*150,154);}else op(cg,0);});
+   var arrived=t<1.9?0:Math.min(20,Math.floor((t-1.9)/0.19+1e-9)+1);
+   var recv=arrived*3,played=Math.min(recv,Math.max(0,(t-1.9)*10.5));
+   bars.forEach(function(b,i){if(i<played){cl(b,'wv-play');op(b,1);}else if(i<recv){cl(b,'wv-recv');op(b,1);}else op(b,0);});
+   var px=20+played*10-2;at(ph,'x1',px.toFixed(1));at(ph,'x2',px.toFixed(1));op(ph,(t>=1.9&&played<60)?1:0);
+   var talk=t>=1.9&&played<60;
+   op(A.hl,talk?1:0);sp.arcs.forEach(function(a,k){op(a,talk?0.35+0.65*Math.abs(Math.sin((t-1.9)*5-k*0.6)):0.25);});
+   op(fast,seg(t,5.0,5.4));
+   race.forEach(function(r){var e=clamp(t-7.6,0,r.v);at(r.bar,'width',(e*270).toFixed(1));op(r.val,e>=r.v?1:0);});
+   op(rt,seg(t,7.2,7.6));
+  };
+ }},
+
+{word:'언제',tone:'ink',dur:11,rest:10.4,
+ body:'할 일이 바뀔 때, 일하는 동안 20초마다, 누가 /voice/ask로 물어볼 때 말해요. 말할 문장은 중요한 순서로 줄을 서고, 할 일이 바뀌면 낡은 주기 설명은 끊고 버려요.',
+ facts:['말하는 순서: 고장 3 › 질문·요청 2 › 상태 변화 1 › 주기 설명 0','요청: <code>/voice/ask</code> · <code>/voice/say</code> · <code>/voice/command</code>','GPT는 상태 문장을 먼저 만들어요 (금방 낡으니까)','GPT는 1분에 12번까지, 넘으면 정해진 문장 · 30초 안 같은 말은 다시 안 함'],
+ build:function(g){
+  var trig=[['주기 설명','일할 때 20초마다',0,'muted'],['상태 변화','할 일이 바뀔 때',1,'ink'],['질문·요청','/voice/ask',2,'think'],['고장','Fault',3,'hazard']].map(function(d,i){var y=36+i*74;var c=card(g,16,y,240,64,d[3]==='hazard'?'hazard':d[3]==='think'?'think':'ink',12);badge(c.g,48,y+32,d[2],d[3]);X(c.g,76,y+28,d[0],'t21 b');X(c.g,76,y+52,d[1],i>=2?'t19 mono muted':'t19 muted');return c;});
+  var Cr=2*Math.PI*30;
+  E('circle',{cx:52,cy:410,r:30,'class':'ring-track thin'},g);
+  var ring=E('circle',{cx:52,cy:410,r:30,'class':'ring-fill ink thin',transform:'rotate(-90 52 410)'},g);
+  X(g,98,404,'20초 타이머','t20 b');X(g,98,430,'일하는 동안만 돌아요','t19 muted');
+  X(g,288,56,'말할 차례','t21 b');X(g,624,56,'높은 번호 먼저','t19 muted',{'text-anchor':'end'});
+  R(g,288,68,336,180,'zone',12);
+  X(g,288,288,'지금 말하는 중','t21 b');var sp=speaker(g,592,280);
+  R(g,288,300,336,64,'zone',12);
+  var note1=X(g,288,400,'할 일이 바뀌면 주기 설명은 끊어요','t20',{opacity:0});
+  var note2=X(g,288,432,'질문은 늦게 와도 먼저 말해요','t20',{opacity:0});
+  function item(label,n,tone){var gg=E('g',{opacity:0},g);R(gg,0,0,320,48,'card',10);var hl=R(gg,0,0,320,48,'hl hl-voice',10);op(hl,0);badge(gg,26,24,n,tone,15);var tt=X(gg,50,31,label,'t20');var sk=E('line',{x1:48,y1:24,x2:48,y2:24,'class':'strike',opacity:0},gg);return{g:gg,hl:hl,tt:tt,sk:sk};}
+  var A=item('주기 설명',0,'muted'),B=item('상태 변화: 퍽 싣기 시작',1,'ink'),Cq=item('주기 설명',0,'muted'),D=item('질문 답: 몇 개 남았어?',2,'think');
+  var FA=[[1.8,256,76,0],[2.2,296,76,1],[2.4,296,76,1],[2.8,296,308,1],[3.9,296,308,1],[4.3,296,308,0]];
+  var FB=[[3.5,256,76,0],[3.9,296,76,1],[4.2,296,76,1],[4.6,296,308,1],[8.0,296,308,1],[8.3,296,308,0]];
+  var FC=[[5.0,256,76,0],[5.4,296,76,1],[6.2,296,76,1],[6.6,296,134,1],[8.2,296,134,1],[8.6,296,76,1]];
+  var FD=[[6.2,256,76,0],[6.6,296,76,1],[8.2,296,76,1],[8.6,296,308,1],[10.6,296,308,1],[10.9,296,308,0]];
+  function place(it,F,t){var v=kf(t,F);tr(it.g,v[0],v[1]);op(it.g,t<F[0][0]?0:v[2]);}
+  return function(t){
+   place(A,FA,t);place(B,FB,t);place(Cq,FC,t);place(D,FD,t);
+   op(A.hl,(t>=2.8&&t<3.6)?1:0);op(B.hl,(t>=4.6&&t<8.0)?1:0);op(D.hl,(t>=8.6&&t<10.6)?1:0);
+   at(A.sk,'x2',(48+seg(t,3.6,3.9)*88).toFixed(1));op(A.sk,t>=3.6?1:0);tx(A.tt,t>=3.6?'주기 설명   끊고 버림':'주기 설명');
+   op(trig[0].hl,Math.max(bump(t,1.5,2.3),bump(t,4.7,5.5)));op(trig[1].hl,bump(t,3.2,4.0));op(trig[2].hl,bump(t,5.9,6.7));
+   var f=t<1.8?(t+1.4)/3.2:t<5.0?(t-1.8)/3.2:(t-5.0)/6.4;
+   at(ring,'stroke-dasharray',(Cr*clamp(f)).toFixed(2)+' '+Cr.toFixed(2));
+   var talk=(t>=2.8&&t<3.6)||(t>=4.6&&t<8.0)||(t>=8.6&&t<10.6);
+   sp.arcs.forEach(function(a,k){op(a,talk?0.35+0.65*Math.abs(Math.sin(t*5-k*0.6)):0.25);});
+   op(note1,seg(t,3.6,4.0));op(note2,seg(t,6.6,7.0));
+  };
+ }},
+
+{word:'고장',tone:'hazard',dur:10,rest:9.6,
+ body:'Fault가 오면 GPT를 기다리지 않아요. 원인이 오길 최대 1.2초 기다렸다가 정해진 상황 문장을 고르고, 말하던 걸 끊고 바로 말해요. 오류 코드는 읽지 않아요.',
+ facts:['<code>execution timeout</code> → “목표까지 너무 오래 걸려서 멈춰 있어요.”','원인은 최대 1.2초 기다림 (<code>fault_reason_wait_s</code>)','급한 음성: 4초 마감, 재시도 없음, +1초면 끊음, 스트리밍 안 함','그래도 안 되면 <code>fallback_tts_command</code> (예: espeak-ng, 설정했을 때)'],
+ build:function(g){
+  var band=E('rect',{x:-640,y:0,width:640,height:20,fill:'url(#hz)',opacity:0},g);
+  var gw=E('g',{},g);
+  wire(gw,'M128 82 L144 82');wire(gw,'M248 82 L264 82');var pN34=wire(gw,'M360 82 L376 82');var pN45=wire(gw,'M496 82 L512 82');
+  var pArc=wire(gw,'M196 52 C196 22 436 22 436 52');cl(pArc,'wire hz');op(pArc,0);
+  var N=[[16,112,'상태머신','hazard'],[144,104,'모으기','ink'],[264,96,'GPT','think'],[376,120,'TTS','voice'],[512,112,'스피커','voice']].map(function(d){var c=card(g,d[0],52,d[1],60,d[3],10);X(c.g,d[0]+d[1]/2,89,d[2],'t21 b',{'text-anchor':'middle'});return c;});
+  var skip=X(g,312,138,'건너뜀','t19 b',{'text-anchor':'middle',opacity:0});
+  var rc=card(g,16,152,608,44,'hazard',10);X(rc.g,32,181,'Fault: Run.Execute: execution timeout','t19 mono');X(rc.g,608,181,'원인 ≤1.2초','t19 muted',{'text-anchor':'end'});op(rc.g,0);
+  var arw=wire(g,'M64 197 L64 213',{'marker-end':'url(#arr)'});op(arw,0);
+  var sc=card(g,16,216,608,52,'hazard',10);var stx=X(sc.g,32,250,'','t22 b');X(sc.g,608,250,'정해진 상황 문장','t19 muted',{'text-anchor':'end'});op(sc.g,0);
+  X(g,16,300,'말하던 것','t19 muted');
+  var old=card(g,16,308,608,44,'voice',10);var otx=X(old.g,32,337,'','t20');var ost=E('line',{x1:30,y1:330,x2:30,y2:330,'class':'strike',opacity:0},old.g);var ocut=X(old.g,608,337,'끊음','t19 b',{'text-anchor':'end',opacity:0});
+  X(g,16,384,'급한 음성 마감','t20 b');
+  R(g,176,370,432,20,'track',6);
+  var s=432/5.5;
+  var m4=E('line',{x1:176+4*s,y1:362,x2:176+4*s,y2:398,'class':'mark',opacity:.35},g);
+  var m5=E('line',{x1:176+5*s,y1:362,x2:176+5*s,y2:398,'class':'mark',opacity:.35},g);
+  var l4=X(g,176+4*s-6,420,'4초 마감 · 재시도 없음','t19',{'text-anchor':'end',opacity:.35});
+  var l5=X(g,176+5*s,446,'+1초면 끊음','t19',{'text-anchor':'middle',opacity:.35});
+  var fbk=X(g,16,470,'그래도 소리가 없으면 → espeak-ng (설정했을 때)','t19 muted',{opacity:0});
+  var gd=E('g',{},g);var dV=mkDot(gd,'voice'),dHz=mkDot(gd,'hazard'),dO1=mkDot(gd,'think',5),dO2=mkDot(gd,'voice',5);
+  var OLD='퍽을 싣는 중이에요. 앞에 퍽 두 개가 보여요.',FAULT='목표까지 너무 오래 걸려서 멈춰 있어요.';
+  return function(t){
+   var F=1.8;
+   at(band,'x',(-640+640*seg(t,F,F+0.5)).toFixed(1));op(band,t>=F?1:0);
+   along(pN34,dO1,lin(t,0.2,0.6));along(pN45,dO2,lin(t,0.6,0.95));along(pN45,dV,lin(t,4.8,5.2));
+   op(N[0].hl,t>=F?1:0);
+   op(N[2].g,t>=3.8?1-0.6*seg(t,3.8,4.2):1);op(skip,seg(t,3.8,4.2));
+   op(pArc,seg(t,3.6,3.9));along(pArc,dHz,seg(t,3.9,4.8));
+   op(N[1].hl,bump(t,2.0,3.9));op(N[3].hl,bump(t,4.6,5.6));
+   var speakOld=t>=0.4&&t<2.0,speakNew=t>=5.2;
+   op(N[4].hl,speakOld||speakNew?0.55+0.45*Math.abs(Math.sin(t*4)):0);
+   tx(otx,typed(OLD,lin(t,0.2,1.6)));
+   at(ost,'x2',(30+seg(t,2.0,2.3)*384).toFixed(1));op(ost,t>=2.0?1:0);
+   op(old.g,t>=2.0?1-0.5*seg(t,2.0,2.4):1);op(ocut,seg(t,2.1,2.4));
+   op(rc.g,seg(t,2.2,2.6));op(arw,seg(t,2.8,3.0));op(sc.g,seg(t,2.8,3.1));
+   tx(stx,typed(FAULT,lin(t,3.0,3.8)));
+   op(sc.hl,speakNew?0.5+0.5*Math.abs(Math.sin((t-5.2)*4)):0);
+   var a4=seg(t,6.0,6.3),a5=seg(t,6.6,6.9);
+   op(m4,0.35+0.65*a4);op(l4,0.35+0.65*a4);op(m5,0.35+0.65*a5);op(l5,0.35+0.65*a5);
+   op(fbk,seg(t,7.2,7.6));
+  };
+ }},
+
+{word:'시간',tone:'voice',dur:11,rest:10.6,
+ body:'같은 날 같은 환경에서 잰 중앙값이에요. 빠른 모델로 바꾸고 음성을 받는 대로 틀었더니, 상태가 바뀌고 첫 소리까지 2.89초가 1.88초가 됐어요. 위 막대는 실제 속도로 자라요.',
+ facts:['2026-11-03, 클라우드 컨테이너에서 OpenAI 직접 호출','스트리밍 n=6 · 전체 WAV n=5, 사진과 실제 중계 프롬프트 사용','노트북 이전 기본값 3.67초는 네트워크가 달라 참고만','다시 재기: <code>python -m craft_voice.bench --engine openai --gpt --stream</code>'],
+ build:function(g){
+  X(g,16,36,'상태 변화 → 첫 소리 (중앙값)','t20 b');
+  var clk=X(g,624,40,'0.00초','t28 mono b',{'text-anchor':'end'});
+  var race=[['전체 받고 재생','2.89',2.89,'ink',66],['받는 대로 재생','1.88',1.88,'voice',112]].map(function(d,i){X(g,16,d[4]+19,d[0],'t20'+(i?' b':''));R(g,176,d[4],432,26,'track',6);var bar=R(g,176,d[4],0,26,'f-'+d[3],6);var val=X(g,176+d[2]*144-8,d[4]+19,d[1]+'초','t19 mono b on',{'text-anchor':'end',opacity:0});var ic=speakerMini(g,176+d[2]*144+16,d[4]+13);op(ic,0);return{bar:bar,val:val,v:d[2],ic:ic};});
+  for(var i=0;i<4;i++){E('line',{x1:176+i*144,y1:144,x2:176+i*144,y2:150,'class':'mark'},g);X(g,176+i*144,170,i+'초','t19 mono muted',{'text-anchor':'middle'});}
+  E('line',{x1:16,y1:190,x2:624,y2:190,'class':'divider'},g);
+  X(g,16,224,'모델별 GPT 답 시간 (reasoning none, 사진 포함)','t20 b');
+  var M=[['gpt-5.4-mini',1.02,true],['gpt-6-luna',1.59],['gpt-5.6-luna',1.60],['gpt-5.5',2.47]].map(function(d,i){var y=244+i*44;X(g,16,y+21,d[0],'t19 mono'+(d[2]?' b':''));R(g,176,y,432,30,'track',6);var bar=R(g,176,y,0,30,d[2]?'f-think':'f-muted',6);var val=X(g,176+d[1]*154+8,y+21,d[1].toFixed(2),'t19 mono b',{opacity:0});var tag=null;if(d[2]){tag=E('g',{opacity:0},g);R(tag,0,y+4,52,22,'f-think',11);X(tag,26,y+20,'기본','t19 b on',{'text-anchor':'middle'});tr(tag,176+d[1]*154+62,0);}return{bar:bar,val:val,v:d[1],tag:tag};});
+  var n1=X(g,16,436,'노트북에서 이전 기본값(gpt-5.5 low, 사진 없음)은 3.67초','t19 muted',{opacity:0});
+  var n2=X(g,16,462,'네트워크가 달라 참고만 하고, Jetson에선 다시 재야 해요','t19 muted',{opacity:0});
+  return function(t){
+   var e=clamp(t-0.8,0,2.89);tx(clk,e.toFixed(2)+'초');
+   race.forEach(function(r){at(r.bar,'width',(Math.min(e,r.v)*144).toFixed(1));var done=e>=r.v;op(r.val,done?1:0);op(r.ic,done?1:0);});
+   M.forEach(function(m,i){var p=seg(t,4.2+i*0.15,5.6+i*0.15);at(m.bar,'width',(m.v*154*p).toFixed(1));op(m.val,lin(t,5.6+i*0.15,5.9+i*0.15));if(m.tag)op(m.tag,seg(t,5.9,6.2));});
+   op(n1,seg(t,6.4,6.8));op(n2,seg(t,6.7,7.1));
+  };
+ }}
+];
+
+/* ---------- player ---------- */
+var root=document.getElementById('scene'),svg=document.getElementById('stage');
+var playBtn=document.getElementById('play'),playIcon=document.getElementById('playIcon'),restart=document.getElementById('restart');
+var scrub=document.getElementById('scrub'),clock=document.getElementById('clock'),nav=document.getElementById('chapters');
+var capNo=document.getElementById('capNo'),capWord=document.getElementById('capWord'),capBar=document.getElementById('capBar');
+var capBody=document.getElementById('capBody'),capFacts=document.getElementById('capFacts'),cap=document.getElementById('cap');
+var TONE={ink:'var(--ink)',eye:'var(--eye)',think:'var(--think)',voice:'var(--voice)',hazard:'var(--hazard)'};
+var starts=[],TOTAL=0;scenes.forEach(function(s){starts.push(TOTAL);TOTAL+=s.dur;});
+scrub.max=String(Math.round(TOTAL*100));
+var reduce=window.matchMedia?window.matchMedia('(prefers-reduced-motion: reduce)'):{matches:false};
+var T=0,playing=false,cur=-1,upd=null,last=null;
+function pad(n){return(n<10?'0':'')+n;}
+function fmt(s){s=Math.floor(s);return Math.floor(s/60)+':'+pad(s%60);}
+var btns=scenes.map(function(s,i){
+  var b=document.createElement('button');b.type='button';b.className='ch';b.style.setProperty('--tone',TONE[s.tone]);
+  b.innerHTML='<span class="n">'+pad(i)+'</span><span class="w">'+s.word+'</span>';
+  b.setAttribute('aria-label',pad(i)+' '+s.word+' 장면');
+  b.addEventListener('click',function(){go(i);});nav.appendChild(b);return b;
+});
+function sceneAt(t){var i=scenes.length-1;while(i>0&&t<starts[i])i--;return i;}
+function caption(i){
+  var s=scenes[i];
+  capNo.textContent=pad(i)+' / '+pad(scenes.length-1);capWord.textContent=s.word;
+  cap.style.setProperty('--tone',TONE[s.tone]);capBar.className='cap-bar'+(s.tone==='hazard'?' hz':'');
+  capBody.textContent=s.body;capFacts.innerHTML=s.facts.map(function(f){return'<li>'+f+'</li>';}).join('');
+  btns.forEach(function(b,j){if(j===i)b.setAttribute('aria-current','step');else b.removeAttribute('aria-current');});
+}
+function render(){
+  var i=sceneAt(Math.min(T,TOTAL-1e-6));
+  if(i!==cur){cur=i;while(root.firstChild)root.removeChild(root.firstChild);upd=scenes[i].build(root);caption(i);}
+  var lt=T-starts[i];
+  op(root,(i===0||reduce.matches)?1:0.15+0.85*lin(lt,0,0.35));
+  upd(lt);
+  scrub.value=String(Math.round(T*100));
+  clock.textContent=fmt(T)+' / '+fmt(TOTAL);
+  btns.forEach(function(b,j){var p=j<i?1:j>i?0:clamp(lt/scenes[j].dur);b.style.setProperty('--p',p.toFixed(3));});
+}
+function setPlaying(p){
+  playing=p;
+  playBtn.setAttribute('aria-label',p?'일시정지':'재생');
+  playIcon.setAttribute('d',p?'M5 3h3.5v14H5zM11.5 3H15v14h-3.5z':'M6 3.5v13l10.5-6.5z');
+  if(p){if(T>=TOTAL)T=0;last=null;requestAnimationFrame(frame);}
+}
+function frame(now){
+  if(!playing){last=null;return;}
+  if(last!=null)T+=Math.min(0.1,(now-last)/1000);
+  last=now;
+  if(T>=TOTAL){T=TOTAL;render();setPlaying(false);return;}
+  render();requestAnimationFrame(frame);
+}
+function go(i){
+  i=(i+scenes.length)%scenes.length;
+  T=starts[i]+((playing&&!reduce.matches)?0:scenes[i].rest);
+  render();
+}
+playBtn.addEventListener('click',function(){setPlaying(!playing);});
+restart.addEventListener('click',function(){T=0;render();if(!playing&&!reduce.matches)setPlaying(true);});
+scrub.addEventListener('input',function(){T=clamp(Number(scrub.value)/100,0,TOTAL);render();});
+document.addEventListener('keydown',function(e){
+  var tag=(e.target&&e.target.tagName)||'';
+  if(tag==='INPUT'||tag==='BUTTON'||tag==='TEXTAREA'||e.altKey||e.ctrlKey||e.metaKey)return;
+  if(e.key===' '){e.preventDefault();setPlaying(!playing);}
+  else if(e.key==='ArrowRight'){e.preventDefault();go(cur+1);}
+  else if(e.key==='ArrowLeft'){e.preventDefault();go(cur-1);}
+});
+if(reduce.matches){document.getElementById('rmNote').hidden=false;T=scenes[0].rest;render();setPlaying(false);}
+else{T=0;render();setPlaying(true);}
+})();
+</script>
+</body>
+</html>
