@@ -28,15 +28,19 @@ import plan  # URDF joint limits
 HERE = Path(__file__).resolve().parent
 ARM = ['slide_joint', 'shoulder_joint', 'elbow_joint', 'wrist_pitch_joint', 'tool_roll_joint']
 STATUS = {0: 'RUNNING', 1: 'SUCCEEDED', 2: 'FAILED', 3: 'STOPPING', 4: 'STOPPED', 5: 'REJECTED'}
-# Loading pose measured with DYNAMIXEL Wizard (2026-10-26), raw motor degrees: shoulder, elbow,
-# wrist_pitch, tool_roll, with the LM on the old (LiDAR-centre) grasp line, LOAD_SLIDE.
+# Loading pose measured with DYNAMIXEL Wizard (2026-10-26) as raw motor degrees [90, 140, 333, 92], kept as URDF
+# joint degrees (shoulder, elbow, wrist_pitch, tool_roll) through the 2026-10-26 offsets so it survives re-zeroing
+# (2026-11-02: new offsets, wrist bracket replaced). LM on the old (LiDAR-centre) grasp line, LOAD_SLIDE.
 # Clock slot 12 sits at the loading guide.
-LOAD_MOTOR_DEG = [90.0, 140.0, 333.0, 92.0]
+LOAD_URDF_DEG = [23.95, 14.61, -123.04, 2.0]
 LOAD_SLIDE = -0.00035  # [m] before LM_BACKLASH
 LOAD_SLOT = 12
 # The LM stops ~2 mm short of the puck line (backlash): aim this much further toward the LM motor
 # (+slide; the motor end is about +0.063). Applies to every plan pose and to LOAD_SLIDE.
 LM_BACKLASH = 0.002  # [m]
+# Load 1 stops the shoulder this far before vertical (the arm leaning to the front): with it at vertical the held
+# puck passed the storage close while the elbow swung (2026-11-03).
+LOAD_SHOULDER_SHORT = math.radians(10.0)
 # Unload: the puck sits this far below where the loading pose lets it go.
 UNLOAD_DEPTH = 0.03  # [m] straight down from the loading pose
 # The plain swing to the loading pose ends by sliding in from behind ~2 cm over the loading height and the
@@ -52,8 +56,11 @@ PUT_DOWN_ABOVE = 0.01  # [m]
 # held, then the shoulder alone, so the shoulder never moves with the rest of the arm still swinging (it carries
 # the whole arm and ran out of torque). Not for taking the puck out of the clock (NO_STAGING).
 # Vertical moves go in STAGE_SEG pieces so the staged path stays near the line.
-NO_STAGING = ('arm over the slot', 'straight down to the grasp', 'straight up ')
-STAGE_SEG = 4  # plan frames (1 mm each) per vertical piece
+# Vertical moves (descend / lift / put down / rise) go in one unstaged move (2026-11-02, was 4 mm pieces staged
+# elbow-first: 20 moves for 4 cm). Joints arrive one by one, so the TCP bows ~10 mm front-back mid-move.
+NO_STAGING = ('arm over the slot', 'straight down to the grasp', 'straight up ', 'descend', 'lift the puck',
+              'put down', 'rise above the puck')
+STAGE_SEG = 1000  # plan frames per vertical piece: one move
 # --lying: the arm reaches the plan's tool angle through a pose LYING_HIGH over the grasp, then comes down the
 # vertical line in 1 cm pieces. Going straight from the standing lift pose to the approach dipped the fingertips
 # into the floor in simulation (2026-10-27, nearly happened on the robot).
@@ -65,10 +72,8 @@ LYING_SWING = 20
 
 
 def load_pose():
-    """LOAD_MOTOR_DEG as URDF joint angles (control.yaml offsets/directions)."""
-    c = yaml.safe_load(open(plan.CONTROL_YAML))['control_master']['ros__parameters']
-    return [d * (math.radians(m) - o)
-            for m, o, d in zip(LOAD_MOTOR_DEG, c['arm_joint_offsets'], c['arm_joint_directions'])]
+    """LOAD_URDF_DEG in radians."""
+    return [math.radians(v) for v in LOAD_URDF_DEG]
 
 
 def below(arm, dz):
@@ -203,20 +208,48 @@ def load_tail(lift, start):
     return s
 
 
+def shoulder_vertical():
+    """URDF shoulder angle with the upper arm (shoulder -> elbow axis) vertical: 24.0 deg, about the loading pose."""
+    o = plan.Chain(plan.URDF).origin('elbow_joint')
+    return math.atan2(o[1], o[2])
+
+
+def toward_vertical(s0, s1, short=0.0):
+    """Shoulder s0 -> s1, but stopping `short` [rad] before vertical on s0's side; it never moves away from that
+    point (it stays at s0 then)."""
+    v = shoulder_vertical()
+    stop = v + math.copysign(short, s0 - v)
+    return min(max(stop, min(s0, s1)), max(s0, s1))
+
+
 def steps_from_plan(current_slide=None, start=None):
+    """sis1, one move per step (2026-11-03): the shoulder carries the whole arm, so every swing runs the rest of the
+    arm with the shoulder held (going out) or only up to vertical (loading, coming back), then the shoulder alone.
+    start None (dry run): the shoulder of the first move is the current one (nan)."""
     # plan.py layout at 20 Hz: 0-19 hold above, 20-59 descent, 60-79 close, rest hold (no lift).
     pose = plan_pose()
-    # The arm moves first: a rest pose outside the control limits (clamped, sagging) never settles,
-    # and control completes no task, not even a gripper one, until the arm settles.
-    s = []
-    if current_slide is not None:  # arm first with the LM held, then the LM alone
-        s.append(('arm above the puck, LM stays', TaskCommand.MANIPULATOR, [current_slide] + pose(0)[1:]))
-    s.append(('open gripper', TaskCommand.GRIPPER, False))
-    s.append(('LM to the puck line (move above the puck)', TaskCommand.MANIPULATOR, pose(0)))
-    s.append(('descend', TaskCommand.MANIPULATOR, frames_path(pose, 20, 59)))
-    s += [('close gripper (grasp by current >= 0.1 A)', TaskCommand.GRIPPER, True)]
-    s.append(('lift the puck', TaskCommand.MANIPULATOR, frames_path(pose, 59, 20)))
-    return s + load_tail(pose(20)[1:], start)
+    approach, grasp = pose(0), pose(59)
+    load = [LOAD_SLIDE + LM_BACKLASH] + load_pose()
+    held = start[1] if start is not None else math.nan
+    s = [('move 1: LM to the puck line, arm but the shoulder above the puck', TaskCommand.MANIPULATOR,
+          [[approach[0], held] + approach[2:]]),
+         ('move 2: shoulder above the puck', TaskCommand.MANIPULATOR, [approach]),
+         ('open gripper (before descending)', TaskCommand.GRIPPER, False),
+         ('descend', TaskCommand.MANIPULATOR, [grasp]),
+         ('close gripper (grasp by current >= 0.1 A)', TaskCommand.GRIPPER, True),
+         ('ascend', TaskCommand.MANIPULATOR, [approach]),
+         (f'load 1: LM, elbow, wrist, roll to the loading pose, shoulder up to '
+          f'{math.degrees(LOAD_SHOULDER_SHORT):.0f} deg before vertical', TaskCommand.MANIPULATOR,
+          [[load[0], toward_vertical(approach[1], load[1], LOAD_SHOULDER_SHORT)] + load[2:]]),
+         # control runs one task at a time, so the clock goes between the two: load 2 starts once it reports done
+         (f'clock to slot {LOAD_SLOT} (loading guide)', TaskCommand.CLOCK, LOAD_SLOT),
+         ('load 2: shoulder to the loading pose', TaskCommand.MANIPULATOR, [load]),
+         ('open gripper (drop the puck into the clock)', TaskCommand.GRIPPER, False)]
+    if start is not None:
+        s.append(('back 1: elbow, wrist, roll to the start, shoulder up to vertical, LM stays',
+                  TaskCommand.MANIPULATOR, [[load[0], toward_vertical(load[1], start[1])] + start[2:]]))
+        s.append(('back 2: LM and shoulder to the start', TaskCommand.MANIPULATOR, [start]))
+    return s
 
 
 def lying_steps_from_plan(current_slide=None, start=None):
@@ -406,7 +439,7 @@ def main():
     dry = '--dry-run' in sys.argv
     lying = '--lying' in sys.argv
     make_steps = unload_steps_from_plan if '--unload' in sys.argv else lying_steps_from_plan if lying else steps_from_plan
-    steps = stage(make_steps(), None)
+    steps = make_steps() if make_steps is steps_from_plan else stage(make_steps(), None)
     for name, kind, arg in steps:
         print(f'  {name:45s}', describe(kind, arg))
     if dry:
@@ -440,10 +473,12 @@ def main():
         # Return pose: the start, but 3 degrees inside the limits so it can settle there.
         margin = math.radians(3.0)
         start = [slide] + [min(max(now[n], limits(n)[0] + margin), limits(n)[1] - margin) for n in ARM[1:]]
-        steps = stage(make_steps(slide, start), [slide] + [now[n] for n in ARM[1:]])
+        steps = make_steps(slide, start)
+        if make_steps is not steps_from_plan:  # sis1 sets its own move order
+            steps = stage(steps, [slide] + [now[n] for n in ARM[1:]])
         for name, kind, arg in steps:
             print(f'  {name:45s}', describe(kind, arg))
-        print('\nSUPPORT THE ARM. Keep a hand on the 12 V power. Enter = run step, q + Enter = quit.\n')
+        print('\nKeep a hand on the 12 V power. Enter = run step, q + Enter = quit.\n')
         if not run_steps(node, steps):
             go_home(node, start, lying)
         print('done. control keeps holding the last pose; Ctrl+C to exit this script.')

@@ -11,7 +11,10 @@
 //    LiDAR 는 퍽의 앞면 반원만 보므로, 점 평균을 LiDAR 반대 방향으로 0.637*반지름 만큼 보정
 // 4) 같은 퍽을 두 LiDAR 에서 짝지어, 두 중심이 겹치도록 후방 LiDAR 위치·각도를 최소제곱으로 계산
 //    (잔차가 outlier_mm 보다 크면, 빼서 가장 잘 맞아지는 퍽을 하나씩 제외, 최소 3쌍)
-// 5) 전방 LiDAR 방향을 기준으로, 두 LiDAR 가운데를 base_link 로 다시 잡아 출력
+// 5) 전방 LiDAR 방향을 기준으로, 두 LiDAR 가운데를 (body_center_x, 0)에 두고 출력
+// 뒤집어 단 LiDAR(TF roll 180도)는 점의 y 부호를 바꿔 똑바로 선 가상 LiDAR 로 계산하고, 출력 yaw 는
+// roll 180도와 함께 쓰는 값이다 (front_roll_deg / rear_roll_deg 는 그대로).
+//    (base_link = 실제 회전 중심인 앞뒤 바퀴 축 가운데, 두 LiDAR 가운데는 그보다 body_center_x 앞)
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -29,7 +32,7 @@
 using sensor_msgs::msg::LaserScan;
 
 struct Pt { double x, y; };
-struct Pose2D { double x{0}, y{0}, yaw{0}; };
+struct Pose2D { double x{0}, y{0}, yaw{0}; bool flipped{false}; };  // flipped: upside down (z axis down)
 
 static Pt apply(const Pose2D & p, const Pt & q)
 {
@@ -121,11 +124,13 @@ public:
   {
     samples_ = declare_parameter<int>("samples", 30);          // LiDAR 당 스캔 수 (약 3초)
     puck_radius_ = declare_parameter<double>("puck_radius", 0.035);
-    roi_min_ = declare_parameter<double>("roi_min", 0.25);     // 로봇 중앙에서 이보다 가까우면 몸체로 보고 제외
+    roi_min_ = declare_parameter<double>("roi_min", 0.25);     // 몸체 중앙에서 이보다 가까우면 몸체로 보고 제외
     roi_max_ = declare_parameter<double>("roi_max", 0.80);     // 이보다 멀면 제외 (벽 등)
     cluster_gap_ = declare_parameter<double>("cluster_gap", 0.03);
     match_dist_ = declare_parameter<double>("match_dist", 0.15);  // 두 LiDAR 의 같은 퍽 짝짓기 허용 거리
     declare_parameter<double>("outlier_mm", 15.0);              // 이보다 잔차가 큰 퍽은 제외
+    // 몸체 중앙(두 LiDAR 가운데)의 base_link x [m], lidar_processor.launch.py 와 같은 값
+    body_center_x_ = declare_parameter<double>("body_center_x", 0.0);
 
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
@@ -162,7 +167,8 @@ private:
       auto t = tf_buffer_->lookupTransform("base_link", frame, tf2::TimePointZero);
       const auto & q = t.transform.rotation;
       p = {t.transform.translation.x, t.transform.translation.y,
-        std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))};
+        std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z)),
+        1.0 - 2.0 * (q.x * q.x + q.y * q.y) < 0.0};
       return true;
     } catch (const std::exception & e) {
       RCLCPP_WARN(get_logger(), "TF 대기 중 (%s): %s", frame.c_str(), e.what());
@@ -177,9 +183,11 @@ private:
     std::vector<Pt> lp;                                // LiDAR 좌표
     for (const auto & kv : grid) {
       if (kv.second.second < min_hits) {continue;}
-      const Pt l{kv.second.first.x / kv.second.second, kv.second.first.y / kv.second.second};
+      // Upside down: mirror into the upright virtual LiDAR whose yaw P carries.
+      const Pt l{kv.second.first.x / kv.second.second,
+                 (P.flipped ? -1.0 : 1.0) * kv.second.first.y / kv.second.second};
       const Pt b = apply(P, l);
-      const double d = std::hypot(b.x, b.y);
+      const double d = std::hypot(b.x - body_center_x_, b.y);
       if (d < roi_min_ || d > roi_max_) {continue;}
       lp.push_back(l);
     }
@@ -262,10 +270,10 @@ private:
     }
     before = std::sqrt(before / src.size()); after = std::sqrt(after / src.size());
 
-    // 결과: 전방 방향은 그대로, 후방 = 전방 * T, 두 LiDAR 가운데를 base_link 로
+    // 결과: 전방 방향은 그대로, 후방 = 전방 * T, 두 LiDAR 가운데를 (body_center_x, 0) 으로
     Pose2D Rn = compose(Pf, T);
     Pose2D Fn = Pf;
-    const double mx = (Fn.x + Rn.x) / 2.0, my = (Fn.y + Rn.y) / 2.0;
+    const double mx = (Fn.x + Rn.x) / 2.0 - body_center_x_, my = (Fn.y + Rn.y) / 2.0;
     Fn.x -= mx; Fn.y -= my; Rn.x -= mx; Rn.y -= my;
     const double deg = 180.0 / M_PI;
 
@@ -287,7 +295,7 @@ private:
   }
 
   int samples_;
-  double puck_radius_, roi_min_, roi_max_, cluster_gap_, match_dist_;
+  double puck_radius_, roi_min_, roi_max_, cluster_gap_, match_dist_, body_center_x_;
   Cells front_grid_, rear_grid_;
   int front_n_{0}, rear_n_{0};
   std::string front_frame_, rear_frame_;

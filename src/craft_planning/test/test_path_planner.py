@@ -7,7 +7,7 @@ from PIL import Image
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import OccupancyGrid, Odometry
 
-from craft_planning.kant_astar_arc import ALIGN, Params, load_stl_map, parse_map, run
+from craft_planning.astar_arc import ALIGN, Params, load_stl_map, parse_map, run
 from craft_planning.path_planner import PathPlanner
 
 
@@ -172,7 +172,7 @@ def test_ros_yaml_map_loads_and_unknown_pixels_are_blocked(tmp_path):
 
 
 def test_upstream_block_map_api_and_ros_adapter():
-    source = FilePath(__file__).resolve().parents[1] / 'maps' / 'kant' / 'map20.txt'
+    source = FilePath(__file__).resolve().parents[1] / 'maps' / 'astar_arc' / 'map20.txt'
     rows = parse_map(source.read_text())
     reference = run(rows, start=(2, 2), goal=(17, 17), p=Params(block_size=0.25))
     assert reference.ok

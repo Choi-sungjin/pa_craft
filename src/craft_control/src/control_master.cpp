@@ -17,6 +17,7 @@
 #include <vector>
 #include <deque>
 #include "craft_control/task_tracker.hpp"
+#include "craft_control/slip_monitor.hpp"
 #include <craft_interfaces/msg/control_status.hpp>
 
 #include "rclcpp/rclcpp.hpp"
@@ -28,6 +29,7 @@
 #include "std_msgs/msg/float64.hpp"
 #include "std_msgs/msg/int32.hpp"
 #include "geometry_msgs/msg/transform_stamped.hpp"
+#include "geometry_msgs/msg/twist.hpp"
 #include "tf2_ros/transform_broadcaster.h"
 
 #include "craft_control/arm_controller.hpp"
@@ -193,8 +195,11 @@ public:
 
     // Load parameters: wheel, clock
     wheel_radius_ = positive_param("wheel_radius");
-    const auto wheel_separation = positive_param("wheel_separation");
-    const auto max_v = positive_param("max_v");
+    const auto wheel_track = positive_param("wheel_track");
+    const auto wheelbase = positive_param("wheelbase");
+    const auto skid_steer_factor = declare_parameter<double>("skid_steer_factor", 0.0);
+    max_v_ = positive_param("max_v");
+    const auto max_v = max_v_;
     max_wheel_ = positive_param("max_wheel");
     const auto lookahead_distance = positive_param("lookahead_distance");
     const auto wheel_goal_tolerance = positive_param("wheel_goal_tolerance");
@@ -207,9 +212,14 @@ public:
 
     // Validate parameters: wheel, clock
     longitudinal_.configure(wheel_radius_, max_v);
+    if (!std::isfinite(skid_steer_factor) || (skid_steer_factor > 0.0 && skid_steer_factor < 1.0)) {
+      throw std::runtime_error("skid_steer_factor must be 0 (geometric estimate) or >= 1");
+    }
     lateral_.configure(
-      wheel_radius_, wheel_separation, lookahead_distance, wheel_goal_tolerance, path_spacing,
-      positive_param("wheel_heading_tolerance"), positive_param("wheel_rotate_angular_speed"));
+      wheel_radius_, wheel_track, wheelbase, skid_steer_factor, lookahead_distance, wheel_goal_tolerance,
+      path_spacing,
+      positive_param("wheel_heading_tolerance"), positive_param("wheel_rotate_angular_speed"),
+      positive_param("wheel_tracking_gain"));
     if (!clock_controller_.configure(
       clock_slot_count_, clock_slot_angle, clock_zero_angle, clock_direction, clock_angle_tolerance))
     {
@@ -221,7 +231,33 @@ public:
     {
       throw std::runtime_error("planning_watchdog_timeout_s must be finite and positive");
     }
-    wheel_odometry_.configure(wheel_radius_, wheel_separation);
+    // Same skid steer separation as the controller, so wheel yaw rate is not overstated.
+    const double in_place_ratio = declare_parameter("wheel_in_place_ratio", 0.0);
+    if (!std::isfinite(in_place_ratio) || in_place_ratio < 0.0 || in_place_ratio > 1.0) {
+      throw std::runtime_error("wheel_in_place_ratio must be in [0, 1]");
+    }
+    // Measured skid steer map for the odometry yaw rate; empty keeps radius * (wr - wl) / separation.
+    const auto yaw_rate_coeffs = declare_parameter<std::vector<double>>(
+      "wheel_yaw_rate_coeffs", std::vector<double>{});
+    for (const double c : yaw_rate_coeffs) {
+      if (!std::isfinite(c)) {throw std::runtime_error("wheel_yaw_rate_coeffs must be finite");}
+    }
+    wheel_odometry_.configure(wheel_radius_, lateral_.effective_separation(), in_place_ratio, yaw_rate_coeffs);
+    RCLCPP_INFO(get_logger(), "wheel track %.3f m, wheelbase %.3f m -> effective separation %.3f m",
+      wheel_track, wheelbase, lateral_.effective_separation());
+    if (!yaw_rate_coeffs.empty()) {
+      std::string text;
+      for (const double c : yaw_rate_coeffs) {text += (text.empty() ? "" : ", ") + std::to_string(c);}
+      RCLCPP_INFO(get_logger(), "wheel odometry yaw rate: measured map, degree %zu [%s]",
+        yaw_rate_coeffs.size(), text.c_str());
+    }
+    // Slip: wheel odometry vs wheel board gyro yaw rate; its velocity variances grow while they disagree.
+    if (!slip_monitor_.configure(positive_param("slip_yaw_rate_threshold"), declare_parameter("slip_hold_s", 0.5),
+        positive_param("slip_offset_gain")))
+    {
+      throw std::runtime_error("slip_hold_s must be >= 0 and slip_offset_gain in (0, 1]");
+    }
+    slip_variance_scale_ = positive_param("slip_variance_scale");
     odom_frame_ = declare_parameter<std::string>("odom_frame");
     base_frame_ = declare_parameter<std::string>("base_frame");
     publish_odom_tf_ = declare_parameter<bool>("publish_odom_tf");
@@ -236,7 +272,12 @@ public:
     }
 
     // OpenCR serial ports
-    arm_lm_serial_ = std::make_unique<OpencrSerial>(declare_parameter<std::string>("arm_lm_port"));
+    // arm_enabled:=false drives with the wheel/clock board alone (arm board absent or faulted): its port is not
+    // opened, it is left out of the fault and stop checks, and manipulator/gripper tasks are rejected.
+    arm_enabled_ = declare_parameter<bool>("arm_enabled", true);
+    const auto arm_port = declare_parameter<std::string>("arm_lm_port");
+    if (arm_enabled_) {arm_lm_serial_ = std::make_unique<OpencrSerial>(arm_port);}
+    else {RCLCPP_WARN(get_logger(), "arm_enabled is false: wheel/clock only, arm+LM board %s not used", arm_port.c_str());}
     clock_wheel_serial_ = std::make_unique<OpencrSerial>(declare_parameter<std::string>("clock_wheel_port"));
 
     // ROS2 publishers and subscribers
@@ -270,6 +311,15 @@ public:
       [this](const TaskCommand &msg) {
         if (pending_tasks_.size() >= 32) {reject(msg, "control command queue full"); return;}
         pending_tasks_.push_back(msg);
+      });
+    // Manual driving (test/drive/teleop_ros.py): body v [m/s] / omega [rad/s] while no task runs.
+    // Only the wheel/clock board has to be healthy, and the planning hold does not apply, so mapping
+    // runs without planning or the arm board. Stale input (teleop_timeout_s) stops the wheels.
+    teleop_timeout_s_ = declare_parameter("teleop_timeout_s", 0.3);
+    teleop_sub_ = create_subscription<geometry_msgs::msg::Twist>("/control/teleop/cmd_vel", 10,
+      [this](const geometry_msgs::msg::Twist &msg) {
+        if (!std::isfinite(msg.linear.x) || !std::isfinite(msg.angular.z)) return;
+        teleop_cmd_ = msg; teleop_at_ = steady_seconds();
       });
     odom_sub_ = create_subscription<nav_msgs::msg::Odometry>("/planning/odom", 10,
       [this](const nav_msgs::msg::Odometry &msg) {
@@ -319,6 +369,7 @@ private:
 
   bool read_arm_lm_feedback()
   {
+    if (!arm_lm_serial_) return false;
     const auto lines = arm_lm_serial_->read_lines();
 
     for (auto it = lines.rbegin(); it != lines.rend(); ++it) { // reverse order: newest first
@@ -388,6 +439,7 @@ private:
       wheel_state_ = static_cast<int>(v[3]);
       clock_state_ = static_cast<int>(v[4]);
 
+      drive_gyro_z_ = v[5] != 0.0 ? std::optional<double>(v[8]) : std::nullopt;  // imu_ok, raw gz
       have_clock_wheel_feedback_ = true; // 정상 clock & wheel 피드백을 한 번이라도 받은 적이 있는가
       publish_board_imu(drive_imu_pub_, v, 5, "wheel_clock_imu");
       return true;
@@ -539,9 +591,18 @@ private:
     odom.twist.twist.linear.x = wheel_odometry_.linear();
     odom.twist.twist.angular.z = wheel_odometry_.angular();
     odom.pose.covariance[0] = odom.pose.covariance[7] = odom.pose.covariance[35] = 1e3;  // dead reckoning
-    odom.twist.covariance[0] = wheel_vx_variance_;
-    odom.twist.covariance[7] = wheel_vx_variance_;  // nonholonomic vy = 0
-    odom.twist.covariance[35] = wheel_vyaw_variance_;
+    const bool still = std::abs(wheel_left_feedback_) <= wheel_stop_tolerance_ &&
+      std::abs(wheel_right_feedback_) <= wheel_stop_tolerance_;
+    const bool was_slipping = slip_monitor_.slipping();
+    const double k = slip_monitor_.update(now_s, wheel_odometry_.angular(), drive_gyro_z_, still) ?
+      slip_variance_scale_ : 1.0;
+    if (slip_monitor_.slipping() != was_slipping) {
+      RCLCPP_INFO(get_logger(), "wheel slip %s (wheel odometry variance x%.0f)",
+        slip_monitor_.slipping() ? "detected" : "over", k);
+    }
+    odom.twist.covariance[0] = k * wheel_vx_variance_;
+    odom.twist.covariance[7] = k * wheel_vx_variance_;  // nonholonomic vy = 0
+    odom.twist.covariance[35] = k * wheel_vyaw_variance_;
     wheel_odom_pub_->publish(odom);
     if (!publish_odom_tf_) {return;}  // robot_localization owns odom->base_link
     geometry_msgs::msg::TransformStamped tf;
@@ -702,6 +763,9 @@ private:
     if (planning_held_ || hardware_fault || planning_watchdog_.held(craft_control::PlanningWatchdog::Clock::now())) {
       reject(c, "control is held or unavailable"); return;
     }
+    if (!arm_enabled_ && (c.kind == TaskCommand::MANIPULATOR || c.kind == TaskCommand::GRIPPER)) {
+      reject(c, "arm disabled (arm_enabled:=false)"); return;
+    }
     sensor_msgs::msg::JointState arm;
     bool valid = false;
     std::array<bool, 5> participants{};
@@ -722,10 +786,10 @@ private:
       case TaskCommand::WAIT: valid = std::isfinite(c.duration_s) && c.duration_s >= 0; break;
     }
     if (update && valid) {
+      // Planning sends one A*+arc segment (up to a STOP_TURN corner) per task, so a replan around a new
+      // obstacle may end the segment at a different corner: only the frame has to match.
       const auto &old = lateral_.target_path();
-      valid = !old.poses.empty() && c.path.header.frame_id == old.header.frame_id &&
-        std::hypot(c.path.poses.back().pose.position.x - old.poses.back().pose.position.x,
-                   c.path.poses.back().pose.position.y - old.poses.back().pose.position.y) < 1e-6;
+      valid = !old.poses.empty() && c.path.header.frame_id == old.header.frame_id;
     }
     if (!valid) {
       if (update) {task_.fail("invalid path update"); task_hold_ = true;}
@@ -766,7 +830,7 @@ private:
     const int arm_reported_state = arm_feedback_fresh ? arm_lm_state_ : 2;
     const int wheel_reported_state = clock_wheel_feedback_fresh ? wheel_state_ : 2;
     const int clock_reported_state = clock_wheel_feedback_fresh ? clock_state_ : 2;
-    const bool hardware_fault = arm_reported_state == 2 ||
+    const bool hardware_fault = (arm_enabled_ && arm_reported_state == 2) ||
       wheel_reported_state == 2 || clock_reported_state == 2;
     const double now_s = steady_seconds();
     if (arm_lm_feedback_updated) {
@@ -864,8 +928,20 @@ private:
       const auto v = longitudinal_.compute_command();
       const double linear_speed = wheel_radius_ * (v[0] + v[1]) / 2.0;
       const auto w = lateral_.compute_command(linear_speed, wheel_target_v_);
-      const double wl = v[0] + w[0];  // [rad/s]
-      const double wr = v[1] + w[1];
+      double wl = v[0] + w[0];  // [rad/s]
+      double wr = v[1] + w[1];
+      const bool teleop = !task_.running() && now_s - teleop_at_ <= teleop_timeout_s_ &&
+        wheel_reported_state != 2 && clock_reported_state != 2;
+      if (teleop) {
+        const double tv = std::clamp(teleop_cmd_.linear.x, -max_v_, max_v_);
+        const double delta = teleop_cmd_.angular.z * lateral_.effective_separation() / (2.0 * wheel_radius_);
+        wl = tv / wheel_radius_ - delta;
+        wr = tv / wheel_radius_ + delta;
+      }
+      if (teleop != teleop_active_) {
+        RCLCPP_INFO(get_logger(), teleop ? "teleop driving" : "teleop stopped");
+        teleop_active_ = teleop;
+      }
       // over wheel limit: scale both by the same ratio to keep curvature
       const double k = std::max({1.0, std::abs(wl) / max_wheel_, std::abs(wr) / max_wheel_});
       const double clock_motor_command = clock_controller_.compute_command(clock_angle_);
@@ -907,8 +983,8 @@ private:
         clock_slot_pub_->publish(slot_msg);
       }
     }
-    const bool arm_settled = arm_feedback_fresh && arm_tx_ok_ && arm_lm_state_ == 0 &&
-      arm_received_at_ - arm_stable_at_ >= settle_s_;
+    const bool arm_settled = !arm_enabled_ || (arm_feedback_fresh && arm_tx_ok_ && arm_lm_state_ == 0 &&
+      arm_received_at_ - arm_stable_at_ >= settle_s_);
     const bool drive_settled = clock_wheel_feedback_fresh && drive_tx_ok_ &&
       wheel_state_ == 0 && clock_state_ == 0 && drive_received_at_ - clock_stable_at_ >= settle_s_ &&
       std::abs(wheel_left_feedback_) <= wheel_stop_tolerance_ &&
@@ -960,6 +1036,11 @@ private:
   double max_wheel_ = 0.0;
   double wheel_radius_ = 0.0;
   double wheel_target_v_ = 0.0;
+  double max_v_ = 0.0;
+  geometry_msgs::msg::Twist teleop_cmd_;
+  double teleop_at_ = -1e9, teleop_timeout_s_ = 0.3;
+  bool teleop_active_ = false;
+  rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr teleop_sub_;
   std::vector<geometry_msgs::msg::PoseStamped> last_path_poses_;
   std::optional<nav_msgs::msg::Odometry> pending_odom_;
   std::optional<craft_control::PlanningWatchdog::Clock::time_point> last_t_;
@@ -973,7 +1054,8 @@ private:
   craft_control::GripperController gripper_controller_;
   craft_control::ClockController clock_controller_;
 
-  std::unique_ptr<OpencrSerial> arm_lm_serial_;
+  std::unique_ptr<OpencrSerial> arm_lm_serial_;  // null with arm_enabled:=false
+  bool arm_enabled_ = true;
   std::unique_ptr<OpencrSerial> clock_wheel_serial_;
   craft_control::ArmJoints arm_joints_{};
   bool arm_ik_mapping_confirmed_ = false;
@@ -994,6 +1076,9 @@ private:
   double serial_timeout_s_ = 0.5;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr wheel_odom_pub_;
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+  craft_control::SlipMonitor slip_monitor_;
+  double slip_variance_scale_ = 1.0;
+  std::optional<double> drive_gyro_z_;
   double wheel_left_feedback_ = 0.0;
   double wheel_right_feedback_ = 0.0;
   double clock_angle_ = 0.0;

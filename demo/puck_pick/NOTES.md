@@ -32,7 +32,10 @@ python3 demo/puck_pick/execute.py            # --dry-run: 단계만 출력
   - **`bro`**: 남은 단계를 한 번에 실행
   - **`q`**: 중단(복귀할지 물어봄)
   - **Ctrl+C**: 비상 정지
-- 단계 순서: arm above the puck → open gripper → LM to the puck line → descend → close gripper → lift the puck → clock to slot 12 (적재 guide) → arm to the loading pose → open gripper (clock에 넣기) → back above the puck line → LM back → arm back
+- `sis1` 단계 (2026-11-03, 한 단계 = 한 동작): 이동 1(LM 퍽 라인 + shoulder 뺀 팔) → 이동 2(shoulder) → open gripper(내려가기 전) → descend → close gripper → ascend(접근 높이로 수직) → 적재 1(LM·elbow·wrist·roll 적재 자세, shoulder는 수직 **10° 전**까지, `LOAD_SHOULDER_SHORT`) → clock 12(완료 보고 받고 다음으로) → 적재 2(shoulder 마저) → open gripper(clock에 넣기) → 복귀 1(LM 그대로, shoulder 수직까지, 나머지 시작 자세) → 복귀 2(LM·shoulder 시작 자세)
+  - shoulder 수직 = URDF 24.0°(적재 자세 23.95°)
+  - control은 작업을 하나씩만 받음(실행 중이면 `busy` 거부, 새 작업이 clock 목표를 지움). clock을 팔과 동시에 돌리려면 control_master 수정 필요
+  - `sis2`·`--lying`·복귀(go_home)는 예전 방식(elbow 먼저, shoulder 나중 `stage()`) 그대로
 - `execute.py`를 Ctrl+C로 끊었다면 control도 재시작합니다(STOPPING 상태가 남음).
 
 ### 보드 관련 명령 (`~/.bashrc`)

@@ -17,15 +17,28 @@ Wizard 창이 열려 있는 동안은 그 보드의 `reset*` / `check*` / `relax
 사다리꼴 가속 기울기별로 1 m 직진 슬립을 잰다. 방법과 조건은 [slip/README.md](slip/README.md),
 실행은 `slip plan` / `slip run --speed high|low --accel <m/s²>` / `slip summary`(`~/.bashrc`).
 
+## 4WD 제자리 회전 실험 (TODO)
+
+뒷바퀴(ID 3, 4)를 follower로 추가한 4WD에서 네 바퀴 방향(바퀴를 띄워서)과 제자리 회전(wheel/IMU, 스톨)을
+확인한다. 직진 주행(IMU 헤딩 유지, 슬립·옆 이탈)도 같은 문서에 있다. 시나리오와 기준은
+[drive/README.md](drive/README.md), 코드는 `drive/rotate.py`, `drive/straight.py`.
+
+## 제자리 회전 맵 (TODO)
+
+바퀴 속도차 D = wr − wl와 실제 각속도(IMU)의 관계를 같은 실험 3번(지점 3곳)으로 재서 보간표로 만든다.
+계산(유효 간격) 대신 이 표로 원하는 각속도의 D를 정하기 위한 것이다. 같은 D에서 지점마다 각속도가 다르면
+(`fit`의 `DISCARD`) 이 방식은 폐기한다. 시나리오는
+[drive/README.md](drive/README.md#제자리-회전-맵-바퀴-속도차--실제-각속도-turn_mappy), 코드는 `drive/turn_map.py`.
+
 ## 위치추정·IMU 실물 확인 (TODO)
 
 두 IMU 처리, 튀는 값 필터, SLAM 감시와 재위치, IMU 되먹임을 실물에서 확인하는 순서와 기준은
 [localization/README.md](localization/README.md)에 있다. 2026-10-29에 sim으로만 검증했다.
 
-## 자이로 배율 실험 (TODO)
+## 자이로 배율 실험
 
-두 OpenCR(MPU-9250)의 자이로 배율 오차를 제자리 회전으로 보드별로 잰다. 데이터시트 허용 범위는 ±3%다.
-주행 시나리오를 마친 뒤에 할 예정이다. 사전 작업과 절차는 [gyro_scale/README.md](gyro_scale/README.md)에 있다.
+두 OpenCR(MPU-9250)의 자이로 배율 오차를 제자리 5바퀴 회전으로 보드별로 잰다(`drive/gyro_spin.py`).
+2026-10-31: 두 보드 모두 0.1% 미만으로 보정 불필요. 결과와 절차는 [gyro_scale/README.md](gyro_scale/README.md).
 
 ## 하드웨어 없는 자동 테스트
 
@@ -44,7 +57,7 @@ g++ -std=c++11 -Wall -Wextra -Werror \
 /tmp/craft-test-firmware
 ```
 
-`test_motor_axes.cpp`는 두 보드의 실제 `config.h`를 읽고 9개 축의 ID와 모드,
+`test_motor_axes.cpp`는 두 보드의 실제 `config.h`를 읽고 9개 축과 뒷바퀴 follower 2개의 ID와 모드,
 부팅 시 바퀴 정지/위치 유지, 축별 양·음 방향 목표 전달, 다른 축 목표 유지,
 피드백 채널 순서와 tick 양자화 오차를 검사합니다. LM은 범위 중간에서 양방향으로
 검사합니다. 가짜 버스에서만 확인 플래그를 활성화하며 실제 설정은 변경하지 않습니다.
@@ -61,7 +74,8 @@ g++ -std=c++11 -Wall -Wextra -Werror \
 | --- | --- | --- | --- | --- |
 | wheel_clock | 0 | wheel_l | 1 | rad/s |
 | wheel_clock | 1 | wheel_r | 2 | rad/s |
-| wheel_clock | 2 | clock | 3 | 모터 rad |
+| wheel_clock | 2 | clock | 5 | 모터 rad |
+| wheel_clock | (follower) | wheel_rear_l / wheel_rear_r | 3 / 4 | wheel_l / wheel_r 명령을 따름 |
 | lm_arm | 0 | LM | 1 | 모터 rad (m 아님) |
 | lm_arm | 1 | shoulder | 2 | 모터 rad |
 | lm_arm | 2 | elbow | 3 | 모터 rad |
@@ -114,7 +128,9 @@ g++ -std=c++11 -Wall -Wextra -Werror \
 | --- | --- | --- |
 | wheel_l ID 1 | + → 전진 | 펌웨어 +1 |
 | wheel_r ID 2 | + → 후진 | 펌웨어 -1 |
-| clock ID 3 | + → 위에서 보면 CCW | 펌웨어 +1, YAML +1 |
+| wheel_rear_l ID 3 | + → 전진 (확인 필요) | 펌웨어 +1 |
+| wheel_rear_r ID 4 | + → 후진 (확인 필요) | 펌웨어 -1 |
+| clock ID 5 | + → 위에서 보면 CCW | 펌웨어 +1, YAML +1 |
 | LM ID 1 | + → LM 모터 쪽 (URDF slide 축 -X, 같은 방향) | 펌웨어 +1, YAML +1 |
 | shoulder ID 2 | URDF +와 같은 방향 | 펌웨어 +1, YAML +1 |
 | elbow ID 3 | URDF +와 같은 방향 | 펌웨어 +1, YAML +1 |
@@ -124,5 +140,5 @@ g++ -std=c++11 -Wall -Wextra -Werror \
 
 팔 부호는 URDF 기준 자세(+Y 앞, +Z 위)에서 비교한 값입니다. 오프셋 보정 후
 실기 검증이 남아 있습니다. wrist pitch 제한은 70.1–340도이며 확인 플래그는 false입니다.
-LM 영점은 -11.6도(가이드 밀린 뒤 재측정 -391.8–527.5도, 이전 249.4도), clock 슬롯 12 영점은 210.0도(적재 guide 위치, 이전 314.6도)이며 모두 호스트에서 적용합니다.
+LM 영점은 -54.97도(2026-11-02 재측정 -399.4–509.2도, 모터 끝에서 63.3 mm; 이전 -11.6도, 249.4도), clock 슬롯 12 영점은 210.0도(적재 guide 위치, 이전 314.6도)이며 모두 호스트에서 적용합니다.
 취소된 LM 317.2도 영점은 사용하지 않습니다. 보드 업로드·실제 이동은 하지 않았습니다.

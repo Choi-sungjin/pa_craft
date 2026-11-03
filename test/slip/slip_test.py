@@ -40,7 +40,7 @@ FIELDS = ['time', 'speed_mode', 'v_cruise', 'accel', 'target', 'odom', 'real', '
 
 def params():
     p = yaml.safe_load(open(CONTROL_YAML))['control_master']['ros__parameters']
-    return p['wheel_radius'], p['wheel_separation'], p['max_wheel']
+    return p['wheel_radius'], p['wheel_track'], p['max_wheel']  # track: geometric, wheel/IMU measures the skid factor
 
 
 def newest(port, buf):

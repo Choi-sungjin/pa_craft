@@ -83,9 +83,12 @@ struct Computation
     bool ok = false;
     bool retryable = false;
     Path path;
+    std::vector<std::size_t> stops;  // STOP_TURN corners: the path is sent one segment at a time
     Joints joints;
     std::string error;
     Odom start;
+    double plan_ms = 0;
+    std::size_t expanded = 0;
 };
 } // namespace
 
@@ -123,6 +126,21 @@ struct PlanningMaster::Impl
     double retry_compute_at = 0;
     bool dispatched = false, fault_reported = false, reset_requested = false;
     bool waiting_for_path = false, route_paused = false;
+    // A Navigate path is sent up to its first STOP_TURN corner. Reaching that end plans the next segment
+    // from there (new task ID); replanning while driving happens only when the remaining path is blocked.
+    bool more_segments = false, next_segment = false;
+    // Blocked path: pause first, replan only if still blocked after block_wait_s (a passer-by clears).
+    std::optional<double> blocked_since;
+    bool route_failed = false;  // the last replan found no route: keep retrying
+    geometry_msgs::msg::Point segment_start;
+    int no_progress = 0;  // segments in a row that "arrived" where they started
+    double plan_ms = 0, plan_ms_max = 0;
+    std::size_t plan_count = 0;
+    // Graspable check of the nearest observed puck (grasp_region.hpp), refreshed per puck observation.
+    GraspCheck grasp_check;
+    GraspConfirm grasp_confirm;
+    bool grasp_confirmed = false;
+    std::string grasp_puck;  // nearest puck in base_link, for measuring the regions
     rclcpp::Publisher<TaskCommand>::SharedPtr command_pub;
     rclcpp::Publisher<Odom>::SharedPtr odom_pub;
     rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr hold_pub;
@@ -148,6 +166,7 @@ struct PlanningMaster::Impl
       if (fsm.phase() != RunPhase::Stopping) stop_at = seconds();
       fsm.request_stop(end_run, seconds());
       remaining.clear(); result.reset(); waiting_for_path = false; route_paused = false;
+      more_segments = next_segment = false; blocked_since.reset(); route_failed = false; no_progress = 0;
       TaskCommand c; c.header.stamp = node.now(); c.operation = TaskCommand::STOP;
       c.task_id = dispatched && step ? step->task_id : 0;
       command_pub->publish(c); stop();
@@ -159,7 +178,8 @@ struct PlanningMaster::Impl
     bool system_ready(double now) const {
       return control_fresh(now) && control.value.ready && !control.value.fault &&
         odom.fresh(now, config.odom_timeout_s) && is_fresh_input(odom.value.header, config.odom_timeout_s) &&
-        joints.fresh(now, config.joint_timeout_s) && is_fresh_input(joints.value.header, config.joint_timeout_s) &&
+        (!config.require_arm_joints ||
+         (joints.fresh(now, config.joint_timeout_s) && is_fresh_input(joints.value.header, config.joint_timeout_s))) &&
         (!config.require_lidar || (lidar.fresh(now, config.obstacle_timeout_s) &&
          is_fresh_input(lidar.value.header, config.obstacle_timeout_s)));
     }
@@ -184,7 +204,8 @@ struct PlanningMaster::Impl
     }
     void receive_points(const Points &msg, Sample<Points> &sample)
     {
-        sample.valid = false;
+        // A rejected message keeps the previous sample: its obstacle_timeout_s still applies. Invalidating it here
+        // let one scan stamped a few ms ahead of TF fault a running Navigate (corner demo, 2026-11-01).
         if (!is_fresh_input(msg.header, config.obstacle_timeout_s) || msg.header.frame_id.empty())
         {
             return;
@@ -355,6 +376,15 @@ struct PlanningMaster::Impl
             return;
         }
         Computation value = worker.get();
+        if (value.plan_ms > 0)
+        {
+            plan_ms = value.plan_ms; plan_ms_max = std::max(plan_ms_max, value.plan_ms); ++plan_count;
+            if (value.ok)
+            {
+                RCLCPP_INFO(node.get_logger(), "path plan %.1f ms (max %.1f ms over %zu), %zu A* states, %zu poses, %zu stops",
+                            value.plan_ms, plan_ms_max, plan_count, value.expanded, value.path.poses.size(), value.stops.size());
+            }
+        }
         if (active() && value.generation == fsm.generation())
         {
             result = std::move(value);
@@ -382,10 +412,14 @@ struct PlanningMaster::Impl
             {
                 if (kind == StepKind::Navigate)
                 {
+                    const auto began = std::chrono::steady_clock::now();
                     const auto plan = path_planner.plan(current_odom, goal, points);
+                    output.plan_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - began).count();
                     output.ok = plan.ok;
                     output.retryable = plan.retryable;
                     output.path = plan.path;
+                    output.stops = plan.stops;
+                    output.expanded = plan.expanded;
                     output.error = plan.error;
                 }
                 else
@@ -410,8 +444,24 @@ struct PlanningMaster::Impl
       switch (step->kind) {
         case StepKind::Navigate:
           c.path = result->path; c.path.header.stamp = node.now(); c.speed = config.cruise_speed;
+          {
+            // A STOP_TURN within min_segment_m of the start is skipped (control turns in place first anyway): a
+            // segment shorter than the arrival tolerance would "arrive" at once, forever (2026-11-01 bags).
+            std::optional<std::size_t> stop;
+            double along = 0;
+            std::size_t next = 0;
+            for (std::size_t i = 1; i < c.path.poses.size() && next < result->stops.size(); ++i) {
+              const auto &a = c.path.poses[i - 1].pose.position, &b = c.path.poses[i].pose.position;
+              along += std::hypot(b.x - a.x, b.y - a.y);
+              while (next < result->stops.size() && result->stops[next] < i) ++next;
+              if (next < result->stops.size() && result->stops[next] == i && along >= config.min_segment_m) {stop = i; break;}
+            }
+            more_segments = stop.has_value();
+            if (stop) {c.path.poses.resize(*stop + 1);}
+            segment_start = odom.value.pose.pose.position;
+          }
           c.require_goal_heading = config.goal_heading_required;
-          active_path = c.path; route_paused = false;
+          active_path = c.path; route_paused = false; route_failed = false; blocked_since.reset();
           break;
         case StepKind::Tcp: c.joints = result->joints; c.joints.header.stamp = node.now(); break;
         case StepKind::Clock: c.clock_slot = step->slot; break;
@@ -421,6 +471,74 @@ struct PlanningMaster::Impl
       command_pub->publish(c);
       if (!update) {command_at = now; dispatched = true; task_result.valid = false;}
       last_replan = now; result.reset();
+    }
+    bool remaining_path_clear(double now) const
+    {
+      if (active_path.poses.empty()) return true;
+      const auto &p = odom.value.pose.pose.position;
+      std::size_t nearest = 0; double best = std::numeric_limits<double>::infinity();
+      for (std::size_t i = 0; i < active_path.poses.size(); ++i) {
+        const auto &q = active_path.poses[i].pose.position;
+        const double d = std::hypot(q.x - p.x, q.y - p.y);
+        if (d < best) {best = d; nearest = i;}
+      }
+      Path rest = active_path;
+      rest.poses.erase(rest.poses.begin(), rest.poses.begin() + static_cast<std::ptrdiff_t>(nearest));
+      return path_planner.collision_free(rest, obstacles(now));
+    }
+    // Nearest puck (base_link) of one observation message -> graspable check and its debounce.
+    void check_pucks(const craft_perception::msg::PuckObservationArray &msg)
+    {
+        std::optional<PuckInBase> nearest;
+        std::string error = msg.observations.empty() ? "no puck observed" : "";
+        for (const auto &value : msg.observations)
+        {
+            if (!value.axis_valid) {if (error.empty()) error = "puck axis not valid"; continue;}
+            try
+            {
+                // Centre and centre + axis through TF: the axis is a direction, so take the difference.
+                Pose a, b;
+                a.header = b.header = msg.header;
+                a.pose.position = value.center;
+                b.pose.position.x = value.center.x + value.axis.x;
+                b.pose.position.y = value.center.y + value.axis.y;
+                b.pose.position.z = value.center.z + value.axis.z;
+                a.pose.orientation.w = b.pose.orientation.w = 1.0;
+                const auto ca = transform(a, config.arm.base_frame).pose.position;
+                const auto cb = transform(b, config.arm.base_frame).pose.position;
+                PuckInBase puck;
+                puck.center = ca;
+                puck.axis.x = cb.x - ca.x; puck.axis.y = cb.y - ca.y; puck.axis.z = cb.z - ca.z;
+                puck.standing = value.standing;
+                if (!nearest || std::hypot(ca.x, ca.y) < std::hypot(nearest->center.x, nearest->center.y)) nearest = puck;
+            }
+            catch (const std::exception &e) {error = std::string("puck TF: ") + e.what();}
+        }
+        grasp_check = nearest ? check_graspable(config.grasp, *nearest) : GraspCheck{false, error};
+        grasp_puck.clear();
+        if (nearest)
+        {
+            char text[128];
+            std::snprintf(text, sizeof(text), "%s x %.3f y %.3f z %.3f, axis yaw %.1f deg",
+                          nearest->standing ? "standing" : "lying", nearest->center.x, nearest->center.y,
+                          nearest->center.z, std::atan2(nearest->axis.y, nearest->axis.x) * 180.0 / M_PI);
+            grasp_puck = text;
+        }
+        const bool confirmed = grasp_confirm.update(grasp_check, config.grasp.confirm_count);
+        if (confirmed != grasp_confirmed)
+        {
+            RCLCPP_INFO(node.get_logger(), "puck %s: %s", confirmed ? "graspable (confirmed)" : "not graspable",
+                        grasp_check.reason.c_str());
+        }
+        grasp_confirmed = confirmed;
+    }
+    void resume_navigation(double now) {
+      if (!route_paused || !step || step->kind != StepKind::Navigate || active_path.poses.empty()) return;
+      TaskCommand c; c.header.stamp = node.now(); c.task_id = step->task_id;
+      c.revision = ++revision; c.operation = TaskCommand::UPDATE_PATH; c.kind = TaskCommand::NAVIGATE;
+      c.path = active_path; c.path.header.stamp = node.now(); c.speed = config.cruise_speed;
+      c.require_goal_heading = config.goal_heading_required;
+      command_pub->publish(c); route_paused = false; last_replan = now;
     }
     void pause_navigation(double now) {
       if (route_paused || !step || step->kind != StepKind::Navigate || active_path.poses.empty()) return;
@@ -445,7 +563,11 @@ struct PlanningMaster::Impl
       for (const auto &item : std::map<std::string, std::string>{
           {"task_id", step ? std::to_string(step->task_id) : ""},
           {"step", step ? step->id : ""}, {"queued", std::to_string(remaining.size())},
-          {"path_revision", std::to_string(revision)}, {"waiting_for", readiness_reason}}) {
+          {"path_revision", std::to_string(revision)}, {"waiting_for", readiness_reason},
+          {"plan_ms", std::to_string(plan_ms)}, {"plan_ms_max", std::to_string(plan_ms_max)},
+          {"more_segments", more_segments ? "true" : "false"},
+          {"puck_graspable", grasp_check.graspable ? "true" : "false"}, {"puck_grasp_reason", grasp_check.reason},
+          {"puck_grasp_confirmed", grasp_confirmed ? "true" : "false"}, {"puck_base_link", grasp_puck}}) {
         diagnostic_msgs::msg::KeyValue value; value.key = item.first; value.value = item.second;
         status.values.push_back(value);
       }
@@ -598,6 +720,7 @@ void PlanningMaster::connect()
         });
     p.subscribe<craft_perception::msg::PuckObservationArray>(
         "/perception/vision/d435/puck_observations", [&p](const craft_perception::msg::PuckObservationArray &msg) {
+            p.check_pucks(msg);
             auto &values = p.observations["d435_puck"];
             values.clear();
             for (const auto &value : msg.observations)
@@ -631,13 +754,16 @@ void PlanningMaster::planning_loop() {
         p.step.reset(); p.remaining.clear(); p.result.reset(); p.dispatched = false;
         p.task_result.valid = false; p.fault_reported = false; p.last_mission.clear();
         p.active_path = Path{}; p.route_paused = false; p.waiting_for_path = false;
+        p.more_segments = p.next_segment = false; p.blocked_since.reset(); p.route_failed = false; p.no_progress = 0;
       }
       p.reset_requested = false;
     }
     if (p.fsm.phase() == RunPhase::AwaitRequest && !p.remaining.empty()) {
       p.step = std::move(p.remaining.front()); p.remaining.pop_front();
+      p.step->task_id = ++p.next_id;  // above any segment ID handed out for the previous step
       p.result.reset(); p.task_result.valid = false; p.dispatched = false; p.revision = 0;
       p.waiting_for_path = false; p.route_paused = false; p.active_path = Path{};
+      p.more_segments = p.next_segment = false; p.blocked_since.reset(); p.route_failed = false; p.no_progress = 0;
       p.fsm.start(p.step->kind, now);
     }
     const auto phase = p.fsm.phase();
@@ -662,9 +788,13 @@ void PlanningMaster::planning_loop() {
       input.error = "localization lost (dead reckoning and relocalization failed)";
     }
     if (phase == RunPhase::Execute) {
-      input.feedback_fresh = input.feedback_fresh && p.sensors_fresh(now) &&
-        (now - p.command_at <= p.config.fsm.feedback_timeout_s ||
-         p.task_result.fresh(now, p.config.fsm.feedback_timeout_s));
+      // healthy already implies fresh control; name the input that went stale instead of a leftover reason.
+      if (input.healthy && !p.sensors_fresh(now)) {
+        input.feedback_fresh = false; input.error = "stale odom/lidar input";
+      } else if (input.healthy && now - p.command_at > p.config.fsm.feedback_timeout_s &&
+                 !p.task_result.fresh(now, p.config.fsm.feedback_timeout_s)) {
+        input.feedback_fresh = false; input.error = "stale control task result";
+      }
       if (p.task_result.valid) {
         const auto status = p.task_result.value.status;
         input.completed = status == TaskResult::SUCCEEDED;
@@ -673,17 +803,46 @@ void PlanningMaster::planning_loop() {
           input.healthy = false; input.error = "control task: " + p.task_result.value.reason;
         }
       }
-      // Replanning stays in Run.Execute and preserves the task ID.
+      // A segment ended at a STOP_TURN corner: not the goal yet. Plan the rest from here as a new task.
+      if (input.healthy && input.feedback_fresh && input.completed && p.more_segments &&
+          p.step->kind == StepKind::Navigate) {
+        input.completed = false;
+        if (!p.next_segment) {
+          const auto &here = p.odom.value.pose.pose.position;
+          p.no_progress = std::hypot(here.x - p.segment_start.x, here.y - p.segment_start.y) < 0.02 ? p.no_progress + 1 : 0;
+          p.next_segment = true; p.result.reset(); p.last_replan = now - p.config.replan_period_s;
+        }
+        if (p.no_progress >= 3) {
+          input.healthy = false; input.error = "no progress: 3 segments in a row ended where they started";
+        }
+      }
+      // Replanning stays in Run.Execute; within a segment it preserves the task ID (UPDATE_PATH).
       if (input.healthy && input.feedback_fresh && !input.completed && p.step->kind == StepKind::Navigate) {
         if (p.result) {
           if (!p.result->ok && p.result->retryable) {
             p.readiness_reason = "route unavailable; pausing navigation and retrying";
-            p.pause_navigation(now); p.result.reset(); p.last_replan = now;
+            if (!p.next_segment) p.pause_navigation(now);
+            p.route_failed = true; p.result.reset(); p.last_replan = now;
           } else if (!p.result->ok) {input.healthy = false; input.error = "replan failed: " + p.result->error;}
-          else p.command(now, true);
+          else if (p.next_segment) {
+            p.next_segment = false; p.step->task_id = ++p.next_id; p.readiness_reason.clear(); p.command(now);
+          } else p.command(now, true);
         } else if (p.worker.valid() && now - p.compute_at >= p.config.fsm.compute_timeout_s) {
           input.healthy = false; input.error = "replan timeout";
-        } else if (!p.worker.valid() && now - p.last_replan >= p.config.replan_period_s) p.compute(now);
+        } else if (!p.worker.valid() && now - p.last_replan >= p.config.replan_period_s) {
+          // No periodic replanning while a segment is clear: A*+arc's start heading is rounded to 90 degrees,
+          // so a replan in the middle of a fillet could flip the plan under the robot.
+          p.last_replan = now;
+          if (p.next_segment || p.route_failed) p.compute(now);
+          else if (p.remaining_path_clear(now)) {
+            if (p.blocked_since) {p.blocked_since.reset(); p.readiness_reason.clear(); p.resume_navigation(now);}
+          } else if (!p.blocked_since) {
+            p.blocked_since = now; p.readiness_reason = "path blocked; waiting before replanning";
+            p.pause_navigation(now);
+          } else if (now - *p.blocked_since >= p.config.block_wait_s) {
+            p.readiness_reason = "path still blocked; replanning"; p.compute(now);
+          }
+        }
       }
     }
     if (phase == RunPhase::Compute && p.result) {

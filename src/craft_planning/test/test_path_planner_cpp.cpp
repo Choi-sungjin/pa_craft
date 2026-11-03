@@ -355,7 +355,8 @@ TEST_F(NativePathPlanner, ExcessiveSamplingRequestFailsWithoutAllocatingUnbounde
   config.arc_sample = std::numeric_limits<double>::min();
   PathPlanner planner;
   planner.configure(config);
-  const auto result = planner.plan(odom(0.35, 0.35), pose(1.65, 0.35));
+  // arc_sample only drives fillet collision checks (path samples are 2 cm): plan around a corner.
+  const auto result = planner.plan(odom(0.35, 0.35), pose(1.65, 1.65));
   EXPECT_FALSE(result.ok);
   EXPECT_TRUE(result.path.poses.empty());
 }

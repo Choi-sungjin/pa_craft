@@ -2,8 +2,10 @@
 #include "craft_perception/c310_perception.hpp"
 #include "craft_perception/d435_perception.hpp"
 #include "craft_perception/imu_processor.hpp"
+#include "craft_perception/lidar_obstacle_filter.hpp"
 #include "craft_perception/lidar_perception.hpp"
 #include "craft_perception/localization_monitor.hpp"
+#include "craft_perception/scan_odometry.hpp"
 #include "craft_perception/scan_relocalizer.hpp"
 #include "craft_perception/shared_frame.hpp"
 #include "craft_perception/state_estimator.hpp"
@@ -101,6 +103,7 @@ private:
   bool d435_puck_axis(Task &task);
   bool c310_knob_lever(Task &task);
   bool lidar_obstacle(Task &task);
+  void filter_obstacles(geometry_msgs::msg::PoseArray &obstacles);
   std::optional<lidar_processing::Pose2D> lidar_pose(const std::string &frame);
   bool state_estimator(Task &task);
   // One raw OpenCR IMU sample (0 = wheel_clock, 1 = lm_arm) -> /perception/imu/data.
@@ -110,6 +113,8 @@ private:
   void receive_slam_pose(const geometry_msgs::msg::PoseWithCovarianceStamped &input);
   void receive_global_odom(const nav_msgs::msg::Odometry &input);
   void relocalize();
+  // LiDAR odometry (lidar_odometry.enabled): /lidar/merged matched scan to keyframe -> /perception/lidar/odom.
+  void lidar_odometry(const sensor_msgs::msg::LaserScan &scan);
   static std::vector<std::pair<double, double>> scan_points(const sensor_msgs::msg::LaserScan &scan);
   void publish_localization_state();
   void diagnostics();
@@ -117,6 +122,11 @@ private:
   D435Perception d435_;
   C310Perception c310_;
   LidarPerception lidar_;
+  // /perception/lidar/obstacle filter (map walls, persistence, clusters); its map arrives on another thread.
+  bool obstacle_filter_enabled_ = false;
+  LidarObstacleFilter obstacle_filter_;
+  std::mutex obstacle_filter_mutex_;
+  rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr obstacle_map_sub_;
   lidar_processing::MergerConfig lidar_config_;
   std::string lidar_input_mode_;
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;  // LiDAR mounts and map->odom
@@ -141,6 +151,16 @@ private:
   std::mutex correction_mutex_;
   std::array<double, 2> correction_bias_{0.0, 0.0}, correction_scale_{1.0, 1.0};
   std::atomic<std::size_t> imu_board_{0};
+  // LiDAR odometry; the IMU group hands it the integrated yaw (t, yaw) of the last ~2 s for its prediction.
+  bool lidar_odometry_enabled_ = false;
+  ScanOdometry scan_odometry_;
+  std::array<double, 3> lidar_twist_variance_{};  // vx, vy [(m/s)^2], vyaw [(rad/s)^2]
+  std::string lidar_odom_frame_, lidar_base_frame_;
+  std::optional<double> lidar_scan_at_;
+  Pose2 lidar_pose_{0.0, 0.0, 0.0}, lidar_velocity_{0.0, 0.0, 0.0};
+  std::mutex imu_yaw_mutex_;
+  std::deque<std::pair<double, double>> imu_yaw_;
+  double imu_yaw_sum_ = 0.0;
   std::map<std::string, ModuleSchedule> schedules_;
   std::vector<std::string> d435_labels_, c310_labels_;
   int executor_threads_ = 0;
@@ -179,6 +199,8 @@ private:
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr global_odom_sub_, local_odom_sub_;
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr map_sub_;
   rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr relocalization_scan_sub_;
+  rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr lidar_odometry_scan_sub_;
+  rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr lidar_odom_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr localization_state_pub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr relocalized_pub_;
   rclcpp::TimerBase::SharedPtr localization_timer_;

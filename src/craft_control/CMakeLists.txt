@@ -15,7 +15,7 @@ find_package(std_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 
 add_executable(control_master src/control_master.cpp src/longitudinal_controller.cpp src/lateral_controller.cpp
-  src/arm_controller.cpp src/lm_controller.cpp src/gripper_controller.cpp src/clock_controller.cpp src/wheel_odometry.cpp)
+  src/arm_controller.cpp src/lm_controller.cpp src/gripper_controller.cpp src/clock_controller.cpp src/wheel_odometry.cpp src/slip_monitor.cpp)
 target_include_directories(control_master PRIVATE include)
 target_compile_features(control_master PRIVATE cxx_std_17)
 target_link_libraries(control_master
@@ -38,7 +38,7 @@ if(BUILD_TESTING)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
   ament_add_gtest(test_control_controllers test/test_control_controllers.cpp
     src/arm_controller.cpp src/lm_controller.cpp src/gripper_controller.cpp src/clock_controller.cpp src/lateral_controller.cpp
-    src/longitudinal_controller.cpp src/wheel_odometry.cpp)
+    src/longitudinal_controller.cpp src/wheel_odometry.cpp src/slip_monitor.cpp)
   target_include_directories(test_control_controllers PRIVATE include)
   target_compile_features(test_control_controllers PRIVATE cxx_std_17)
   target_link_libraries(test_control_controllers ${craft_interfaces_TARGETS} ${nav_msgs_TARGETS} ${geometry_msgs_TARGETS})

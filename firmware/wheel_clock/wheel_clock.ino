@@ -15,7 +15,11 @@ void printImu() { imu_feedback.print(imu); }
 void setup() {
   imu.begin();  // starts the sensor; its own gyro zeroing (unused here) blocks up to 5 s
   motor_board.setFeedbackExtension(printImu);
+  if (kRearWheelsDrive) motor_board.setFollowers(kFollowers);
   motor_board.begin();
+  if (!kRearWheelsDrive) {  // a previous 4WD run may have left them powered
+    for (const auto &f : kFollowers) motor_bus.torqueOff(f.id);
+  }
 }
 
 void loop() {

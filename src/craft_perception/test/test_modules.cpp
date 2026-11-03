@@ -11,8 +11,10 @@
 #include "craft_perception/imu_processor.hpp"
 #include "craft_perception/localization_monitor.hpp"
 #include "craft_perception/scan_relocalizer.hpp"
+#include "craft_perception/scan_odometry.hpp"
 #include "craft_perception/obstacle_detector.hpp"
 #include "craft_perception/lidar_obstacle_detector.hpp"
+#include "craft_perception/lidar_obstacle_filter.hpp"
 #include "craft_perception/lidar_perception.hpp"
 #include <fcntl.h>
 #include <sys/file.h>
@@ -264,6 +266,37 @@ TEST(LidarPerception, MergesNearestBinsAndRejectsStaleRear) {
   EXPECT_FALSE(module.merge(front, fp, nullptr, nullptr));
 }
 
+TEST(LidarPerception, UpsideDownLidarMirrorsItsScanAngles) {
+  // Roll 180 deg (q = x 1): flipped, still facing forward. Flipped about the left-right axis instead
+  // (Ry 180, q = y 1): flipped and facing backward, i.e. roll 180 + yaw 180.
+  const auto rolled = lidar_processing::pose_from_transform(0.15, 0.0, 1.0, 0.0, 0.0, 0.0);
+  EXPECT_TRUE(rolled.flipped);
+  EXPECT_NEAR(rolled.yaw, 0.0, 1e-12);
+  const auto pitched = lidar_processing::pose_from_transform(0.15, 0.0, 0.0, 1.0, 0.0, 0.0);
+  EXPECT_TRUE(pitched.flipped);
+  EXPECT_NEAR(std::fabs(pitched.yaw), CV_PI, 1e-12);
+  EXPECT_FALSE(lidar_processing::pose_from_transform(0.15, 0.0, 0.0, 0.0, 1.0, 0.0).flipped);  // yaw 180 only
+  // A return at scan angle +60 deg, 1 m: left of an upright LiDAR, right of an upside-down one.
+  LidarPerception module;
+  ASSERT_TRUE(module.configure(lidar_processing::MergerConfig{}, 3.0, 1));
+  sensor_msgs::msg::LaserScan scan;
+  scan.header.frame_id = "laser_front";
+  scan.angle_min = CV_PI / 3;
+  scan.angle_increment = 1e-6;
+  scan.range_min = 0.1;
+  scan.range_max = 8;
+  scan.ranges = {1.0};
+  for (const bool flipped : {false, true}) {
+    const auto merged = module.merge(scan, {0.15, 0.0, 0.0, flipped}, nullptr, nullptr);
+    ASSERT_TRUE(merged);
+    const auto points = module.detect_obstacles(*merged);
+    ASSERT_TRUE(points);
+    ASSERT_EQ(points->poses.size(), 1u);
+    EXPECT_NEAR(points->poses[0].position.x, 0.65, 0.01);
+    EXPECT_NEAR(points->poses[0].position.y, flipped ? -0.866 : 0.866, 0.01);
+  }
+}
+
 TEST(LidarPerception, FiltersBodyAndNearPointsOutsideFovButKeepsFarPoints) {
   LidarPerception module;
   lidar_processing::MergerConfig config;
@@ -282,6 +315,29 @@ TEST(LidarPerception, FiltersBodyAndNearPointsOutsideFovButKeepsFarPoints) {
   ASSERT_TRUE(points);
   ASSERT_EQ(points->poses.size(), 1u);
   EXPECT_NEAR(points->poses[0].position.x, -0.85, 1e-4);
+}
+
+TEST(LidarPerception, BodyFilterFollowsTheBodyCenterNotBaseLink) {
+  // base_link on the turning center, body (LiDAR midpoint) 26 mm ahead: a point 0.26 m ahead of
+  // base_link is only 0.234 m from the body center, inside the 0.25 m body radius.
+  LidarPerception module;
+  lidar_processing::MergerConfig config;
+  config.body_center_x = 0.026;
+  ASSERT_TRUE(module.configure(config, 3.0, 1));
+  sensor_msgs::msg::LaserScan scan;
+  scan.header.frame_id = "laser_front";
+  scan.angle_increment = 1e-6;
+  scan.range_min = 0.05;
+  scan.range_max = 8;
+  const auto count = [&](float range) {
+    scan.ranges = {range};
+    const auto merged = module.merge(scan, {0.1697, 0, 0}, nullptr, nullptr);
+    return merged ? module.detect_obstacles(*merged)->poses.size() : 99u;
+  };
+  EXPECT_EQ(count(0.26f - 0.1697f), 0u);
+  EXPECT_EQ(count(0.28f - 0.1697f), 1u);
+  config.body_center_x = std::numeric_limits<double>::infinity();
+  EXPECT_FALSE(module.configure(config, 3.0, 1));
 }
 
 TEST(LidarPerception, RejectsInvalidMergerConfiguration) {
@@ -773,6 +829,46 @@ TEST(ScanRelocalizer, FindsThePoseInAWideWindowOrFails) {
   EXPECT_FALSE(r.set_map(w, h, 0.05, 0.0, 0.0, std::vector<int8_t>(w * h, 0)));  // no wall
 }
 
+TEST(ScanOdometry, TracksMotionThroughKeyframesDespiteASlippingPrediction) {
+  int w = 0, h = 0;
+  const auto grid = room(w, h);
+  ScanOdometry odom;
+  const ScanOdometryConfig config{{0.08, 3.0 * M_PI / 180.0, 0.01, 0.5 * M_PI / 180.0, 0.03, 0.4, 360, 50},
+                                  0.02, 6.0, 0.3, 15.0 * M_PI / 180.0};
+  ASSERT_TRUE(odom.configure(config));
+  Pose2 truth{0.6, 0.6, 0.0}, estimate = truth;
+  EXPECT_FALSE(odom.update(cast(grid, w, h, truth), {0, 0, 0}));  // first scan: keyframe only
+  // 1.2 m forward, a 90 deg left turn, 0.45 m on (stopping short of the box): several keyframes. The prediction carries the true
+  // turn (IMU) but the wheels claim 4 cm more travel per scan than happened (slip).
+  int steps = 0;
+  auto drive = [&](const Pose2 &move, int n) {
+    for (int i = 0; i < n; ++i, ++steps) {
+      truth = compose(truth, move);
+      const auto step = odom.update(cast(grid, w, h, truth), {move.x + 0.04, move.y, move.yaw});
+      ASSERT_TRUE(step) << "scan " << steps;
+      EXPECT_GT(step->score, 0.6);
+      EXPECT_NEAR(step->delta.x, move.x, 0.012);
+      estimate = compose(estimate, step->delta);
+    }
+  };
+  drive({0.03, 0.0, 0.0}, 40);
+  drive({0.0, 0.0, 3.0 * M_PI / 180.0}, 30);
+  drive({0.03, 0.0, 0.0}, 15);
+  EXPECT_NEAR(estimate.x, truth.x, 0.03);
+  EXPECT_NEAR(estimate.y, truth.y, 0.03);
+  EXPECT_NEAR(estimate.yaw, truth.yaw, 0.02);
+  // Sideways slide (skid steer slip): seen as lateral motion.
+  truth = compose(truth, {0.0, 0.03, 0.0});
+  const auto slide = odom.update(cast(grid, w, h, truth), {0, 0, 0});
+  ASSERT_TRUE(slide);
+  EXPECT_NEAR(slide->delta.y, 0.03, 0.012);
+  // A scan from elsewhere: no step, and the next scan restarts from it.
+  std::vector<std::pair<double, double>> wrong;
+  for (int k = 0; k < 360; ++k) wrong.emplace_back(0.4 * std::cos(k * M_PI / 180.0), 0.4 * std::sin(k * M_PI / 180.0));
+  EXPECT_FALSE(odom.update(wrong, {0, 0, 0}));
+  EXPECT_FALSE(odom.configure({config.matcher, 0.02, 0.1, 0.3, 0.2}));  // grid smaller than 10 cells
+}
+
 TEST(ImuProcessor, FrozenPrimaryHandsOverToTheBackupAndComesBack) {
   ImuProcessor imu;
   ASSERT_TRUE(imu.configure(imu_config(3)));
@@ -802,4 +898,100 @@ TEST(ImuProcessor, FrozenPrimaryHandsOverToTheBackupAndComesBack) {
   rate = step(0.315, 0.281);  // differs from the 0.312 before it
   EXPECT_FALSE(imu.frozen(0));
   EXPECT_EQ(rate->board, 0u);
+}
+
+namespace {
+using P2 = std::vector<std::array<double, 2>>;
+// 2 m x 2 m, 5 cm cells, origin (0, 0): a wall along x = 1.0 m (column 20), the rest free.
+nav_msgs::msg::OccupancyGrid wall_map() {
+  nav_msgs::msg::OccupancyGrid map;
+  map.info.width = map.info.height = 40;
+  map.info.resolution = 0.05;
+  map.info.origin.orientation.w = 1.0;
+  map.data.assign(40 * 40, 0);
+  for (int y = 0; y < 40; ++y) map.data[y * 40 + 20] = 100;
+  return map;
+}
+P2 blob(double x, double y) { return {{x, y}, {x + 0.02, y}, {x, y + 0.02}, {x + 0.02, y + 0.02}}; }
+size_t kept(const std::vector<bool> &keep) { return static_cast<size_t>(std::count(keep.begin(), keep.end(), true)); }
+}  // namespace
+
+TEST(LidarObstacleFilter, PersistentObjectsPassFlickersAndSinglePointsDoNot) {
+  craft_perception::LidarObstacleFilter filter;
+  ASSERT_TRUE(filter.configure({}));  // 3 frames, 3 points, no map
+  // A 4-point object: dropped while history builds up, kept from the third frame.
+  EXPECT_EQ(kept(filter.filter(blob(0.5, 0.5))), 0u);
+  EXPECT_EQ(kept(filter.filter(blob(0.5, 0.5))), 0u);
+  EXPECT_EQ(kept(filter.filter(blob(0.5, 0.5))), 4u);
+  // One noise point next to it in one frame only: dropped, the object stays.
+  auto frame = blob(0.5, 0.5); frame.push_back({1.5, 1.5});
+  auto keep = filter.filter(frame);
+  EXPECT_EQ(kept(keep), 4u);
+  EXPECT_FALSE(keep.back());
+  // A single persistent point: persists but is a cluster of one.
+  for (int i = 0; i < 3; ++i) keep = filter.filter({{1.5, 1.5}});
+  EXPECT_EQ(kept(keep), 0u);
+  // A slow mover (4 cm per frame) still persists.
+  filter.reset();
+  for (int i = 0; i < 3; ++i) keep = filter.filter(blob(0.2 + 0.04 * i, 0.2));
+  EXPECT_EQ(kept(keep), 4u);
+}
+
+TEST(LidarObstacleFilter, MapWallsAndOffMapPointsAreDropped) {
+  craft_perception::LidarObstacleFilter filter;
+  ASSERT_TRUE(filter.configure({}));
+  filter.set_map(wall_map());
+  ASSERT_TRUE(filter.has_map());
+  EXPECT_NEAR(filter.wall_distance(0.525, 1.0), 0.50, 1e-6);  // cell centre to wall cell centre: 10 cells
+  EXPECT_EQ(filter.wall_distance(-0.1, 1.0), 0.0);  // off the map counts as wall
+  P2 frame = blob(1.05, 1.0);   // the wall itself, seen a few cm off: within 6 cm
+  auto object = blob(0.6, 1.0);  // 0.4 m from the wall
+  frame.insert(frame.end(), object.begin(), object.end());
+  std::vector<bool> keep;
+  for (int i = 0; i < 3; ++i) keep = filter.filter(frame);
+  EXPECT_EQ(kept(keep), 4u);
+  for (size_t i = 0; i < 4; ++i) EXPECT_FALSE(keep[i]);
+  for (size_t i = 4; i < 8; ++i) EXPECT_TRUE(keep[i]);
+}
+
+TEST(LidarObstacleFilter, RejectsBadConfiguration) {
+  craft_perception::LidarObstacleFilter filter;
+  craft_perception::LidarObstacleFilterConfig c;
+  c.cell_m = 0; EXPECT_FALSE(filter.configure(c));
+  c = {}; c.persist_frames = 0; EXPECT_FALSE(filter.configure(c));
+  c = {}; c.min_cluster_points = 0; EXPECT_FALSE(filter.configure(c));
+  c = {}; c.wall_margin_m = -1; EXPECT_FALSE(filter.configure(c));
+}
+
+#include "lidar_processor/scan_merger.hpp"
+
+TEST(ScanMergerFloorRoi, ClearSectorKeepsAllEdgeBinsKeepNearPointsPerSide) {
+  // One LiDAR at x 0.155 facing +x (outward), not flipped; points at the given angle/range from it.
+  lidar_processing::MergerConfig c;
+  c.front_fov_deg = 180; c.fov_near_m = 10; c.body_radius_m = 0.1; c.body_center_x = 0.01275;
+  c.floor_roi.enabled = true;
+  c.floor_roi.front_left = {75.0, {0.88, 0.93, 0.67}};
+  c.floor_roi.front_right = {65.0, {1.37, 1.40, 0.81, 0.73, 0.53}};
+  lidar_processing::ScanMerger merger;
+  ASSERT_TRUE(merger.configure(c));
+  const auto kept = [&](double deg, double range) {
+      sensor_msgs::msg::LaserScan s;
+      s.header.frame_id = "laser"; s.range_min = 0.05f; s.range_max = 8.0f;
+      s.angle_min = static_cast<float>(deg * M_PI / 180); s.angle_increment = 0.01f;
+      s.ranges = {static_cast<float>(range)};
+      const auto out = merger.merge(s, {0.155, 0.0, 0.0, false});
+      return std::any_of(out->ranges.begin(), out->ranges.end(), [](float r) {return std::isfinite(r);});};
+  EXPECT_TRUE(kept(30, 3.0));    // inside the clear sector: any range
+  EXPECT_TRUE(kept(74, 3.0));
+  EXPECT_TRUE(kept(80, 0.5));    // left 80-85 bin: up to 0.93 m
+  EXPECT_FALSE(kept(80, 1.5));
+  EXPECT_TRUE(kept(-70, 1.2));   // right 70-75 bin: up to 1.40 m
+  EXPECT_FALSE(kept(-70, 1.6));
+  EXPECT_TRUE(kept(-60, 3.0));   // right clear sector ends at 65 deg
+  EXPECT_FALSE(kept(-89, 0.6));  // right 85-90 bin: up to 0.53 m
+  c.floor_roi.front_left.clear_deg = 95;  // out of range
+  EXPECT_FALSE(merger.configure(c));
+  c.floor_roi.enabled = false;
+  ASSERT_TRUE(merger.configure(c));
+  EXPECT_TRUE(kept(80, 1.5));    // ROI off: the plain 180 deg field of view
 }

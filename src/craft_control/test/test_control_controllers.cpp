@@ -12,12 +12,16 @@
 #include "craft_control/longitudinal_controller.hpp"
 #include "craft_control/planning_watchdog.hpp"
 #include "craft_control/wheel_odometry.hpp"
+#include "craft_control/slip_monitor.hpp"
 
 namespace
 {
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kRadius = 0.033;
-constexpr double kSeparation = 0.288;
+constexpr double kTrack = 0.289;
+constexpr double kWheelbase = 0.230;
+// Geometric skid steer estimate used when skid_steer_factor <= 0.
+constexpr double kSeparation = (1.0 + (kWheelbase / kTrack) * (kWheelbase / kTrack)) * kTrack;
 
 nav_msgs::msg::Odometry odom(double x = 0.0, double y = 0.0, double yaw = 0.0)
 {
@@ -60,7 +64,7 @@ double expected_wheel_delta(const craft_control::LateralController & controller,
 craft_control::LateralController lateral()
 {
   craft_control::LateralController controller;
-  controller.configure(kRadius, kSeparation, 0.31, 0.03, 0.02);  // lookahead off the 2 cm grid
+  controller.configure(kRadius, kTrack, kWheelbase, 0.0, 0.31, 0.03, 0.02);  // lookahead off the 2 cm grid
   controller.set_odom(odom());
   return controller;
 }
@@ -527,7 +531,8 @@ TEST(WheelControl, TransformsWorldPathUsingOdometryYaw)
 TEST(WheelControl, ReversePathPursuesPointsBehindTheRobot)
 {
   auto controller = lateral();
-  controller.set_target(path({{0, 0}, {-1, 1}, {-2, 2}}));
+  // Behind and a little left (17 degrees): within heading_tolerance for reverse, 163 degrees off forward.
+  controller.set_target(path({{0, 0}, {-1, 0.3}, {-2, 0.6}}));
   EXPECT_FALSE(controller.can_track(0.2));
   EXPECT_TRUE(controller.can_track(-0.2));
   const auto speeds = controller.compute_command(-0.2);
@@ -589,6 +594,39 @@ TEST(WheelControl, TurnsInPlaceBeforeTrackingAndForFinalHeading)
   const auto final_turn = controller.compute_command(0.0, 0.2);
   EXPECT_LT(final_turn[0], 0.0);
   EXPECT_GT(final_turn[1], 0.0);
+}
+
+TEST(WheelControl, FarPathAheadDoesNotPullTheRobotThroughAWall)
+{
+  // Facing -y in a pocket open to +y; the route leaves north, then comes back far south (in front).
+  auto controller = lateral();
+  controller.set_odom(odom(0.0, 0.0, -kPi / 2.0));
+  controller.set_target(path({{0, 0}, {0, 1}, {2, 1}, {2, -3}}));
+  EXPECT_FALSE(controller.can_track(0.2));  // turn in place first, do not drive at the far points
+  const auto turn = controller.compute_command(0.0, 0.2);
+  EXPECT_NEAR(turn[0], -turn[1], 1e-12);
+  EXPECT_GT(std::abs(turn[0]), 0.0);
+  controller.set_odom(odom(0.0, 0.0, kPi / 2.0 - 0.2));  // inside half the tolerance: track again
+  EXPECT_TRUE(controller.can_track(0.2));
+}
+
+TEST(WheelControl, OverlappingUTurnKeepsItsBranchAndFinishesAtTheEnd)
+{
+  auto controller = lateral();
+  controller.set_target(path({{0, 0}, {1, 0}, {0, 0}}));  // out and back on the same line
+  EXPECT_FALSE(controller.is_target_reached());            // the start is the goal, but not along the path
+  for (double x = 0.0; x <= 0.6 + 1e-9; x += 0.01) {controller.set_odom(odom(x, 0.0, 0.0));}
+  ASSERT_TRUE(controller.can_track(0.2));
+  EXPECT_NEAR(controller.compute_command(0.2)[0], 0.0, 1e-9);  // still pursuing the outbound branch
+  for (double x = 0.61; x <= 1.0 + 1e-9; x += 0.01) {controller.set_odom(odom(x, 0.0, 0.0));}
+  EXPECT_FALSE(controller.can_track(0.2));  // the lookahead is on the way back: turn around
+  controller.set_odom(odom(1.0, 0.0, kPi));
+  for (double x = 0.99; x >= 0.5 - 1e-9; x -= 0.01) {controller.set_odom(odom(x, 0.0, kPi));}
+  ASSERT_TRUE(controller.can_track(0.2));
+  EXPECT_NEAR(controller.compute_command(0.2)[0], 0.0, 1e-9);
+  EXPECT_FALSE(controller.is_target_reached());
+  for (double x = 0.49; x >= 0.02 - 1e-9; x -= 0.01) {controller.set_odom(odom(x, 0.0, kPi));}
+  EXPECT_TRUE(controller.is_target_reached());
 }
 
 TEST(WheelControl, MissingPathMismatchedFramesAndGoalArrivalDisableTracking)
@@ -685,6 +723,42 @@ TEST(TaskTracker, FailureDoesNotBecomeSuccess) {
   EXPECT_EQ(t.result.status,craft_interfaces::msg::TaskResult::FAILED);
 }
 
+TEST(LateralController, SkidSteerSeparation)
+{
+  EXPECT_NEAR(lateral().effective_separation(), kTrack + kWheelbase * kWheelbase / kTrack, 1e-12);
+  craft_control::LateralController measured;
+  measured.configure(kRadius, kTrack, kWheelbase, 1.8, 0.31, 0.03, 0.02);
+  EXPECT_NEAR(measured.effective_separation(), 1.8 * kTrack, 1e-12);
+  // In-place alignment turns at rotate_angular_speed on the effective separation.
+  measured.set_odom(odom());
+  nav_msgs::msg::Path behind = path({{-1.0, 0.0}});
+  measured.set_target(behind);
+  const auto w = measured.compute_command(0.0, 0.1);
+  EXPECT_NEAR(std::abs(w[1]), 0.6 * 1.8 * kTrack / (2.0 * kRadius), 1e-9);
+  EXPECT_NEAR(w[0], -w[1], 1e-12);
+}
+
+TEST(LateralController, TrackingGainScalesPurePursuitOnly)
+{
+  craft_control::LateralController plain;
+  craft_control::LateralController gained;
+  plain.configure(kRadius, kTrack, kWheelbase, 1.8, 0.31, 0.03, 0.02);
+  gained.configure(kRadius, kTrack, kWheelbase, 1.8, 0.31, 0.03, 0.02, 0.5, 0.6, 1.2);
+  plain.set_odom(odom());
+  gained.set_odom(odom());
+  plain.set_target(path({{0.0, 0.0}, {1.0, 0.1}, {2.0, 0.4}}));
+  gained.set_target(path({{0.0, 0.0}, {1.0, 0.1}, {2.0, 0.4}}));
+  const auto a = plain.compute_command(0.1, 0.1);
+  const auto b = gained.compute_command(0.1, 0.1);
+  ASSERT_GT(std::abs(a[1]), 1e-6);
+  EXPECT_NEAR(b[1], 1.2 * a[1], 1e-12);
+  EXPECT_NEAR(b[0], -b[1], 1e-12);
+  // The in-place alignment turn keeps rotate_angular_speed.
+  plain.set_target(path({{-1.0, 0.0}}));
+  gained.set_target(path({{-1.0, 0.0}}));
+  EXPECT_NEAR(gained.compute_command(0.0, 0.1)[1], plain.compute_command(0.0, 0.1)[1], 1e-12);
+}
+
 TEST(WheelOdometry, IntegratesStraightAndTurn)
 {
   craft_control::WheelOdometry odom;
@@ -703,4 +777,50 @@ TEST(WheelOdometry, IntegratesStraightAndTurn)
   odom.update(1.0, 1.0, 0.0);  // ignored
   odom.update(std::nan(""), 1.0, 1.0);
   EXPECT_NEAR(odom.y(), kRadius, 1e-9);
+}
+
+TEST(WheelOdometry, YawRateFollowsMeasuredMap)
+{
+  craft_control::WheelOdometry odom;
+  odom.configure(kRadius, kSeparation, 0.0, {0.1, 0.002});  // w = sign(D) * (0.1 |D| + 0.002 D^2)
+  odom.update(-1.0, 1.0, 1.0);  // D = 2: left
+  EXPECT_NEAR(odom.angular(), 0.1 * 2.0 + 0.002 * 4.0, 1e-12);
+  EXPECT_NEAR(odom.yaw(), 0.208, 1e-12);
+  odom.update(1.0, -1.0, 1.0);  // D = -2: same rate to the right, back to 0
+  EXPECT_NEAR(odom.angular(), -0.208, 1e-12);
+  EXPECT_NEAR(odom.yaw(), 0.0, 1e-12);
+  odom.update(1.0, 1.0, 1.0);  // straight: no yaw, travel unchanged by the map
+  EXPECT_DOUBLE_EQ(odom.angular(), 0.0);
+  EXPECT_NEAR(odom.x(), kRadius, 1e-12);
+}
+
+TEST(SlipMonitor, FlagsWheelsTurningWithoutTheChassisAfterLearningTheOffset)
+{
+  craft_control::SlipMonitor slip;
+  ASSERT_TRUE(slip.configure(0.1, 0.5, 0.5));
+  EXPECT_FALSE(slip.update(0.0, 0.3, 0.0, false));  // no offset seen yet: inactive
+  EXPECT_FALSE(slip.update(0.1, 0.0, 0.09, true));  // still: the raw chip offset is learned, not slip
+  EXPECT_NEAR(*slip.offset(), 0.09, 1e-12);
+  EXPECT_FALSE(slip.update(0.2, 0.30, 0.09 + 0.28, false));  // turning, wheels agree with the gyro
+  EXPECT_TRUE(slip.update(0.3, 0.28, 0.09 + 0.015, false));  // wheels turn, chassis stuck (2026-10-31 stall)
+  EXPECT_TRUE(slip.update(0.7, 0.30, 0.09 + 0.30, false));   // agrees again but held for 0.5 s
+  EXPECT_FALSE(slip.update(0.9, 0.30, 0.09 + 0.30, false));
+  EXPECT_TRUE(slip.update(1.0, 0.0, 0.09 + 0.5, true));      // pushed while still: odometry misses it,
+  EXPECT_NEAR(*slip.offset(), 0.09, 1e-12);                  // and it is not learned as offset
+  EXPECT_FALSE(slip.update(1.1, 0.3, std::nullopt, false));  // no gyro: inactive
+  EXPECT_FALSE(slip.configure(0.1, -1.0, 0.5));
+}
+
+TEST(WheelOdometry, InPlaceTurnReportsNoTravel)
+{
+  craft_control::WheelOdometry odom;
+  odom.configure(kRadius, kSeparation, 0.3);
+  odom.update(-0.8, 1.2, 1.0);  // uneven pivot: |sum| 0.4 < 0.3 * 2.0
+  EXPECT_DOUBLE_EQ(odom.linear(), 0.0);
+  EXPECT_DOUBLE_EQ(odom.x(), 0.0);
+  EXPECT_NEAR(odom.angular(), kRadius * 2.0 / kSeparation, 1e-9);  // yaw rate unchanged
+  odom.update(-0.2, 1.8, 1.0);  // |sum| 1.6 >= 0.6: arc, travel kept
+  EXPECT_NEAR(odom.linear(), kRadius * 0.8, 1e-9);
+  odom.update(0.5, 1.5, 1.0);  // same direction: never in place
+  EXPECT_NEAR(odom.linear(), kRadius, 1e-9);
 }

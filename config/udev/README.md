@@ -5,8 +5,11 @@
 
 | 현재 장치 (변경 가능) | ID_PATH | udev 별칭 |
 | --- | --- | --- |
-| `/dev/ttyACM0` | `platform-3610000.usb-usb-0:2.2.2:1.0` | `/dev/opencr_arm_lm` |
-| 그 밖의 OpenCR | `2.2.2`가 아닌 모든 경로 | `/dev/opencr_wheel_clock` |
+| 허브 3번 소켓 | `platform-3610000.usb-usb-0:2.?.3:1.0` | `/dev/opencr_arm_lm` |
+| 허브 2번 소켓 | `platform-3610000.usb-usb-0:2.?.2:1.0` | `/dev/opencr_wheel_clock` |
+
+2026-11-01: 허브가 Jetson 포트 2.3에서 2.4로 옮겨지자 고정 경로(`2.3.3`) 규칙 때문에 두 보드가 모두
+wheel_clock이 되었습니다. 이제 허브 안 소켓 번호만 봅니다(허브를 다른 Jetson 포트에 꽂아도 유지).
 
 별칭은 보드가 아닌 물리 USB 포트를 식별합니다. 허브/케이블 위치를 고정하고 라벨을 붙입니다.
 2026-10-26 하드웨어 변경: arm/LM은 `2.2.2`(ttyACM0), 나머지 OpenCR은 wheel/clock입니다.
@@ -33,12 +36,12 @@ udev 규칙 없이도 `/dev/serial/by-path/`의 해당 경로를 YAML에 직접 
 # LiDAR 전·후방 구분 (Jetson)
 
 LDS-03 두 대는 VID:PID(`10c4:ea60`)와 `/dev/serial/by-id`가 같아서 물리 USB 포트로 구분합니다.
-전방 LiDAR를 손으로 가려 확인했습니다 (2026-10-24).
+전방 LiDAR를 손으로 가려 확인했습니다 (2026-10-29, 허브 `1-2.3` 아래로 옮김. 2026-10-24에는 `1-2.4`/`1-2.1`).
 
 | 현재 장치 (변경 가능) | KERNELS | udev 별칭 |
 | --- | --- | --- |
-| `/dev/ttyUSB1` | `1-2.4` | `/dev/lidar_front` |
-| `/dev/ttyUSB0` | `1-2.1` | `/dev/lidar_rear` |
+| `/dev/ttyUSB1` | `1-2.3.4` | `/dev/lidar_front` |
+| `/dev/ttyUSB0` | `1-2.3.2` | `/dev/lidar_rear` |
 
 `src/lidar_processor/udev/99-craft-lidar.rules`는 Pi 기준이므로 Jetson에서는 이 파일을 설치합니다.
 

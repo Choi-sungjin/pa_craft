@@ -3,7 +3,7 @@
 // sub: /lidar/front/scan, /lidar/rear/scan   (coin_d4_driver, BEST_EFFORT)
 // pub: /lidar/merged                          (frame base_link, RELIABLE)
 //
-// 1) 각 LiDAR 의 FOV(로봇 바깥 방향 기준 ±fov/2) 밖이면서 로봇 중앙에서 fov_near_m 이내인 점은 버림 → 몸체 기둥 제거, 옆쪽 먼 점은 유지
+// 1) 각 LiDAR 의 FOV(로봇 바깥 방향 기준 ±fov/2) 밖이면서 몸체 중앙에서 fov_near_m 이내인 점은 버림 → 몸체 기둥 제거, 옆쪽 먼 점은 유지
 //    FOV 중심은 TF 로 자동 계산하므로 LiDAR 를 어느 방향으로 달아도 같은 FOV 값을 씀
 // 2) 남은 점을 base_link(로봇 중앙) 좌표로 옮겨 한 점 집합으로 합침
 // 3) 로봇 중앙에서 본 각도 칸(bin)마다 가장 가까운 거리만 남김
@@ -21,7 +21,7 @@
 
 using sensor_msgs::msg::LaserScan;
 
-struct Pose2D { double x{0}, y{0}, yaw{0}; bool ok{false}; };
+struct CachedPose { lidar_processing::Pose2D pose; bool ok{false}; };  // static TF, looked up once
 
 class LidarProcessor : public rclcpp::Node
 {
@@ -40,6 +40,8 @@ public:
     declare_parameter<double>("fov_near_m", 0.30);
     // 로봇 중앙에서 이 거리 안쪽 점은 FOV 와 상관없이 버림 (몸체·기둥) [m]
     declare_parameter<double>("body_radius_m", 0.25);
+    // base_link 는 실제 회전 중심(앞뒤 바퀴 축 가운데). 몸체 중앙(두 LiDAR 가운데)의 base_link x [m]
+    declare_parameter<double>("body_center_x", 0.0);
 
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
@@ -56,18 +58,17 @@ public:
 
 private:
   // LiDAR → base_link 고정 변환 (static TF 라 처음 한 번만 조회)
-  bool get_pose(const std::string & frame, Pose2D & p)
+  bool get_pose(const std::string & frame, CachedPose & p)
   {
     if (p.ok) {return true;}
     try {
       auto t = tf_buffer_->lookupTransform(target_frame_, frame, tf2::TimePointZero);
       const auto & q = t.transform.rotation;
-      p.x = t.transform.translation.x;
-      p.y = t.transform.translation.y;
-      p.yaw = std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+      p.pose = lidar_processing::pose_from_transform(
+        t.transform.translation.x, t.transform.translation.y, q.x, q.y, q.z, q.w);
       p.ok = true;
-      RCLCPP_INFO(get_logger(), "TF %s: x=%.3f y=%.3f yaw=%.1fdeg",
-        frame.c_str(), p.x, p.y, p.yaw * 180.0 / M_PI);
+      RCLCPP_INFO(get_logger(), "TF %s: x=%.3f y=%.3f yaw=%.1fdeg%s",
+        frame.c_str(), p.pose.x, p.pose.y, p.pose.yaw * 180.0 / M_PI, p.pose.flipped ? " (upside down)" : "");
     } catch (const std::exception & e) {
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "TF 대기 중 (%s): %s",
         frame.c_str(), e.what());
@@ -88,15 +89,16 @@ private:
     config.rear_fov_deg = get_parameter("rear_fov_deg").as_double();
     config.fov_near_m = get_parameter("fov_near_m").as_double();
     config.body_radius_m = get_parameter("body_radius_m").as_double();
+    config.body_center_x = get_parameter("body_center_x").as_double();
     if (!merger_.configure(config)) {
       RCLCPP_ERROR(get_logger(), "Invalid lidar merger parameters");
       return;
     }
-    lidar_processing::Pose2D fp{front_pose_.x, front_pose_.y, front_pose_.yaw};
+    const lidar_processing::Pose2D fp = front_pose_.pose;
     lidar_processing::Pose2D rp;
     const LaserScan *rear = nullptr;
     if (rear_ && get_pose(rear_->header.frame_id, rear_pose_)) {
-      rp = {rear_pose_.x, rear_pose_.y, rear_pose_.yaw};
+      rp = rear_pose_.pose;
       const double age = std::fabs((rclcpp::Time(front->header.stamp) -
                                     rclcpp::Time(rear_->header.stamp)).seconds());
       if (age <= config.max_age) rear = rear_.get();
@@ -110,7 +112,7 @@ private:
   lidar_processing::ScanMerger merger_;
   std::string target_frame_;
   int bins_;
-  Pose2D front_pose_, rear_pose_;
+  CachedPose front_pose_, rear_pose_;
   LaserScan::SharedPtr rear_;
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;

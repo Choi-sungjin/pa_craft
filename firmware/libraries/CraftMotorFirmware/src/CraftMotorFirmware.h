@@ -25,6 +25,16 @@ struct AxisConfig {
   double tolerance;            // radians or rad/s
 };
 
+// An extra velocity motor that copies a velocity channel's command (4WD: rear wheel follows
+// its side's channel). Same model as the leader: units and profile acceleration are the leader's.
+// Not a CSV channel; the channel's feedback is the mean of its leader and followers.
+struct FollowerConfig {
+  uint8_t id;
+  uint8_t leader;  // CSV channel index
+  int8_t direction;
+};
+constexpr unsigned kMaxFollowers = 4;
+
 // N=3: wheel_l, wheel_r, clock. N=6: LM, shoulder, elbow, wrist, roll, gripper.
 template<unsigned N>
 class MotorBoard {
@@ -39,6 +49,13 @@ public:
   void setFeedbackExtension(void (*extension)()) { extension_ = extension; }
   // Optional, before begin(): Position I gain per axis (position axes; 0 keeps the motor default 0).
   void setPositionIGains(const uint16_t (&gains)[N]) { i_gains_ = gains; }
+  // Optional, before begin(): follower motors (see FollowerConfig).
+  template<unsigned M>
+  void setFollowers(const FollowerConfig (&followers)[M]) {
+    static_assert(M <= kMaxFollowers, "too many follower motors");
+    followers_ = followers;
+    follower_count_ = M;
+  }
 
   void begin() {
     Serial.begin(115200);
@@ -66,13 +83,21 @@ public:
         tripFault(); return;
       }
     }
+    for (unsigned k = 0; k < follower_count_; ++k) {
+      const auto &f = followers_[k];
+      if (!bus_.ping(f.id) || !bus_.torqueOff(f.id) || !statusOk() ||
+          !bus_.setOperatingMode(f.id, OP_VELOCITY) || !statusOk() ||
+          !writeId(ControlTableItem::DRIVE_MODE, f.id, 0) ||
+          !writeId(ControlTableItem::PROFILE_ACCELERATION, f.id,
+                   axes_[f.leader].profile_acceleration)) {
+        tripFault(); return;
+      }
+    }
     if (!readFeedback()) { tripFault(); return; }
     unwrapTurns();
     holdTargets();
     if (!writeTargets()) { tripFault(); return; }
-    for (unsigned i = 0; i < N; ++i) {
-      if (!bus_.torqueOn(axes_[i].id) || !statusOk()) { tripFault(); return; }
-    }
+    if (!setTorque(true)) { tripFault(); return; }
   }
 
   void tick() {
@@ -122,9 +147,7 @@ private:
     relaxed_ = true;
     received_ = false;
     holding_ = true;
-    for (unsigned i = 0; i < N; ++i) {
-      if (!bus_.torqueOff(axes_[i].id) || !statusOk()) { tripFault(); return; }
-    }
+    if (!setTorque(false)) tripFault();
   }
 
   // Torque back on, holding wherever the axes were left (wheels stopped).
@@ -133,9 +156,7 @@ private:
     if (!readFeedback()) { tripFault(); return; }
     holdTargets();
     if (!writeTargets()) { tripFault(); return; }
-    for (unsigned i = 0; i < N; ++i) {
-      if (!bus_.torqueOn(axes_[i].id) || !statusOk()) { tripFault(); return; }
-    }
+    if (!setTorque(true)) { tripFault(); return; }
     relaxed_ = false;
   }
 
@@ -143,13 +164,35 @@ private:
     return bus_.getLastLibErrCode() == 0 && bus_.getLastStatusPacketError() == 0;
   }
 
-  bool write(uint8_t item, unsigned i, int32_t value) {
-    return bus_.writeControlTableItem(item, axes_[i].id, value, kIoTimeoutMs) && statusOk();
+  bool writeId(uint8_t item, uint8_t id, int32_t value) {
+    return bus_.writeControlTableItem(item, id, value, kIoTimeoutMs) && statusOk();
   }
 
-  bool read(uint8_t item, unsigned i, int32_t &value) {
-    value = bus_.readControlTableItem(item, axes_[i].id, kIoTimeoutMs);
+  bool readId(uint8_t item, uint8_t id, int32_t &value) {
+    value = bus_.readControlTableItem(item, id, kIoTimeoutMs);
     return statusOk();
+  }
+
+  bool write(uint8_t item, unsigned i, int32_t value) { return writeId(item, axes_[i].id, value); }
+  bool read(uint8_t item, unsigned i, int32_t &value) { return readId(item, axes_[i].id, value); }
+
+  // Axes, then followers.
+  bool setTorque(bool on) {
+    for (unsigned i = 0; i < N + follower_count_; ++i) {
+      const uint8_t id = i < N ? axes_[i].id : followers_[i - N].id;
+      if (!(on ? bus_.torqueOn(id) : bus_.torqueOff(id)) || !statusOk()) return false;
+    }
+    return true;
+  }
+
+  // Healthy, torque as expected, and its present value (velocity or position).
+  bool readMotor(uint8_t id, bool velocity, int32_t &raw) {
+    int32_t error, torque;
+    return readId(ControlTableItem::HARDWARE_ERROR_STATUS, id, error) && error == 0 &&
+           readId(ControlTableItem::TORQUE_ENABLE, id, torque) &&
+           !(started_ && !relaxed_ && torque != 1) &&
+           readId(velocity ? ControlTableItem::PRESENT_VELOCITY : ControlTableItem::PRESENT_POSITION,
+                  id, raw);
   }
 
   bool validConfiguration() const {
@@ -164,26 +207,39 @@ private:
           a.velocity != (N == 3 && i < 2)) return false;
       for (unsigned j = 0; j < i; ++j) if (axes_[j].id == a.id) return false;
     }
+    for (unsigned k = 0; k < follower_count_; ++k) {
+      const auto &f = followers_[k];
+      if (f.id > 252 || f.leader >= N || !axes_[f.leader].velocity ||
+          (f.direction != 1 && f.direction != -1)) return false;
+      for (unsigned i = 0; i < N; ++i) if (axes_[i].id == f.id) return false;
+      for (unsigned j = 0; j < k; ++j) if (followers_[j].id == f.id) return false;
+    }
     return true;
   }
 
   bool readFeedback() {
     double sample[N];
     bool moving[N];
+    unsigned count[N];
     for (unsigned i = 0; i < N; ++i) {
-      int32_t raw, error, torque;
-      if (!read(ControlTableItem::HARDWARE_ERROR_STATUS, i, error) || error != 0 ||
-          !read(ControlTableItem::TORQUE_ENABLE, i, torque) ||
-          (started_ && !relaxed_ && torque != 1) ||
-          !read(axes_[i].velocity ? ControlTableItem::PRESENT_VELOCITY :
-                                 ControlTableItem::PRESENT_POSITION, i, raw)) return false;
+      int32_t raw;
+      if (!readMotor(axes_[i].id, axes_[i].velocity, raw)) return false;
       // Subtract in double to avoid overflowing signed raw extended positions.
       sample[i] = (static_cast<double>(raw) - zero_[i]) *
                   axes_[i].units_per_tick * axes_[i].direction;
+      count[i] = 1;
       int32_t is_moving = 0;
       if (!axes_[i].velocity && !read(ControlTableItem::MOVING, i, is_moving)) return false;
       moving[i] = is_moving != 0;
     }
+    for (unsigned k = 0; k < follower_count_; ++k) {
+      const auto &f = followers_[k];
+      int32_t raw;
+      if (!readMotor(f.id, true, raw)) return false;
+      sample[f.leader] += raw * axes_[f.leader].units_per_tick * f.direction;
+      ++count[f.leader];
+    }
+    for (unsigned i = 0; i < N; ++i) sample[i] /= count[i];
     if (N == 6) {
       int32_t current;
       if (!read(ControlTableItem::PRESENT_CURRENT, N - 1, current)) return false;
@@ -229,6 +285,13 @@ private:
         return false;
       }
     }
+    for (unsigned k = 0; k < follower_count_; ++k) {
+      const auto &f = followers_[k];
+      const double raw = target_[f.leader] * f.direction / axes_[f.leader].units_per_tick;
+      if (!writeId(ControlTableItem::GOAL_VELOCITY, f.id, static_cast<int32_t>(llround(raw)))) {
+        return false;
+      }
+    }
     started_ = true;
     return true;
   }
@@ -244,6 +307,11 @@ private:
           (read(ControlTableItem::PRESENT_POSITION, i, position) &&
            write(ControlTableItem::GOAL_POSITION, i, position));
       if (!stopped) bus_.torqueOff(axes_[i].id);
+    }
+    for (unsigned k = 0; k < follower_count_; ++k) {
+      if (!writeId(ControlTableItem::GOAL_VELOCITY, followers_[k].id, 0)) {
+        bus_.torqueOff(followers_[k].id);
+      }
     }
   }
 
@@ -284,6 +352,8 @@ private:
   CsvReceiver<N> receiver_;
   void (*extension_)() = nullptr;
   const uint16_t *i_gains_ = nullptr;
+  const FollowerConfig *followers_ = nullptr;
+  unsigned follower_count_ = 0;
   double zero_[N] = {};  // runtime zero tick: zero_tick plus the boot unwrap
   double feedback_[N] = {};
   double target_[N] = {};

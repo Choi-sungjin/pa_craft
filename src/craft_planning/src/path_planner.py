@@ -1,4 +1,4 @@
-"""ROS map/pose adapter for KANT's A* and collision-checked corner fillets."""
+"""ROS map/pose adapter for the A*+arc planner (A* and collision-checked corner fillets)."""
 import math
 from dataclasses import fields, replace
 from pathlib import Path as FilePath
@@ -10,7 +10,7 @@ from PIL import Image
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
 from geometry_msgs.msg import PoseStamped
 
-from craft_planning.kant_astar_arc import GridMap, Params, plan_leg
+from craft_planning.astar_arc import GridMap, Params, plan_leg
 
 
 class PathPlanner:
@@ -105,14 +105,14 @@ class PathPlanner:
         self._invalidate()
         filename = FilePath(filename).expanduser()
         if filename.suffix.lower() == '.stl':
-            from craft_planning.kant_astar_arc import load_stl_map
+            from craft_planning.astar_arc import load_stl_map
             mesh_grid = load_stl_map(filename, self.params, start=(0.0, 0.0),
                                      heights=self.stl_slice_heights)
             # The adapter's search grid is local; apply the mesh world origin exactly once on output.
             self._set_grid(mesh_grid.occ, mesh_grid.res,
                            (*mesh_grid.origin, 0.0), self.map_frame)
         elif filename.suffix.lower() == '.txt':
-            from craft_planning.kant_astar_arc import build_map, parse_map
+            from craft_planning.astar_arc import build_map, parse_map
             ratio = self.params.block_size / self.params.res
             if ratio < 1 or not math.isclose(ratio, round(ratio)):
                 raise ValueError('block_size must be an integer multiple of res')

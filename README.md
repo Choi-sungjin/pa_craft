@@ -69,10 +69,10 @@ pa_craft/
     │   │   └── planning_master.py
     │   ├── src/
     │   │   ├── __init__.py
-    │   │   ├── kant_astar_arc.py
+    │   │   ├── astar_arc.py
     │   │   └── path_planner.py
     │   ├── maps/maze.stl          # 기본 경로 계획 맵 (Gazebo 월드 좌표)
-    │   ├── maps/kant/             # 원본 예제 맵
+    │   ├── maps/astar_arc/            # 원본 예제 맵
     │   ├── test/
     │   └── third_party/           # 원본 저장소 및 커밋 기록
     ├── lidar_processor/          # 전·후방 LDS-03 드라이버 launch, TF, 360도 병합

@@ -149,20 +149,83 @@ perception_master:
         lever_source: hsv
         lever_class_id: 5  # yolo_seg only: index of the lever class in c310.yolo.class_names
 
+    # LiDAR odometry (ScanOdometry, scan_relocalizer's matcher): each /lidar/merged scan is matched to a
+    # keyframe scan around the prediction (IMU turn + last LiDAR speed; never the wheels, which slip) ->
+    # /perception/lidar/odom, twist in base_link for ekf.yaml's lidar overlay. craft.launch.py lidar_odom
+    # sets enabled; give the same value to the infra and perception groups.
+    lidar_odometry:
+      enabled: false
+      # Scans at 10 Hz, max_v 0.26 m/s: 2.6 cm between scans, and the speed prediction is off by far less.
+      window_m: 0.08               # +-[m] around the prediction
+      window_deg: 3.0              # +-[deg]: the IMU predicts the turn (scale 0.999, test/gyro_scale)
+      step_m: 0.01                 # coarse grid, refined to a quarter (2.5 mm)
+      step_deg: 0.5                # refined to 0.125 deg
+      sigma_m: 0.03                # LDS-03 range noise ~1-2 cm plus the 2 cm keyframe cells
+      # Mean point score to accept a match (sim 2026-10-31: 0.6-1.0 on clean scans). Untested on the
+      # robot: read "LiDAR odometry score" in the log and retune. Below it the scan restarts the keyframe.
+      min_score: 0.4
+      max_points: 360              # of the 720 merged bins
+      grid_resolution_m: 0.02
+      grid_half_extent_m: 8.0      # merged ranges stop at 8 m
+      keyframe_m: 0.3              # new keyframe after this travel or turn: drift only grows per keyframe
+      keyframe_deg: 15.0
+      # vx, vy [(m/s)^2], vyaw [(rad/s)^2]. A match error of ~3 mm per scan at 10 Hz is 0.03 m/s; wheels
+      # (control.yaml wheel_vx_variance 0.0025) then weigh ~25 %. Initial values: check with
+      # test/drive/odom_trajectories.py. vyaw is published but the EKF takes yaw rate from the IMU.
+      twist_variance: [0.0009, 0.0009, 0.01]
+      odom_frame: odom
+      base_frame: base_link
+
     lidar:
       input_mode: raw  # raw: master calls merger; merged: external /lidar/merged input
       target_frame: base_link
       bins: 720
       range_max: 8.0
       max_age: 0.2  # maximum front/rear timestamp difference [s]
-      front_fov_deg: 200.0
-      rear_fov_deg: 200.0
-      fov_near_m: 0.30
+      # Each LiDAR keeps +-90 deg around its outward axis (front +x, rear -x); out of it nothing is kept
+      # (fov_near_m above range_max). Upside-down LiDARs low under the chassis see under it to the far
+      # end and hit the floor ~20 cm inward. Same as lidar_processor.launch.py (2026-10-31; was 200 / 0.30).
+      front_fov_deg: 180.0
+      rear_fov_deg: 180.0
+      fov_near_m: 10.0
       body_radius_m: 0.25
+      # base_link is the turning center (midway between the front and rear axles); the body filter
+      # stays on the body center (LiDAR midpoint), 12.75 mm ahead of it (2026-10-31, front LiDAR 155 mm
+      # ahead, LiDARs 284.5 mm apart; was 26 mm before the chassis change). Same as lidar_processor.launch.py.
+      body_center_x: 0.01275
+      # Floor ROI per LiDAR side (left/right in base_link), angles from the LiDAR's outward axis. Up to *_clear_deg
+      # everything is kept; beyond it up to 90 deg, step_deg bins keep points only within *_max_range_m of the
+      # LiDAR (the beams there dip to the floor). From the arena bags after the 2026-11-01 22:00 LiDAR rework
+      # (fov180_2359, pocket_2309, pocket_2248): floor starts where off-wall points exceed 3x the 0-45 deg level;
+      # clear = that angle - 5 deg, bins = 1st percentile floor range - 0.15 m. Cross-validated between the bags:
+      # removes ~75-90 % of floor points on an unseen bag, keeps 80-97 % of map-wall points (53-91 % at 55-90 deg).
+      # Flat-floor fit (floor_cal_0034): beams dip (cone 0.6 deg), mounts 1.65 deg outward up, 0.1-0.2 deg roll.
+      floor_roi:
+        enabled: true
+        step_deg: 5.0
+        front_left_clear_deg: 70.0
+        front_left_max_range_m: [0.48, 0.83, 0.88, 0.62]
+        front_right_clear_deg: 60.0
+        front_right_max_range_m: [1.32, 1.32, 1.35, 0.76, 0.68, 0.48]
+        rear_left_clear_deg: 65.0
+        rear_left_max_range_m: [0.70, 0.71, 0.56, 0.48, 0.45]
+        rear_right_clear_deg: 50.0
+        rear_right_max_range_m: [0.73, 0.60, 0.55, 0.58, 0.57, 0.50, 0.52, 0.46]
 
     # LidarPerception -> /lidar/merged + /perception/lidar/obstacle (PoseArray).
     # Preserve the scan timestamp/frame; skip NaN/Inf bins and points beyond 3 m.
-    lidar_obstacle: {max_range_m: 3.0, stride: 1}
+    lidar_obstacle:
+      max_range_m: 3.0
+      stride: 1
+      # Raw points (one per beam) -> points worth avoiding, judged in the map frame (2026-11-01: one noise point
+      # or a map wall seen 4 cm off made planning replan). Without map TF the raw points go out.
+      filter:
+        enabled: true
+        wall_margin_m: 0.06      # within this of an occupied/unknown map cell: a wall the map already has
+        cell_m: 0.05
+        persist_frames: 3        # the cell (or neighbor_cells around it) seen in this many frames in a row
+        neighbor_cells: 2        # 2 x 5 cm per frame at 10 Hz: movers up to ~1 m/s still persist
+        min_cluster_points: 3    # 8-connected kept cells with fewer points this frame are dropped
 
     # Master validates these and creates one timer per enabled task. Hz is an upper bound:
     # a task only runs on new input (consumers of d435_yolo are capped at its rate).

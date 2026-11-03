@@ -24,7 +24,7 @@ os.environ.setdefault('ROS_LOG_DIR', str(Path(tempfile.gettempdir()) / 'craft-co
 import rclpy
 from rclpy.parameter import Parameter
 from rclpy.qos import qos_profile_sensor_data
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import Odometry, Path as RosPath
 from sensor_msgs.msg import Imu, JointState
 from std_msgs.msg import Bool, Int32
@@ -96,6 +96,11 @@ class Harness:
             'arm_joint_offsets': '[0.0,0.0,0.0,0.0]',
             'arm_joint_directions': '[1.0,1.0,1.0,1.0]',
             'lm_motor_offset': '0.0',
+            # Fixed wheel geometry for the teleop check below (geometric skid estimate).
+            'wheel_radius': '0.033',
+            'wheel_track': '0.289',
+            'wheelbase': '0.23',
+            'skid_steer_factor': '0.0',
         }
         for name, value in overrides.items():
             arguments.extend(['-p', f'{name}:={value}'])
@@ -220,6 +225,19 @@ def main():
         assert abs(h.imu['wheel_clock'].linear_acceleration.z - 9.80665) < 1e-9
         assert abs(h.imu['lm_arm'].linear_acceleration.z + 9.80665) < 1e-9
         h.drive.feedback[8] = h.arm.feedback[11] = 0
+        # Teleop drives the wheels without a planning heartbeat (mapping runs) on the skid steer
+        # separation, and a stale input stops them again.
+        teleop = h.node.create_publisher(Twist, '/control/teleop/cmd_vel', 10)
+        sep = 0.289 + 0.23 ** 2 / 0.289
+        want = [0.1 / 0.033 - 0.5 * sep / 0.066, 0.1 / 0.033 + 0.5 * sep / 0.066]
+        cmd = Twist(); cmd.linear.x, cmd.angular.z = 0.1, 0.5
+        deadline = time.monotonic() + 3.0
+        while not (h.drive.command and all(math.isclose(a, b, abs_tol=1e-3)
+                                           for a, b in zip(h.drive.command, want))):
+            assert time.monotonic() < deadline, f'teleop command {h.drive.command}, want {want}'
+            teleop.publish(cmd)
+            h.run_for(.05, hold=True)
+        h.pump(lambda: h.board_holds(h.drive), hold=True, timeout=1.0)
         h.pump(lambda: h.status.held is False,hold=False)
         h.run_for(.1,hold=False,commands=True)
         c=h.nav(101)
@@ -277,7 +295,7 @@ def main():
                h.results[105].status in (TaskResult.STOPPING,TaskResult.STOPPED),commands=True,timeout=2)
         assert h.results[105].status in (TaskResult.STOPPING,TaskResult.STOPPED)
         print('PASS: raw board IMU relay, task IDs, deduplication, path revisions, per-controller matrix, '
-              'measured stop, serial timeout and planning watchdog with paused ROS clock')
+              'measured stop, serial timeout, planning watchdog with paused ROS clock and teleop')
     except Exception:
         print(h.close()); raise
     else:

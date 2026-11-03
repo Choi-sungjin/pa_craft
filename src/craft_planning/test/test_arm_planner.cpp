@@ -58,12 +58,12 @@ TEST_F(ArmPlannerTest, PrefersTheBranchWithTheLeastElbowLoad) {
   // Two in-limit branches reach this pose; the seed sits on the one that holds the distal links far
   // out from the elbow (lever 0.516 m vs 0.007 m), so the planner must leave it for the other.
   auto heavy = seed;
-  heavy.position = {0.0, 0.2251, 2.6189, -0.2694, 0.1};
+  heavy.position = {0.0, 0.2251, 2.6189, -0.7000, 0.1};
   const auto result = planner.plan(planner.forward(heavy), heavy);
   ASSERT_TRUE(result.ok) << result.error;
   EXPECT_NEAR(result.joints.position[1], 1.2142, 1e-3);
   EXPECT_NEAR(result.joints.position[2], -0.7826, 1e-3);
-  EXPECT_NEAR(result.joints.position[3], 2.1430, 1e-3);
+  EXPECT_NEAR(result.joints.position[3], 1.7124, 1e-3);
 }
 
 TEST_F(ArmPlannerTest, AcceptsReorderedNamedSeedAndReturnsControlOrder) {

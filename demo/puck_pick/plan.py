@@ -24,13 +24,15 @@ CONTROL_YAML = WS / 'src/craft_control/config/control.yaml'
 ASSUME = dict(
     # Front LiDAR as modelled in the URDF base mesh (block x 108..148, y 34..71, z 20..53 mm).
     lidar_center_x=0.128,  # lateral centre of the LiDAR = robot lateral centre
-    puck_x_offset=0.04,    # [m] puck this far from the LiDAR centre along the LM axis (+X: away from the LM motor)
+    puck_x_offset=-0.01,   # [m] puck this far from the LiDAR centre along the LM axis (+X: away from the LM motor);
+                           # middle of the LM range (2026-11-02: -63..+38 mm; was +0.04, past the new LM end)
     lidar_center_y=0.0525,
     lidar_front_y=0.034,   # front face; the robot front is -Y
     lidar_z=(0.020, 0.053),
     floor_z=0.000,      # wheel bottom in the base mesh
-    hw_z_correction=0.0,    # [m] was 0.025: the 2.5 cm drop on 10/24 was the URDF wrist->tool-roll horn
-                            # length (55 -> measured 78 mm, 2026-10-26); the 10/24 grasp on the new URDF is 25.4 mm lower
+    hw_z_correction=-0.010,  # [m] the real TCP sits ~10 mm above the model (2026-11-03: planned 30 mm grip held 20 mm;
+                             # joint errors < 0.2 deg). Was 0.0; before that 0.025: the 2.5 cm drop on 10/24 was the
+                             # URDF wrist->tool-roll horn length (55 -> measured 78 mm, 2026-10-26)
     shelf_size=(0.205, 0.208),  # shelf top x (left-right), y (front-back) [m]; centred under the puck
     shelf_height=0.07,  # the puck stands on the shelf top [m]
     puck_ahead=0.13,    # LiDAR front face -> puck CENTRE, straight ahead (-Y) [m]
@@ -42,8 +44,8 @@ ASSUME = dict(
     # On the 7 cm shelf the wrist_pitch lower limit binds as the TCP rises above the grasp.
     # The tool stays vertical where it can and otherwise leans its tip forward
     # (away from the robot) by the smallest angle that fits the limits.
-    grasp_coverage=0.30,   # fraction of the puck height the jaws cover from its top (keep <= 0.5 for loading);
-                           # 0.3 x 60 mm = 18 mm = 60% of the 30 mm usable grip (was 0.50: 100%)
+    grasp_coverage=0.035 / 0.06,  # fraction of the puck height the jaws cover from its top: 35 mm (2026-11-03;
+                           # was 0.5 = 30 mm planned, 20 mm real before hw_z_correction; 0.30 before)
     max_tilt_deg=30.0,     # tool tip lean toward -Y (robot front) allowed above the grasp
     limit_margin_deg=3.0,  # every joint stays this far inside its URDF limits (hardware sync is approximate)
     tool_roll=0.0,         # URDF tool_roll_joint; aligned (jaws close front-back)
@@ -60,7 +62,9 @@ ASSUME = dict(
 # puck axis, so the shelf must end at the puck's near end.
 LYING = dict(
     lying=True,
-    taught_grasp_motor_deg=(177.4, 321.8, 345.1, 0.0),  # shoulder, elbow, wrist_pitch, tool_roll (by hand, 2026-10-27)
+    # shoulder, elbow, wrist_pitch, tool_roll URDF degrees; taught by hand 2026-10-27 at raw motor
+    # (177.4, 321.8, 345.1, 0.0), converted with that day's offsets (survives the 2026-11-02 re-zeroing)
+    taught_grasp_urdf_deg=(111.35, 196.41, -135.14, -90.0),
     tool_roll=-math.pi / 2,   # jaws left-right (motor 0); +90 deg is outside the URDF limit (1.4835)
     limit_margin_deg=0.5,
     puck_x_offset=-0.01,      # middle of the LM range (LiDAR centre -58..+38 mm)
@@ -227,8 +231,7 @@ def main():
     top = a['floor_z'] + a['shelf_height']
     grasp = np.array([px, py, top + grasp_z + a['hw_z_correction']])
     if a['lying']:  # the taught pose; the puck's near end sits grasp_coverage of its length inside the jaws
-        q = {n: d * (math.radians(m) - o) for n, m, o, d in
-             zip(Chain.NAMES[1:], a['taught_grasp_motor_deg'], off, dirs)}
+        q = {n: math.radians(v) for n, v in zip(Chain.NAMES[1:], a['taught_grasp_urdf_deg'])}
         T = ch.fk(q)
         tool = T[:3, 1]
         a['tool_tilt_deg'] = float((-90 - math.degrees(math.atan2(tool[2], tool[1]))) % 360)

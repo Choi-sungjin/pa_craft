@@ -68,7 +68,7 @@ LM motor limits and calibration use separate `lm_*` parameters, including
 holds its measured motor angle; this does not disable the rotational arm controller.
 `lm_meters_per_rad` is measured travel divided by motor rotation in radians; separate
 pulley radius and gear ratio parameters are unnecessary. LM calibration uses
-108 mm travel over -391.8 to 527.5 degrees, with -11.6 degrees as slide zero. `GripperController` remains independent.
+102 mm travel over -399.4 to 509.2 degrees, with -54.97 degrees as slide zero (63.3 mm from the motor end). `GripperController` remains independent.
 
 Direction settings assume hardware Reverse OFF. With URDF +Y forward and +Z up
 at the reference pose, `arm_joint_directions` is `[+1, +1, -1, +1]` in
@@ -78,7 +78,7 @@ These arm signs were inferred from the reported physical motions at the referenc
 pose and still require hardware validation with calibrated offsets. Arm firmware
 preserves raw motor signs; apply the URDF sign correction only in host YAML.
 Wheel signs are applied in firmware: left `+1`, right `-1`. Clock uses firmware
-`+1`, host `clock_direction: +1`, and host zero angle 210.0 degrees (slot 12, at the loading guide; was 314.6).
+`+1`, host `clock_direction: +1`, and host zero angle 165.5 degrees (slot 12, at the loading guide; 2026-11-03 after reassembly, was 210.0, 314.6).
 Gripper closes toward 229 degrees (5 degrees inside the 234-degree hard stop) from its
 94-degree open pose; its opposite closed endpoint is -53.1 degrees (limit -48.1).
 Grasp is detected by current (0.1 A for 0.1 s), not by reaching the close target. It uses open/close targets rather than an IK sign.
@@ -128,21 +128,35 @@ vertices and avoiding spline overshoot outside the checked path. `/control/track
 remains a visualization output. Path endpoint position and optional requested goal yaw are
 checked in LateralController; `wheel_heading_tolerance` is configured in control YAML.
 
-The longitudinal controller limits `target_v`. Pure Pursuit
-selects a path point at least `lookahead_distance` away, starting at the nearest
-path point; it uses the last available point if the remaining path is shorter.
-With that point transformed into the chassis frame `(x, y)`:
+The longitudinal controller limits `target_v`. "My node" is the path sample the robot is at:
+the nearest within +-3 samples of the previous one (ties go ahead), searched over the whole path
+only when that window is more than `lookahead_distance` away, so a path that overlaps itself
+(U-turn) never switches branches. Pure Pursuit targets the first sample at least
+`lookahead_distance` along the path from my node (or the last one). When that target is more
+than `wheel_heading_tolerance` off the heading (behind or beside the robot), the robot first
+turns in place until it is within half of it. Arrival needs the endpoint within tolerance and
+my node near the end of the path. Path updates may change the endpoint (Planning sends one A*+arc
+segment per task, up to a STOP_TURN corner). With the target transformed into the chassis
+frame `(x, y)`:
 
 ```text
 curvature = 2*y / (x*x + y*y)
 omega = limited_v * curvature
-left  = limited_v / wheel_radius - omega * wheel_separation / (2*wheel_radius)
-right = limited_v / wheel_radius + omega * wheel_separation / (2*wheel_radius)
+separation = skid_steer_factor * wheel_track   (factor 0 -> 1 + (wheelbase/wheel_track)^2)
+left  = limited_v / wheel_radius - omega * separation / (2*wheel_radius)
+right = limited_v / wheel_radius + omega * separation / (2*wheel_radius)
 ```
 
+The drive is 4WD skid steer: the rear wheels follow their side in firmware, and turning
+scrubs the wheels sideways, so the chassis turns less than a two-wheel differential drive
+with the same wheel speeds. The effective `separation` covers that for Pure Pursuit, the
+in-place alignment turn, and wheel odometry yaw. Wheel centers are 0.289 m apart left/right
+and 0.230 m front/rear, so the geometric estimate is 1.63 (0.471 m); replace
+`skid_steer_factor` with the measured wheel/IMU ratio of `test/drive/rotate.py`.
+Odometry and paths refer to the turning center, midway between the axles.
 Both wheel commands are scaled by the same factor if either exceeds `max_wheel`.
-Commands are wheel angular velocities in rad/s. Wheel centers are 0.288 m apart;
-wheel radius is 0.033 m. Tune lookahead and endpoint tolerance on the robot.
+Commands are wheel angular velocities in rad/s; wheel radius is 0.033 m. Tune lookahead
+and endpoint tolerance on the robot.
 
 Empty/invalid paths, missing/invalid odometry, differing frames, and endpoint
 arrival stop the wheels. The next valid path uses

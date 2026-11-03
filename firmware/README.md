@@ -28,8 +28,10 @@ LM의 m→rad 변환과 IK 관절 매핑은 호스트가 담당합니다.
 바꿔 빌드하면 초기 위치를 유지하며 토크를 켭니다.
 
 - 기본 통신은 OpenCR `Serial3`, DIR 84, `BDPIN_DXL_PWR_EN`, Protocol 2.0, 1 Mbps입니다.
-- 확정 ID는 wheel/clock 보드 **wheel_l=1, wheel_r=2, clock=3**입니다.
+- 확정 ID는 wheel/clock 보드 **wheel_l=1, wheel_r=2, wheel_rear_l=3, wheel_rear_r=4, clock=5**입니다 (4WD, 2026-10-30; clock은 3에서 변경).
   CSV 채널 순서는 기존 `wheel_l,wheel_r,clock`을 유지하고 각 채널의 모터 ID만 매핑합니다.
+- 뒷바퀴 3, 4는 CSV 채널이 아닌 follower(`kFollowers`)로, 같은 쪽 채널 명령을 그대로 받습니다.
+  피드백 `wheel_l`/`wheel_r`은 그 쪽 두 모터의 평균이고, 뒷바퀴 모터 오류도 보드 fault로 래치됩니다.
 - LM/arm 보드는 **LM=1, shoulder=2, elbow=3, wrist_pitch=4, tool_roll=5, gripper=6**입니다.
   보드마다 별도 버스이므로 ID가 같아도 됩니다.
   이 펌웨어는 모터 ID나 통신 속도를 재설정하지 않습니다.

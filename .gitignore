@@ -24,3 +24,9 @@ __pycache__/
 /Claude outputs/
 /src/craft_planning/v75_ws/build/
 /src/craft_planning/v75_ws/install/
+
+# rosbags stay local (~/bags, test/*/logs); CSV logs and bag metadata.yaml are kept
+*.mcap
+*.db3
+# nested CMake build trees
+tools/*/build/

@@ -1,9 +1,34 @@
-# 자이로 배율 실험 (TODO)
+# 자이로 배율 실험
 
-**상태: 미실시.** 주행 시나리오를 먼저 하고 그다음에 한다.
+**상태: 1차 실시 (2026-10-31, `gyro_spin.py`, 5바퀴 CCW·CW 각 1회).** 보정 불필요.
+
+| 보드 | CCW | CW | 평균 |
+| --- | --- | --- | --- |
+| wheel_clock | 0.9994 | 0.9992 | 0.9993 |
+| lm_arm | 0.9988 | 1.0004 | 0.9996 |
+
+두 보드 모두 1800°에서 2° 이내(0.1% 미만)라 배율 파라미터는 만들지 않는다. IMU를 기준으로 한
+turn_map 계수와 휠 odom 비교는 그대로 유효하다. 같은 회전에서 휠 odom/실제는 CCW 1.015, CW 0.972로
+방향별 차이가 있었다(`results.csv`).
 
 두 OpenCR(2018년 보드, MPU-9250)의 자이로 배율(scale factor) 오차를 보드별로 잰다.
 자이로 배율은 IMU가 낸 각속도와 실제 각속도의 비율이다. 1.00이면 정확하다.
+
+## 두 보드 동시: `gyro_spin.py` (2026-10-31)
+
+아래 "먼저 만들어야 할 것" 없이 할 수 있다. control_master가 두 보드의 원시 IMU(`/control/imu/{wheel_clock,lm_arm}`)를
+내므로, `test/drive/gyro_spin.py`가 control의 teleop으로 로봇을 돌리면서 두 보드와 휠 odom을 함께 기록한다.
+
+1. 바닥 기준선 테이프에 로봇 정면 표시를 맞춘다. 반경 0.5 m를 비운다.
+2. `bro`(control_master)를 띄우고, 다른 터미널에서 `/usr/bin/python3 ~/craft/test/drive/gyro_spin.py`.
+3. 회차마다: 3초 정지(오프셋) → 스크립트가 5바퀴에서 45° 모자란 곳까지 돌리고 멈춤 → **`a`/`d`를 눌러 정면 표시를
+   기준선에 정확히 맞추고 `c`** → 3초 정지. 실제 회전각이 정확히 1800°이므로 각도를 잴 필요가 없다.
+4. 기본 CCW·CW 번갈아 각 3회(`--runs 3`). 회차가 끝나면 로봇이 이미 선 위에 있으므로 Enter로 다음 회차.
+5. `results.csv`에 보드별로 한 줄씩 쌓인다. `odom_compare.py --summary`로 보드·방향별 배율과 휠 odom 정확도를 본다.
+
+bag으로 기록한 경우는 `odom_compare.py <bag> --turns auto --residual-deg <잔여각>`(wheel_clock만).
+배율 k는 이미 모은 데이터에 곱해서 반영한다(재측정 불필요): `turn_map.py poly --gyro-scale k`로 휠 odom 계수를,
+`odom_compare.py <bag> --gyro-scale k`로 WASD 비교를 다시 낸다. 방향별로 다르면 `--gyro-scale-cw`를 함께 준다.
 
 ## 왜 필요한가
 

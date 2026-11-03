@@ -5,11 +5,13 @@
 #include <rclcpp/rclcpp.hpp>
 #include <yaml-cpp/yaml.h>
 
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <limits>
 #include <set>
 #include <stdexcept>
+#include <utility>
 
 namespace craft_planning {
 namespace {
@@ -223,6 +225,32 @@ PlanningConfig load_planning_config(rclcpp::Node &node, const std::string &share
   config.path.arc_sample = p.positive_param("path_planner.arc_sample");
   config.path.max_cells = static_cast<std::size_t>(p.integer("path_planner.max_cells", 1));
   config.path.max_expansions = static_cast<std::size_t>(p.integer("path_planner.max_expansions", 1));
+  config.path.goal_heading_required = config.goal_heading_required;
+  for (auto [name, box] : {std::pair{"grasp_region.lying", &config.grasp.lying},
+                           std::pair{"grasp_region.standing", &config.grasp.standing}}) {
+    const auto values = p.param<std::vector<double>>(name);
+    require(values.size() == 6, std::string(name) + " needs [x_min, x_max, y_min, y_max, z_min, z_max]");
+    std::copy(values.begin(), values.end(), box->begin());
+  }
+  config.grasp.margin = p.nonnegative("grasp_region.margin");
+  config.grasp.axis_tolerance = p.nonnegative("grasp_region.axis_tolerance_deg") * M_PI / 180.0;
+  config.grasp.confirm_count = static_cast<int>(p.integer("grasp_region.confirm_count", 1));
+  config.grasp.front_face_x = p.param<double>("grasp_region.front_face_x");
+  config.grasp.front_face_width = p.nonnegative("grasp_region.front_face_width");
+  config.grasp.good_plane = p.nonnegative("grasp_region.good_plane");
+  config.grasp.min_box_gap = p.nonnegative("grasp_region.min_box_gap");
+  config.grasp.w_box = p.nonnegative("grasp_region.w_box");
+  config.grasp.w_grasp = p.nonnegative("grasp_region.w_grasp");
+  validate(config.grasp);
+  config.path.r_min = p.nonnegative("path_planner.r_min");
+  config.path.r_hi_global = p.positive_param("path_planner.r_hi_global");
+  config.path.r_tol = p.positive_param("path_planner.r_tol");
+  config.path.v_ref = p.positive_param("path_planner.v_ref");
+  config.path.w_max = p.positive_param("path_planner.w_max");
+  config.path.a_lat_max = p.positive_param("path_planner.a_lat_max");
+  config.path.a_lon_max = p.positive_param("path_planner.a_lon_max");
+  config.path.approach_len = p.positive_param("path_planner.approach_len");
+  require(config.path.r_min <= config.path.r_hi_global, "path_planner.r_min must not exceed r_hi_global");
   config.arm.urdf = file_path(p.nonempty("ik.urdf"), share_dir, "ik.urdf");
   config.arm.base_frame = p.nonempty("ik.base_frame");
   config.arm.tip_frame = p.nonempty("ik.tip_frame");
@@ -239,6 +267,8 @@ PlanningConfig load_planning_config(rclcpp::Node &node, const std::string &share
   config.fsm.max_compute_retries = p.integer("fsm.max_compute_retries", 0);
   config.loop_hz = p.positive_param("loop_hz");
   config.replan_period_s = p.positive_param("replan_period_s");
+  config.block_wait_s = p.nonnegative("block_wait_s");
+  config.min_segment_m = p.nonnegative("min_segment_m");
   config.odom_timeout_s = p.positive_param("odom_timeout_s");
   config.joint_timeout_s = p.positive_param("joint_timeout_s");
   config.observation_timeout_s = p.positive_param("observation_timeout_s");
@@ -248,6 +278,7 @@ PlanningConfig load_planning_config(rclcpp::Node &node, const std::string &share
   config.observation_min_confidence = p.nonnegative("observation_min_confidence");
   require(config.observation_min_confidence <= 1.0, "observation_min_confidence must be in [0,1]");
   config.require_lidar = p.param<bool>("require_lidar");
+  config.require_arm_joints = p.param<bool>("require_arm_joints");
   config.joint_state_topic = p.nonempty("joint_state_topic");
   const auto mission_file = file_path(p.nonempty("mission_file"), share_dir, "mission_file");
   config.missions = parse_missions(mission_file, config.path.map_frame, config.arm.base_frame);
