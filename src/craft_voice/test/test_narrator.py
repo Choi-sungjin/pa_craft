@@ -17,14 +17,16 @@ class Clock:
 
 
 class Backend:
-    def __init__(self, reply='앞에 상자가 보여요.', fail=False, tts_fail=False, tts_delay=0.0, urgent_delay=0.0):
-        self.reply, self.fail, self.tts_fail = reply, fail, tts_fail
+    def __init__(self, reply='앞에 상자가 보여요.', fail=False, tts_fail=False, tts_delay=0.0, urgent_delay=0.0,
+                 gpt_delay=0.0):
+        self.reply, self.fail, self.tts_fail, self.gpt_delay = reply, fail, tts_fail, gpt_delay
         self.tts_delay, self.urgent_delay = tts_delay, urgent_delay
         self.calls, self.spoken, self.urgent = [], [], []
         self.tts_started = threading.Event()
 
     def generate(self, instructions, prompt, jpeg=None):
         self.calls.append((instructions, prompt, jpeg))
+        time.sleep(self.gpt_delay)
         if self.fail:
             raise ConnectionError('offline')
         return self.reply
@@ -491,3 +493,78 @@ def test_state_change_during_tts_drops_the_sentence():
 ])
 def test_clean_text(raw, expected):
     assert clean_text(raw, 150) == expected
+
+
+# ---- dead network: slow failures must still end in speech (QA round 3) -----------------------------
+def test_dead_network_template_state_goes_out_through_fallback():
+    """OpenAI speech fails only after a long wait; the robot is still Ready, so say it via fallback."""
+    fallback = Fallback()
+    narrator, texts = make(Backend(tts_delay=0.6, tts_fail=True), clock=time.monotonic, state_mode='template',
+                           state_max_age_s=0.3)
+    narrator.fallback_tts = fallback
+    narrator.planning_state('Ready')
+    run(narrator)
+    assert texts == [('state', '준비 완료. 미션 시작을 기다리고 있어요.')]
+    assert narrator.player.played == [b'FALLBACK']
+
+
+def test_dead_network_gpt_state_falls_back_to_template_in_time():
+    narrator, texts = make(Backend(gpt_delay=0.6, fail=True), clock=time.monotonic, state_max_age_s=0.3)
+    narrator.planning_state('Ready')
+    run(narrator)
+    assert texts == [('state', '준비 완료. 미션 시작을 기다리고 있어요.')]
+
+
+def test_hanging_gpt_and_tts_hit_their_deadlines():
+    fallback = Fallback()
+    narrator, texts = make(Backend(gpt_delay=5.0, tts_delay=5.0), clock=time.monotonic,
+                           gpt_state_deadline_s=0.3, tts_deadline_s=0.3)
+    narrator.fallback_tts = fallback
+    started = time.monotonic()
+    narrator.planning_state('Ready')
+    run(narrator)
+    assert time.monotonic() - started < 2.0
+    assert texts == [('state', '준비 완료. 미션 시작을 기다리고 있어요.')] and narrator.player.played == [b'FALLBACK']
+
+
+def test_requested_scene_failure_is_still_said():
+    narrator, texts = make(Backend(gpt_delay=0.6, fail=True), clock=time.monotonic, scene_max_age_s=0.3)
+    narrator.command('describe')
+    run(narrator)
+    assert len(texts) == 1 and texts[0][0] == 'scene' and texts[0][1].startswith('지금은 주변을 설명할 수 없어요.')
+
+
+def test_status_answer_refreshed_when_state_changes_during_tts():
+    """QA round 3 #3: a status sentence describes "now"; if the state moved on, say the current one."""
+    class Moving(Backend):
+        move = False
+
+        def synthesize(self, text, urgent=False):
+            if self.move:
+                self.move = False
+                for label in ('Run.Complete', 'Run.AwaitRequest', 'Run.Compute', 'Run.Execute'):
+                    narrator.planning_state(label)
+            return super().synthesize(text, urgent)
+
+    backend = Moving()
+    narrator, texts = make(backend, state_mode='template')
+    narrator.tracker.cooldown_s = 60.0
+    narrator.planning_state('Run.Stopping')
+    run(narrator)
+    assert texts == [('state', '정지하는 중이에요.')]
+    texts.clear()
+    narrator.tracker.announce = ()                            # only the status answer is under test
+    backend.move = True
+    narrator.command('status')                                # "정지하는 중이에요." goes to TTS ...
+    run(narrator)
+    assert texts == [('status', '작업을 시작할게요.')]       # ... robot moved on: the current state is said
+
+
+def test_close_during_tts_publishes_nothing():
+    """QA round 3 #4."""
+    narrator, texts = make(Backend(tts_delay=0.5), state_mode='template', start=True)
+    narrator.planning_state('Ready')
+    assert narrator.backend.tts_started.wait(2.0)
+    narrator.close()
+    time.sleep(0.8)
+    assert texts == []

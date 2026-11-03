@@ -20,7 +20,8 @@
   ("문제가 생겨서 멈췄어요. 원인: 실행 시간 초과.")으로 말한다. 재생 중이거나 아직 TTS 합성 중인 문장은 버리고
   (응답을 기다리지 않음), Fault 음성은 `fault_tts_timeout_s`(4 s, 재시도 없음, DNS가 멈춰도 +1 s에서 포기) 안에
   OpenAI가 답하지 않으면 `fallback_tts_command`로 넘어간다.
-- GPT·TTS가 실패하면 상태 문장은 템플릿으로, 음성은 `fallback_tts_command`(예: espeak-ng)로 대신한다.
+- GPT·TTS가 실패하거나 늦으면 상태 문장은 템플릿으로(`gpt_state_deadline_s` 6 s), 음성은 `fallback_tts_command`
+  (예: espeak-ng)로(`tts_deadline_s` 8 s) 대신한다. 인터넷이 끊겨도 상태 안내는 fallback 음성으로 나간다.
 
 ## 설치 (Jetson)
 
@@ -73,7 +74,9 @@ ros2 topic echo /voice/utterance                                              # 
 
 - 순서: Fault > 질문·status·say > 상태 > 장면. 상태 문장은 큐에서 꺼낼 때와 TTS가 끝난 뒤 재생 직전에 다시 확인해서,
   그 사이 상태가 한 번이라도 바뀌었으면(같은 label로 돌아왔어도) 버린다. Run.Complete는 이미 일어난 일이라 예외.
-  `state_max_age_s`(8 s)보다 늦어져도 버린다. `/voice/utterance`에는 실제로 내보낸 문장만 나간다.
+  큐에서 꺼낼 때 `state_max_age_s`(8 s)보다 오래됐어도 버린다(TTS가 늦은 건 상태가 그대로면 말한다).
+  `status` 대답도 그 사이 상태가 바뀌었으면 지금 상태의 고정 문장으로 한 번 바꿔 말한다.
+  `/voice/utterance`에는 실제로 내보낸 문장만 나간다.
 - 비용 상한: GPT 호출 `max_gpt_calls_per_min`(12). 넘으면 상태는 템플릿, 주기 장면은 건너뜀.
 - 같은 상태/장면 문장은 `repeat_window_s`(30 s) 안에 반복하지 않는다.
 - 단계 이름: diagnostics `step`(`base_goal`, `tcp_goal`, 미션 step id)을 `step_names: "approach:접근,grasp_pose:잡기 자세"`로 읽기 좋게.
@@ -91,6 +94,7 @@ ros2 topic echo /voice/utterance                                              # 
 | `player_command` | `aplay -q {file}` | `paplay {file}`, `aplay -q -D plughw:1,0 {file}` 등 |
 | `fallback_tts_command` | `""` | 오프라인 음성, 예: `espeak-ng -v ko --stdout -- {text}`(stdout으로 WAV). `--`를 꼭 넣고, 문장 앞의 `-`는 지운다 |
 | `fault_tts_timeout_s` | `4.0` | Fault 문장의 OpenAI 음성 대기 시간(재시도 없음). 넘으면 fallback |
+| `gpt_state_deadline_s` / `tts_deadline_s` | `6.0` / `8.0` | 상태 문장 GPT 대기 → 템플릿, 일반 음성 OpenAI 대기 → fallback |
 | `persona` | `""` | 말투 추가 지시, 예: `반말로 친구처럼 말해.` |
 
 float 파라미터는 소수점을 붙인다(`10.0`). 리스트는 쉼표로 구분한 문자열이다.
@@ -117,6 +121,6 @@ cd ~/craft/src/craft_voice && python3 -m pytest -q test
 | --- | --- |
 | `test_frames.py` | 공유 메모리 슬롯 복사(D435/C310), 시퀀스 불일치·락·잘못된 메타·파일 재생성, ROS Image 변환, JPEG 축소 |
 | `test_robot_state.py` | 상태 변화 감지, 쿨다운, 1틱 Run.Complete, Fault 원인 대기·이전 원인 재사용 안 함, 문맥 문장 |
-| `test_narrator.py` | GPT 경로, 템플릿 폴백, Fault 우선·끊기(재생 중·TTS 합성 중·TTS가 멈춘 네트워크, 실제 스레드), Fault 음성 마감 후 fallback, 지난 상태 문장 버리기(TTS 뒤 재확인 포함), 호출 상한, 주기 장면, mute/stop |
+| `test_narrator.py` | GPT 경로, 템플릿 폴백, Fault 우선·끊기(재생 중·TTS 합성 중·TTS가 멈춘 네트워크, 실제 스레드), Fault 음성 마감 후 fallback, 죽은 네트워크에서도 상태 안내(GPT·TTS 마감), 지난 상태·status 문장 버리기/바꾸기(TTS 뒤 재확인 포함), 종료 중 발행 안 함, 호출 상한, 주기 장면, mute/stop |
 | `test_gpt_http.py` | 실제 openai SDK가 보내는 `/v1/responses`·`/v1/audio/speech` 요청 내용, reasoning 거부 시 재시도, WAV, 응답 없는 서버에서 Fault 음성이 빨리 포기 |
 | `test_audio.py` | 플레이어 명령(`{file}`), stop으로 끊기, 시작 전 취소, 오류, shell 없이 `{text}` 전달, 문장이 옵션(`-w` 등)이 되지 않음 |

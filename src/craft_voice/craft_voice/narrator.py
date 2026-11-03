@@ -43,6 +43,8 @@ class NarratorConfig:
     interrupt_on_fault: bool = True
     state_max_age_s: float = 8.0     # a state sentence later than this is dropped
     fault_tts_deadline_s: float = 5.0  # give up on OpenAI speech for a fault after this (even a DNS hang)
+    gpt_state_deadline_s: float = 6.0  # a state sentence uses its template if GPT has not answered by then
+    tts_deadline_s: float = 8.0        # other speech uses the fallback TTS if OpenAI has not answered by then
     scene_max_age_s: float = 10.0
     max_pending_questions: int = 3
 
@@ -68,6 +70,7 @@ class Utterance:
     generation: int = 0
     label: str = ''            # state label a 'state' sentence is about
     cancelled: bool = False    # preempted by a fault or 'stop' (possibly before playback started)
+    retried: bool = False      # a stale 'status' answer was already replaced once
 
     @property
     def priority(self) -> int:
@@ -171,7 +174,8 @@ class Narrator:
             if self.backend is None or self.config.state_mode == 'template':
                 with self._lock:
                     text = self.tracker.current_template(now)
-                self._enqueue(Utterance('status', text, now))
+                    generation = self.tracker.generation
+                self._enqueue(Utterance('status', text, now, generation))
             else:
                 self._submit(Job('status', now))
         elif command in ('mute', 'unmute'):
@@ -294,15 +298,18 @@ class Narrator:
                 return False
             job = self._pop_best(self._jobs)
             self._thinking = True
+        with self._lock:
+            generation = job.event.generation if job.event else self.tracker.generation
         try:
-            text = self._compose(job)
+            text, from_gpt = self._compose(job)
         finally:
             with self._lock:
                 self._thinking = False
         if text:
-            event = job.event
-            self._enqueue(Utterance(job.kind, text, job.created, event.generation if event else 0,
-                                    label=event.label if event else ''))
+            # A template/apology made after a slow failure is new: its age starts now, not at the request.
+            created = job.created if from_gpt else self.clock()
+            self._enqueue(Utterance(job.kind, text, created, generation,
+                                    label=job.event.label if job.event else ''))
         return True
 
     def _fallback(self, job: Job, why: str) -> str | None:
@@ -317,23 +324,28 @@ class Narrator:
             return f'지금은 주변을 설명할 수 없어요. {why}'
         return None  # periodic scene: stay quiet
 
-    def _compose(self, job: Job) -> str | None:
+    def _compose(self, job: Job) -> tuple[str | None, bool]:
+        """(sentence, came from GPT)."""
         if self.backend is None:
-            return self._fallback(job, 'GPT 연결이 설정되지 않았어요.')
+            return self._fallback(job, 'GPT 연결이 설정되지 않았어요.'), False
         if not self._take_budget():
             self.log.warning(f'GPT budget ({self.config.max_gpt_calls_per_min}/min) used up, {job.kind} skipped')
-            return self._fallback(job, '요청이 많아서 잠시 뒤에 다시 물어봐 주세요.')
+            return self._fallback(job, '요청이 많아서 잠시 뒤에 다시 물어봐 주세요.'), False
         jpeg = self._grab_jpeg() if self.config.use_image else None
         instructions, prompt = self._prompt(job, jpeg is not None)
         started = time.monotonic()
-        try:
-            text = self.backend.generate(instructions, prompt, jpeg)
-        except Exception as error:  # network, quota, bad model name: say the template instead
+        deadline = self.config.gpt_state_deadline_s if job.kind == 'state' else None
+        result, value = self._call(lambda: self.backend.generate(instructions, prompt, jpeg), deadline)
+        if result == 'cancelled':
+            return None, False
+        if result != 'ok':  # network, quota, bad model name, too slow: say the template instead
             self.stats['gpt_errors'] += 1
-            self.log.error(f'GPT {job.kind} failed: {type(error).__name__}: {error}')
-            return self._fallback(job, 'GPT 응답을 받지 못했어요.')
-        self.log.info(f'GPT {job.kind} {time.monotonic() - started:.1f}s image={jpeg is not None}: {text}')
-        return clean_text(text, self.config.max_chars) or self._fallback(job, '빈 응답이었어요.')
+            reason = f'{type(value).__name__}: {value}' if result == 'error' else f'no answer in {deadline} s'
+            self.log.error(f'GPT {job.kind} failed: {reason}')
+            return self._fallback(job, 'GPT 응답을 받지 못했어요.'), False
+        self.log.info(f'GPT {job.kind} {time.monotonic() - started:.1f}s image={jpeg is not None}: {value}')
+        text = clean_text(value, self.config.max_chars)
+        return (text, True) if text else (self._fallback(job, '빈 응답이었어요.'), False)
 
     def _take_budget(self) -> bool:
         with self._lock:
@@ -393,7 +405,9 @@ class Narrator:
         while self.speak_once(timeout=0.5) is not None:
             pass
 
-    def _stale(self, u: Utterance, now: float) -> str:
+    def _stale(self, u: Utterance, now: float, after_tts: bool = False) -> str:
+        """Why u must not be said ('' = fine). Age limits apply when it is taken off the queue; after
+        TTS only "is it still true" counts, so a slow fallback still speaks a sentence that is true."""
         cfg = self.config
         if u.kind == 'state':
             if u.generation != self._latest_state_generation:
@@ -401,9 +415,11 @@ class Narrator:
             # Any label change since (announced or not, even back to the same label) makes "now" wrong.
             if u.label not in EVENT_LABELS and self.tracker.generation != u.generation:
                 return 'state moved on'
-            if now - u.created > cfg.state_max_age_s:
+            if not after_tts and now - u.created > cfg.state_max_age_s:
                 return 'too late'
-        if u.kind == 'scene' and now - u.created > cfg.scene_max_age_s:
+        if u.kind == 'status' and self.tracker.generation != u.generation:
+            return 'state moved on'
+        if u.kind == 'scene' and not after_tts and now - u.created > cfg.scene_max_age_s:
             return 'too late'
         if (u.kind in ('state', 'scene') and u.text == self._last_text and
                 now - self._last_text_at < cfg.repeat_window_s):
@@ -422,8 +438,7 @@ class Narrator:
             utterance = self._pop_best(self._utterances)
             why = self._stale(utterance, self.clock())
             if why:
-                self.stats['dropped'] += 1
-                self.log.debug(f'dropped {utterance.kind} ({why}): {utterance.text}')
+                self._drop(utterance, why)
                 return True
             self._current = utterance
         spoken = False
@@ -437,31 +452,40 @@ class Narrator:
                     self._last_activity = self._last_text_at
         return True
 
-    def _call(self, utterance: Utterance, fn, deadline_s: float | None):
-        """Run one TTS call on a helper thread so a cancel (fault, stop) never waits for it.
+    def _drop(self, u: Utterance, why: str):
+        """Lock held. A stale status answer is replaced once by the current state's template."""
+        self.stats['dropped'] += 1
+        self.log.debug(f'dropped {u.kind} ({why}): {u.text}')
+        if u.kind == 'status' and not u.retried and not u.cancelled and not self._closed:
+            now = self.clock()
+            self._utterances.append(Utterance('status', self.tracker.current_template(now), now,
+                                              self.tracker.generation, retried=True))
 
-        Returns ('ok', wav) | ('error', exception) | ('cancelled', None) | ('timeout', None).
-        An abandoned call finishes on its own thread and its result is thrown away.
+    def _call(self, fn, deadline_s: float | None, cancelled=lambda: False):
+        """Run one GPT/TTS call on a helper thread so a cancel (fault, stop, close) never waits for it.
+
+        Returns ('ok', value) | ('error', exception) | ('cancelled', None) | ('timeout', None).
+        An abandoned call finishes on its own thread (bounded by the SDK timeout) and is thrown away.
         """
         done = threading.Event()
         box = {}
 
         def work():
             try:
-                box['wav'] = fn()
+                box['value'] = fn()
             except Exception as error:
                 box['error'] = error
             finally:
                 done.set()
 
-        threading.Thread(target=work, name='voice-tts', daemon=True).start()
+        threading.Thread(target=work, name='voice-call', daemon=True).start()
         started = time.monotonic()
         while not done.wait(0.02):
-            if utterance.cancelled or self._closed:
+            if cancelled() or self._closed:
                 return 'cancelled', None
             if deadline_s is not None and time.monotonic() - started > deadline_s:
                 return 'timeout', None
-        return ('error', box['error']) if 'error' in box else ('ok', box['wav'])
+        return ('error', box['error']) if 'error' in box else ('ok', box['value'])
 
     def _synthesize(self, utterance: Utterance) -> bytes | None:
         urgent = utterance.kind == 'fault'
@@ -469,12 +493,16 @@ class Narrator:
         for name, engine in (('openai', self.backend), ('fallback', self.fallback_tts)):
             if engine is None:
                 continue
+            cancelled = lambda: utterance.cancelled  # noqa: E731
             if engine is self.backend and urgent:
                 # short timeout, no retry, and a hard deadline so a dead network reaches the fallback quickly
-                result, value = self._call(utterance, lambda e=engine: e.synthesize(text, urgent=True),
-                                           self.config.fault_tts_deadline_s)
+                result, value = self._call(lambda e=engine: e.synthesize(text, urgent=True),
+                                           self.config.fault_tts_deadline_s, cancelled)
+            elif engine is self.backend:
+                result, value = self._call(lambda e=engine: e.synthesize(text), self.config.tts_deadline_s,
+                                           cancelled)
             else:
-                result, value = self._call(utterance, lambda e=engine: e.synthesize(text), None)
+                result, value = self._call(lambda e=engine: e.synthesize(text), None, cancelled)
             if result == 'ok':
                 return value
             if result == 'cancelled':
@@ -489,10 +517,12 @@ class Narrator:
         wav = self._synthesize(utterance)
         with self._lock:
             # TTS can take seconds: check again right before the sentence goes out.
-            why = 'cancelled' if utterance.cancelled else self._stale(utterance, self.clock())
+            if utterance.cancelled or self._closed:
+                why = 'cancelled'
+            else:
+                why = self._stale(utterance, self.clock(), after_tts=True)
             if why:
-                self.stats['dropped'] += 1
-                self.log.debug(f'dropped {utterance.kind} after TTS ({why}): {utterance.text}')
+                self._drop(utterance, why + ' after TTS')
                 return False
         self.log.info(f'say [{utterance.kind}] {utterance.text}')
         if self.on_text:

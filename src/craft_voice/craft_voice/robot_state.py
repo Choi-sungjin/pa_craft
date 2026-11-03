@@ -133,9 +133,11 @@ class StateTracker:
         if label == self.label:
             return None
         previous, self.label, self.label_since = self.label, label, now
-        if label in ACTIVE_PHASES and previous is not None and previous not in ACTIVE_PHASES:
-            # A new step begins (robust to a missed Run.PrepareTask sample). The first label after
-            # startup is not a step start: diagnostics already received describe that same step.
+        if previous is not None and (label == 'Run.PrepareTask' or
+                                     (label in ACTIVE_PHASES and previous not in ACTIVE_PHASES)):
+            # A new step begins: PrepareTask only ever starts one, and entering Compute/Execute from
+            # outside covers a missed PrepareTask sample. The first label after startup is not a step
+            # start: diagnostics already received describe that same step.
             self.step_started_at = now
         self.history.append((now, label))
         self.generation += 1

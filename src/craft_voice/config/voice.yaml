@@ -43,6 +43,8 @@ voice_node:
     max_output_tokens: 400        # includes reasoning tokens; too small gives an empty answer
     request_timeout_s: 15.0       # GPT and normal speech requests (one retry)
     fault_tts_timeout_s: 4.0      # fault sentence speech: no retry (hard stop +1 s), then fallback_tts_command
+    gpt_state_deadline_s: 6.0     # state change: fixed template if GPT has not answered by then
+    tts_deadline_s: 8.0           # other speech: fallback_tts_command if OpenAI has not answered by then
     api_base_url: ""              # "" = api.openai.com; any OpenAI-compatible endpoint otherwise
 
     # ---- speech ---------------------------------------------------------------------------------

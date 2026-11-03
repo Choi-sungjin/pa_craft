@@ -106,6 +106,19 @@ def test_new_step_detected_without_prepare_task_sample():
     assert t.update_planning('Run.Execute', 10.4).step == ''
 
 
+def test_new_step_when_complete_and_await_samples_are_lost():
+    """QA round 3 #2: Execute -> PrepareTask directly (two samples lost) is still a new step."""
+    t = StateTracker(cooldown_s=0.0)
+    t.update_planning('Run.PrepareTask', 1.0)
+    diag(t, 'Run.Execute: ', 2.0, step='approach')
+    t.update_planning('Run.Compute', 2.1)
+    t.update_planning('Run.Execute', 2.2)
+    diag(t, 'Run.Execute: ', 20.0, step='approach')
+    for at, label in ((20.5, 'Run.PrepareTask'), (20.6, 'Run.Compute')):
+        t.update_planning(label, at)
+    assert t.update_planning('Run.Execute', 20.7).step == ''
+
+
 def test_context_text():
     t = StateTracker()
     assert '데이터 없음' in t.context_text(0.0)
