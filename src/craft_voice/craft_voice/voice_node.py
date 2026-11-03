@@ -31,6 +31,7 @@ from std_msgs.msg import Bool, String, UInt64MultiArray
 
 from .audio import CommandPlayer, CommandTts, StreamPlayer, split_command
 from .frames import ShmFrameReader, compressed_to_bgr, image_to_bgr
+from .mission import MISSION_CONTEXT, STEP_NAMES
 from .narrator import Narrator, NarratorConfig
 from .robot_state import StateTracker, parse_list, parse_mapping
 
@@ -53,7 +54,8 @@ PARAMETERS = {
     'control_status_topic': '/control/status',
     'context_topics': '/perception/localization/state',
     'announce_states': 'Ready,Run.Execute,Run.Complete,Run.Stopping,Fault',
-    'step_names': '',
+    'step_names': STEP_NAMES,
+    'mission_context': MISSION_CONTEXT,
     'state_cooldown_s': 10.0,
     'state_mode': 'gpt',
     'fault_reason_wait_s': 1.2,
@@ -106,6 +108,7 @@ class VoiceNode(Node):
                                step_names=parse_mapping(p['step_names']))
         config = NarratorConfig(
             language=p['language'], persona=p['persona'], camera_description=p['camera_description'],
+            mission_context=p['mission_context'],
             max_chars=p['max_chars'], state_mode=p['state_mode'], narrate_period_s=p['narrate_period_s'],
             narrate_idle_period_s=p['narrate_idle_period_s'],
             min_interval_s=p['min_interval_s'], max_gpt_calls_per_min=p['max_gpt_calls_per_min'],

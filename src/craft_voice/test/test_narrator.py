@@ -84,9 +84,10 @@ def frame():
 
 def make(backend=None, player=None, frames=frame, clock=None, start=False, **config):
     texts = []
-    narrator = Narrator(NarratorConfig(**config), StateTracker(), backend=backend, player=player or Player(),
-                        frame_provider=frames, on_text=lambda kind, text: texts.append((kind, text)),
-                        clock=clock or Clock(), start=start)
+    # step_name_wait_s=0: these tests are about queueing; waiting for the 1 Hz step name is tested on its own.
+    narrator = Narrator(NarratorConfig(**config), StateTracker(step_name_wait_s=0.0), backend=backend,
+                        player=player or Player(), frame_provider=frames,
+                        on_text=lambda kind, text: texts.append((kind, text)), clock=clock or Clock(), start=start)
     return narrator, texts
 
 
@@ -1017,3 +1018,27 @@ def test_fault_cuts_a_streaming_sentence_and_is_not_streamed():
         assert backend.urgent and backend.urgent[-1] is True
     finally:
         narrator.close()
+
+
+def test_step_start_announced_with_its_name_after_diagnostics():
+    """Narrator level: the Execute announcement waits for the 1 Hz step name (tick delivers it)."""
+    from craft_voice.mission import STEP_NAMES
+    from craft_voice.robot_state import parse_mapping
+    clock = Clock()
+    texts = []
+    narrator = Narrator(NarratorConfig(state_mode='template'), StateTracker(step_names=parse_mapping(STEP_NAMES)),
+                        player=Player(), on_text=lambda kind, text: texts.append((kind, text)), clock=clock,
+                        start=False)
+    narrator.planning_state('Ready')
+    run(narrator)
+    narrator.planning_state('Run.PrepareTask')
+    clock.now += 0.3
+    narrator.planning_state('Run.Execute')
+    narrator.tick()
+    run(narrator)
+    assert texts[-1][1].startswith('준비됐어요')                  # nothing yet: waiting for the name
+    clock.now += 0.5
+    narrator.diagnostics('planning/state_machine', 0, 'Run.Execute: ', {'step': 'read_barcode'})
+    narrator.tick()
+    run(narrator)
+    assert texts[-1] == ('state', '바코드 읽기, 시작할게요.')

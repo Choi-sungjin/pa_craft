@@ -74,6 +74,28 @@ ros2 topic echo /voice/utterance                                              # 
 
 `mute` 중에도 Fault는 말한다. `stop`은 대기 중인 말을 지우고 재생을 끊는다.
 
+## 이번 미션: 주사위 기억 로봇 (`craft_voice/mission.py`)
+
+경기장 4464 × 6364 mm 미로. 바코드(P2-01~04)로 정렬 방향을 정하고, 신호등 12번 점멸(빨강·노랑·초록)을 기억하고,
+시작 박스 6곳의 퍽 12개를 12칸 캐러셀에 실어 L1·L2·L3(AprilTag 12·13·14)에 주사위 눈 모양으로 놓은 뒤, 다시 확인하고
+출발 구역으로 돌아와 3초 정지한다.
+
+- `mission_context`: 이 설명을 GPT에 **배경 지식으로만** 준다(지금 하는 일·결과는 여전히 토픽과 센서만 근거).
+- `step_names`: 제안한 단계 ID를 말로 바꾼다. `*`는 ID의 그 부분을 그대로 넣는다.
+
+  | step id (제안) | 말 |
+  | --- | --- |
+  | `read_barcode`, `observe_signal`, `count_sort` | 바코드 읽기, 신호등 관측, 횟수 계산과 정렬 |
+  | `load_S1` ~ `load_S6` | 시작 박스 1 퍽 싣기 … |
+  | `allocate` | 장소별 퍽 배정 |
+  | `place_L1` ~ `place_L3`, `verify_L1` ~ `verify_L3` | L1 주사위 눈 놓기, L1 다시 확인 … |
+  | `return_home` | 출발 구역으로 복귀 |
+
+  **planning의 `missions.yaml`에 이 미션을 넣을 때 같은 ID를 쓰거나, 여기 `step_names`를 그 ID에 맞춰 고친다.**
+- 단계 이름은 diagnostics(1 Hz)로 오므로, "실행 시작" 안내는 이름이 올 때까지 최대 `step_name_wait_s`(1.2 s) 기다렸다가
+  "신호등 관측, 시작할게요."처럼 말한다(그 사이 상태가 바뀌면 그 안내는 버림).
+- 데모 기본 시나리오가 이 미션 순서다: `python -m craft_voice.demo` (`--scenario default`면 이전 시나리오).
+
 ## 언제 말하나
 
 | 계기 | 기본값 | 파라미터 |

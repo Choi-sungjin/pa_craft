@@ -29,6 +29,7 @@ import numpy as np
 from .audio import CommandPlayer, CommandTts, StreamPlayer, WinsoundPlayer, split_command
 from .narrator import Narrator, NarratorConfig
 from .robot_state import StateTracker, parse_list, parse_mapping
+from .mission import DICE_SCENARIO, MISSION_CONTEXT, STEP_NAMES
 from .sim import DEFAULT_SCENARIO, SimStateMachine, parse_item, parse_scenario
 
 log = logging.getLogger('craft_voice')
@@ -153,12 +154,14 @@ def build(args) -> tuple[Narrator, SimStateMachine, Camera]:
     config = NarratorConfig(state_mode='template' if args.template else 'gpt', narrate_period_s=args.narrate_period,
                             narrate_idle_period_s=args.narrate_idle_period,
                             persona=args.persona, use_image=args.camera.lower() not in ('', 'none'),
+                            mission_context='' if args.mission_context == 'none' else args.mission_context,
                             camera_description='노트북 카메라 (로봇 대신 시험 중)')
     narrator = Narrator(config, tracker, backend=backend, player=default_player(args.player),
                         stream_player=default_stream_player(args) if backend else None,
                         frame_provider=camera.frame, fallback_tts=CommandTts(fallback) if fallback else None,
                         on_text=lambda kind, text: print(f'\n>> [{kind}] {text}', flush=True))
-    return narrator, SimStateMachine(parse_scenario(args.scenario), loop=not args.once), camera
+    scenario = {'dice': DICE_SCENARIO, 'default': DEFAULT_SCENARIO}.get(args.scenario, args.scenario)
+    return narrator, SimStateMachine(parse_scenario(scenario), loop=not args.once), camera
 
 
 def handle(line: str, narrator: Narrator, sim: SimStateMachine) -> bool:
@@ -236,7 +239,9 @@ def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog='python -m craft_voice.demo', description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--camera', default='0', help='webcam index, image/video path, or none (default 0)')
-    p.add_argument('--scenario', default=DEFAULT_SCENARIO, help='Label[@step][!reason]:seconds, ...')
+    p.add_argument('--scenario', default='dice',
+                   help="'dice' (the competition mission), 'default', or Label[@step][!reason]:seconds, ...")
+    p.add_argument('--mission-context', default=MISSION_CONTEXT, help="background for GPT, 'none' for no mission")
     p.add_argument('--once', action='store_true', help='play the scenario once instead of looping')
     p.add_argument('--template', action='store_true', help='state changes as fixed sentences (no GPT)')
     p.add_argument('--narrate-period', type=float, default=20.0,
@@ -244,7 +249,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument('--narrate-idle-period', type=float, default=0.0, help='the same while idle/ready/stopped')
     p.add_argument('--announce', default='Ready,Run.Execute,Run.Complete,Run.Stopping,Fault')
     p.add_argument('--cooldown', type=float, default=10.0)
-    p.add_argument('--step-names', default='approach:접근,grasp_pose:잡기 자세')
+    p.add_argument('--step-names', default=STEP_NAMES + ',approach:접근,grasp_pose:잡기 자세')
     p.add_argument('--persona', default='')
     p.add_argument('--model', default='gpt-5.4-mini,gpt-6-luna,gpt-5.5',
                    help='fastest first, comma separated fallbacks')
