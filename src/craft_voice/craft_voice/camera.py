@@ -4,7 +4,8 @@ planning_master acts on perception inputs (YOLO detections, puck and knob observ
 messages carries the exact camera stamp of the frame it was computed from: perception_master copies
 frame_meta[4] into header.stamp. So the picture behind what the state machine is acting on can be found
 by stamp. craft_sensors reuses each of its 4 shared-memory slots after ~0.13 s, so the matching frame is
-copied as soon as the input arrives (at most every min_interval_s) and kept for max_age_s.
+copied as soon as the input arrives (at most every min_interval_s) and kept for max_age_s (at most
+KEEP_MAX copies).
 
 pick(at) returns the input frame the state machine had at time `at` (a state change), the newest input
 frame when `at` is now, or the newest camera frame when there is no input frame: no perception running,
@@ -25,6 +26,8 @@ from .frames import compressed_to_bgr, image_to_bgr
 
 SLACK_S = 0.1     # an input that arrives just after the state change (another topic's callback) still counts
 RECENT = 16       # camera frames remembered by stamp (~0.5 s at 30 fps; the shm keeps only 4 anyway)
+KEEP_MAX = 64     # input copies kept at most (memory bound if min_interval_s is set very small)
+COPY_TRIES = 3    # craft_sensors holds an exclusive lock while it writes a slot: retry a busy copy briefly
 
 
 @dataclass(frozen=True)
@@ -47,7 +50,7 @@ class CameraFrames:
     """Thread safe: on_* run in ROS callbacks, pick() in the narrator's think thread."""
 
     def __init__(self, reader=None, mode: str = 'input', max_age_s: float = 2.0, min_interval_s: float = 0.2,
-                 keep: int = 12, clock=time.monotonic):
+                 clock=time.monotonic):
         if mode not in ('input', 'latest'):
             raise ValueError("image_source must be 'input' or 'latest'")
         self.reader = reader  # ShmFrameReader for d435/c310, None for image topics
@@ -60,7 +63,7 @@ class CameraFrames:
         self._read_lock = threading.Lock()   # ShmFrameReader keeps one fd/mmap: one copy at a time
         self._latest = None                  # (received, frame_meta or image message, stamp_ns)
         self._recent: OrderedDict[int, object] = OrderedDict()  # stamp_ns -> frame_meta / image message
-        self._inputs: deque[Picture] = deque(maxlen=keep)
+        self._inputs: deque[Picture] = deque(maxlen=KEEP_MAX)  # pruned by age, so max_age_s decides
         self._seen: deque[int] = deque(maxlen=64)               # input stamps already handled
         self._captured_at = -math.inf
 
@@ -95,16 +98,23 @@ class CameraFrames:
                 return False
             if now - self._captured_at < self.min_interval_s:
                 return False
-            self._seen.append(stamp)
             item = self._recent.get(stamp)
             if item is None:
+                self._seen.append(stamp)
                 self.stats['input_unmatched'] += 1
                 return False
-        bgr = self._to_bgr(item)  # outside the lock: shm copy or image conversion
+        bgr = self._to_bgr(item, tries=COPY_TRIES)  # outside the lock: shm copy or image conversion
         with self._lock:
             if bgr is None:
-                self.stats['input_lost'] += 1  # slot already overwritten / image unreadable
+                # Slot already overwritten (or still busy, or the image is unreadable). Not marked as seen:
+                # the same frame's input on the other topic may still get it.
+                self.stats['input_lost'] += 1
                 return False
+            if stamp in self._seen:
+                return False
+            self._seen.append(stamp)
+            while self._inputs and now - self._inputs[0].received > self.max_age_s:
+                self._inputs.popleft()
             self._inputs.append(Picture(bgr, 'input', now, stamp, topic))
             self._captured_at = now
             self.stats['input_frames'] += 1
@@ -152,14 +162,20 @@ class CameraFrames:
             with self._read_lock:
                 self.reader.close()
 
-    def _to_bgr(self, item):
+    def _to_bgr(self, item, tries: int = 1):
+        """BGR of a frame_meta or image message; None if it is gone or unreadable (never raises)."""
         try:
             if self.reader is not None:
-                with self._read_lock:
-                    frame = self.reader.snapshot(item)
-                return None if frame is None else frame.bgr
+                for attempt in range(tries):
+                    if attempt:
+                        time.sleep(0.003)
+                    with self._read_lock:
+                        frame = self.reader.snapshot(item)
+                    if frame is not None:
+                        return frame.bgr
+                return None
             if hasattr(item, 'format'):
                 return compressed_to_bgr(item.data)
             return image_to_bgr(item.encoding, item.height, item.width, item.step, item.data)
-        except (ValueError, OSError):
+        except Exception:  # cv2.error is not a ValueError; a bad image must not reach a ROS callback
             return None

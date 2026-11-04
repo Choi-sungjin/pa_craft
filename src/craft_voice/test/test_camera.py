@@ -28,14 +28,14 @@ def stamp(seq):
 
 
 def put(path, seq):
-    """Like craft_sensors: frame `seq` (all pixels = seq) goes into slot seq % 4; returns its frame_meta."""
+    """Like craft_sensors: frame `seq` (all pixels = seq % 256) goes into slot seq % 4; returns its frame_meta."""
     slot = seq % 4
     if not os.path.exists(path):
         with open(path, 'wb') as out:
             out.truncate(SLOT * 4)
     with open(path, 'r+b') as out:
         out.seek(slot * SLOT)
-        out.write(np.full((H, W, 3), seq, np.uint8).tobytes())
+        out.write(np.full((H, W, 3), seq % 256, np.uint8).tobytes())
         out.write(np.zeros((H, W), np.uint16).tobytes())
         out.write(seq.to_bytes(8, sys.byteorder))
     return [slot * SLOT, W, H, seq, stamp(seq), 1_000_000]
@@ -152,20 +152,25 @@ def test_stamp_ns():
 def test_callbacks_and_pick_from_different_threads(tmp_path):
     frames = CameraFrames(ShmFrameReader('/cam', depth=True, shm_dir=str(tmp_path)), min_interval_s=0.0)
     path = str(tmp_path) + '/cam'
-    stop, errors = threading.Event(), []
+    stop, errors, produced = threading.Event(), [], []
 
     def produce():
         seq = 1
-        while not stop.is_set():
-            frames.on_meta(put(path, seq))
-            frames.on_input(stamp(seq), '/objects')
-            seq += 1
+        try:
+            while not stop.is_set():
+                frames.on_meta(put(path, seq))
+                frames.on_input(stamp(seq), '/objects')
+                seq += 1
+        except Exception as error:  # pragma: no cover - reported below
+            errors.append(error)
+        produced.append(seq)
 
     def consume():
         try:
             while not stop.is_set():
                 picture = frames.pick(at=time.monotonic() - 0.01)
                 assert picture is None or picture.bgr.shape == (H, W, 3)
+                time.sleep(0)  # let the producer run too
         except Exception as error:  # pragma: no cover - reported below
             errors.append(error)
     threads = [threading.Thread(target=produce), threading.Thread(target=consume)]
@@ -177,6 +182,7 @@ def test_callbacks_and_pick_from_different_threads(tmp_path):
         thread.join(2.0)
     frames.close()
     assert errors == [] and frames.stats['input_frames'] > 0
+    assert produced and produced[0] > 256  # the producer ran past where uint8 pixel values wrap
 
 
 def test_same_frame_from_two_topics_is_copied_once(tmp_path):
@@ -186,3 +192,33 @@ def test_same_frame_from_two_topics_is_copied_once(tmp_path):
     clock.t += 0.5
     assert not frames.on_input(stamp(1), '/pucks')           # puck observations of the same frame
     assert frames.stats['input_frames'] == 1 and frames.pick().topic == '/objects'
+
+
+def test_a_busy_slot_is_not_lost_for_the_other_topic(tmp_path):
+    import fcntl
+    frames, clock, path = setup(tmp_path)
+    frames.on_meta(put(path, 1))
+    with open(path, 'rb') as writer:
+        fcntl.flock(writer, fcntl.LOCK_EX)                   # craft_sensors is writing another slot
+        assert not frames.on_input(stamp(1), '/objects')
+        fcntl.flock(writer, fcntl.LOCK_UN)
+    assert frames.on_input(stamp(1), '/pucks')               # same frame, other topic: still copied
+    assert frames.pick().topic == '/pucks' and frames.stats['input_lost'] == 1
+
+
+def test_kept_for_max_age_whatever_the_interval():
+    clock = Clock(0.0)
+    frames = CameraFrames(None, min_interval_s=0.09, max_age_s=2.0, clock=clock)
+    for i in range(30):                                      # one input frame every 0.1 s for 3 s
+        clock.t = i * 0.1
+        frames.on_image(SimpleNamespace(encoding='bgr8', height=H, width=W, step=W * 3, data=bytes([i]) * (H * W * 3)),
+                        i + 1)
+        assert frames.on_input(i + 1, '/objects')
+    clock.t = 3.0
+    assert np.all(frames.pick(at=1.15).bgr == 12)            # 1.85 s old, still the frame of that moment
+
+
+def test_unreadable_image_never_raises():
+    frames = CameraFrames(None)
+    frames.on_image(SimpleNamespace(format='jpeg', data=b''), stamp(1))   # cv2.error, not ValueError
+    assert not frames.on_input(stamp(1), '/objects') and frames.pick() is None
