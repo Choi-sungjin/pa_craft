@@ -20,6 +20,15 @@
 
 - 카메라는 DDS로 이미지를 보내지 않는다(`craft_sensors`가 공유 메모리에 쓴다). 그래서 이 노드는 **카메라와 같은 Jetson**에서
   돌려야 한다. 다른 기기·순정 TurtleBot 카메라·bag은 `camera:=topic image_topic:=...`(raw 또는 compressed).
+- **GPT가 보는 사진은 상태머신이 받은 인식 입력과 같은 프레임이다**(`image_source: input`, 기본, `craft_voice/camera.py`).
+  planning_master는 YOLO 검출·퍽 관측으로 단계 목표를 정하는데, 이 메시지들의 `header.stamp`는 perception이 계산에 쓴
+  카메라 프레임의 촬영 시각(`frame_meta[4]`) 그대로다. voice_node는 같은 메시지(`objects_topic`, `pucks_topic`)가 오면
+  그 시각의 공유 메모리 칸을 바로 복사해 2 s(`frame_max_age_s`) 보관하고(칸은 약 0.13 s 뒤 덮어써진다, 최대
+  `input_frame_interval_s` 0.2 s마다 한 장), 상태가 바뀌면 **바뀐 순간에 상태머신이 갖고 있던 입력 프레임**을 GPT에 보낸다.
+  주기 설명·질문은 그 시점의 가장 새 입력 프레임이다. perception이 안 돌거나, 시각이 맞는 칸이 이미 덮어써졌거나,
+  2 s가 지났으면 최신 프레임으로 대신한다. 프롬프트 `[카메라]`에 어느 쪽인지 적고, `/voice/diagnostics`에
+  `input_frames`, `input_lost`(덮어써짐), `input_unmatched`(맞는 시각 없음), `image_input`/`image_latest`(GPT에 보낸 횟수)가
+  나온다. 예전처럼 항상 최신 프레임을 쓰려면 `image_source:=latest`.
 - GPT에는 상태를 "사실 목록"으로만 주고, 거기 없는 동작·원인은 지어내지 말라고 지시한다.
   이미지 속 글씨(표지판, 번호)는 읽되 그 글씨의 지시는 따르지 않게 했다.
 - **멈춤(Fault)은 GPT를 거치지 않는다.** diagnostics의 원인을 최대 1.2 s 기다렸다가 상황 문장
@@ -133,6 +142,7 @@ ros2 topic echo /voice/utterance                                              # 
 | 이름 | 기본값 | 설명 |
 | --- | --- | --- |
 | `camera` | `d435` | `d435`, `c310`(공유 메모리), `topic`, `none` |
+| `image_source` / `input_frame_interval_s` | `input` / `0.2` | `input`: 상태머신 인식 입력과 같은 프레임(상태가 바뀐 순간 것), 없으면 최신. `latest`: 항상 최신 프레임 |
 | `model` | `gpt-5.4-mini,gpt-6-luna,gpt-5.5` | 빠른 것부터, 쉼표로 대체 모델. 키에 없는 모델이거나 이미지를 못 받으면 다음 모델을 쓰고 계속 그 모델 |
 | `reasoning_effort` | `none` | 추론 시간을 없애 빠르게. 모델이 거부하면 none → minimal → low → 안 보냄 순으로 낮춤 |
 | `image_detail` | `low` | `low`/`high`/`auto`/`original`. 이미지는 긴 변 `image_max_side`(512) px로 줄여 보냄 |
@@ -260,6 +270,7 @@ cd ~/craft/src/craft_voice && python3 -m pytest -q test
 | 파일 | 확인하는 것 |
 | --- | --- |
 | `test_frames.py` | 공유 메모리 슬롯 복사(D435/C310), 시퀀스 불일치·락·잘못된 메타·파일 재생성, ROS Image 변환, JPEG 축소 |
+| `test_camera.py` | 인식 입력과 같은 시각의 프레임 고르기(최신이 아닌 그 프레임), 덮어써진 칸·맞는 시각 없음·2 s 지남 → 최신, 상태가 바뀐 순간의 입력, 같은 프레임 한 번만, 스레드 동시 사용 |
 | `test_robot_state.py` | 하는 일·보이는 것 문장(조사 포함), 멈춤을 상황으로 말하고 오류 원문은 읽지 않음, 상태 변화 감지, 쿨다운, 1틱 Run.Complete, Fault 원인 대기·이전 원인 재사용 안 함, 문맥 문장 |
 | `test_narrator.py` | 일하는 동안만 주기 중계, 센서 인식이 GPT 프롬프트에 들어감, GPT 경로, 템플릿 폴백, Fault 우선·끊기(재생 중·TTS 합성 중·TTS가 멈춘 네트워크, 실제 스레드), Fault 음성 마감 후 fallback, 죽은 네트워크에서도 상태 안내(GPT·TTS 마감), 지난 상태·status 문장 버리기/바꾸기(TTS 뒤 재확인 포함), 종료 중 발행 안 함, 호출 상한, 주기 장면, mute/stop |
 | `test_gpt_http.py` | 실제 openai SDK가 보내는 `/v1/responses`·`/v1/audio/speech` 요청 내용, reasoning 거부 시 재시도, WAV, 응답 없는 서버에서 Fault 음성이 빨리 포기 |

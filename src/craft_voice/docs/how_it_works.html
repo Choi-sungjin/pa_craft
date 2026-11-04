@@ -208,7 +208,8 @@ td:first-child{white-space:nowrap}
       <table>
         <thead><tr><th>장면</th><th>파일</th><th>하는 일</th></tr></thead>
         <tbody>
-          <tr><td>눈</td><td><code>craft_voice/frames.py</code></td><td>공유메모리 칸에서 최근 사진 복사, JPEG로 줄이기</td></tr>
+          <tr><td>눈</td><td><code>craft_voice/camera.py</code></td><td>상태머신 인식 입력과 같은 촬영 시각의 프레임 골라 보관, 없으면 최신</td></tr>
+          <tr><td>눈</td><td><code>craft_voice/frames.py</code></td><td>공유메모리 칸 복사(시퀀스 확인), JPEG로 줄이기</td></tr>
           <tr><td>상태 · 센서</td><td><code>craft_voice/robot_state.py</code></td><td>StateTracker: 상태, 단계 이름, 센서 사실, 고장 상황 문장</td></tr>
           <tr><td>생각 · 언제 · 고장</td><td><code>craft_voice/narrator.py</code></td><td>생각 스레드와 말하기 스레드, 프롬프트, 우선순위, 낡은 말 버리기</td></tr>
           <tr><td>생각 · 목소리</td><td><code>craft_voice/gpt.py</code></td><td>OpenAI Responses·음성 호출, 모델 순서, 스트리밍</td></tr>
@@ -352,8 +353,8 @@ var scenes=[
  }},
 
 {word:'눈',tone:'eye',dur:9,rest:6.9,
- body:'D435 사진은 ROS 토픽이 아니라 공유메모리 칸 4개에 돌아가며 써져요. voice_node는 가장 최근 칸만 잠깐 잠그고 복사한 뒤, 긴 변 512px JPEG로 줄여서 GPT에 붙여요.',
- facts:['<code>/dev/shm/craft_vision</code>, 칸 4개를 돌아가며 씀','<code>/vision/d435/frame_meta</code>: 몇 번 칸, 몇 번째 사진','640×360 → 512×288 JPEG, 품질 80, <code>detail low</code>','찍은 지 2초 넘은 사진은 안 보냄 (<code>frame_max_age_s</code>)'],
+ body:'D435 사진은 공유메모리 칸 4개에 돌아가며 써져요. 상태머신이 쓰는 YOLO·퍽 인식 결과에는 그 결과를 뽑은 사진의 촬영 시각이 붙어 있어서, voice_node는 같은 시각의 칸을 덮어써지기 전에 바로 복사해 둬요. 상태가 바뀌면 그 순간의 입력 사진을 512px JPEG로 줄여 GPT에 붙여요.',
+ facts:['<code>/dev/shm/craft_vision</code>, 칸 4개를 돌아가며 씀 (약 0.13초면 덮어씀)','인식 입력의 <code>header.stamp</code> = 그 사진의 <code>frame_meta</code> 촬영 시각','640×360 → 512×288 JPEG, 품질 80, <code>detail low</code>','맞는 칸이 없거나 2초 지나면 최신 사진 (<code>image_source</code>)'],
  build:function(g){
   var cam=E('g',{},g);R(cam,16,50,124,40,'f-ink',10);
   [[38,10],[62,5],[90,10],[116,7]].forEach(function(c){E('circle',{cx:c[0],cy:70,r:c[1],'class':'f-card'},cam);if(c[1]>6)E('circle',{cx:c[0],cy:70,r:c[1]-5,'class':'f-ink'},cam);});
@@ -362,26 +363,27 @@ var scenes=[
   var slots=[0,1,2,3].map(function(i){var x=168+i*116;var c=card(g,x,46,104,84,'eye',10);var art=frameArt(c.g,x+6,52,92,52);var sq=X(c.g,x+52,122,'','t19 mono muted',{'text-anchor':'middle'});return{x:x,c:c,art:art,sq:sq,seq:null};});
   var ptr=E('path',{d:'M-9 12 L0 0 L9 12 Z','class':'f-eye'},g);
   var meta=X(g,168,176,'','t20 mono');
-  X(g,16,214,'voice_node가 가져가기','t22 b');
+  X(g,16,214,'상태머신 입력과 같은 사진 가져가기','t22 b');
+  var inp=X(g,624,176,'입력 #1288','t20 b tone-eye',{'text-anchor':'end',opacity:0});
   var big=frameArt(g,16,228,288,162);
   var fb=R(g,16,228,288,162,'frame-edge',6);
   var flab=X(g,16,416,'','t20 mono');
   var lock=E('g',{opacity:0},g);E('circle',{cx:0,cy:0,r:14,'class':'f-card'},lock);R(lock,-7,-3,14,11,'f-ink',2);E('path',{d:'M-4 -3 v-4 a4 4 0 0 1 8 0 v4','class':'st-ink'},lock);
-  var items=['최근 칸만 잠그고 복사','긴 변 512px로 줄이기','JPEG 품질 80으로 압축','찍은 지 2초 안이면 보냄'].map(function(s,i){var y=262+i*44;var gi=E('g',{opacity:0},g);E('circle',{cx:350,cy:y-7,r:11,'class':'f-eye'},gi);E('path',{d:'M344 '+(y-7)+' l4 4 l7 -8','class':'st-on'},gi);X(gi,370,y,s,'t20');return gi;});
-  var sub=X(g,370,424,'오래된 사진은 안 붙여요','t19 muted',{opacity:0});
+  var items=['인식 입력과 같은 칸 복사','긴 변 512px로 줄이기','JPEG 품질 80으로 압축','찍은 지 2초 안이면 보냄'].map(function(s,i){var y=262+i*44;var gi=E('g',{opacity:0},g);E('circle',{cx:350,cy:y-7,r:11,'class':'f-eye'},gi);E('path',{d:'M344 '+(y-7)+' l4 4 l7 -8','class':'st-on'},gi);X(gi,370,y,s,'t20');return gi;});
+  var sub=X(g,370,424,'없으면 최신 사진으로 대신','t19 muted',{opacity:0});
   var out=X(g,624,462,'→ GPT 프롬프트 [카메라] 칸','t20 b tone-think',{'text-anchor':'end',opacity:0});
   return function(t){
    var k=Math.floor(Math.max(0,t)/0.4);
    slots.forEach(function(s,i){var kk=k-(((k-i)%4)+4)%4;var seq=1281+kk;if(s.seq!==seq){s.seq=seq;tx(s.sq,'#'+seq);tr(s.art.g,-((seq%5)*3),0);}op(s.c.hl,i===k%4?1:0);});
    tr(ptr,slots[k%4].x+52,134);
    tx(meta,'frame_meta → 칸 '+(k%4)+' · #'+(1281+k));
-   op(lock,(t>=3.2&&t<4.5)?1:0);tr(lock,slots[0].x+92,56);
+   op(lock,(t>=3.2&&t<4.2)?1:0);tr(lock,slots[3].x+92,56);op(inp,seg(t,2.8,3.2));
    var pF=seg(t,3.6,4.6),pS=seg(t,4.8,5.8),pO=seg(t,7.0,8.0);
    var vis=t>=3.6&&pO<1;
-   var x=lerp(174,16,pF),y=lerp(52,228,pF),w=lerp(92,288,pF),h=lerp(52,162,pF);
+   var x=lerp(slots[3].x+6,16,pF),y=lerp(52,228,pF),w=lerp(92,288,pF),h=lerp(52,162,pF);
    w=lerp(w,230,pS);h=lerp(h,130,pS);x=lerp(x,660,pO);
    [big.svg,fb].forEach(function(e){at(e,'x',x.toFixed(1));at(e,'y',y.toFixed(1));at(e,'width',w.toFixed(1));at(e,'height',h.toFixed(1));});
-   if(big.seq!==1289){big.seq=1289;tr(big.g,-((1289%5)*3),0);}
+   if(big.seq!==1288){big.seq=1288;tr(big.g,-((1288%5)*3),0);}
    op(big.svg,vis?1-pO:0);op(fb,vis?1-pO:0);
    tx(flab,t<5.3?'원본 640×360':'512×288 JPEG');at(flab,'y',(y+h+26).toFixed(1));op(flab,(vis&&pF>0.6)?1-pO:0);
    [3.4,4.9,5.6,6.3].forEach(function(a,i){op(items[i],seg(t,a,a+0.4));});

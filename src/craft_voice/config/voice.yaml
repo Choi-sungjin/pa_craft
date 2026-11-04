@@ -9,6 +9,12 @@ voice_node:
     camera_description: 로봇 앞쪽 D435 카메라   # told to GPT so it knows where the picture comes from
     use_image: true
     frame_max_age_s: 2.0          # older frames are not sent
+    # input: GPT sees the frame the planning state machine's vision input came from (YOLO detections and
+    #        puck observations carry that frame's camera stamp); at a state change, the one it had then.
+    #        Falls back to the newest frame when perception is not running or the stamp matches nothing.
+    # latest: always the newest camera frame.
+    image_source: input
+    input_frame_interval_s: 0.2   # copy an input frame at most this often (the shm slot is reused in ~0.13 s)
     image_max_side: 512           # longer side after resizing, before JPEG
     jpeg_quality: 80
 

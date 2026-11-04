@@ -1093,3 +1093,50 @@ def test_demo_streams_only_through_the_chosen_player():
     aplay = CommandPlayer(['aplay', '-q', '-D', 'plughw:1,0', '{file}'])
     assert default_stream_player(args, aplay).command[:4] == ['aplay', '-q', '-D', 'plughw:1,0']
     assert default_stream_player(args, None) is None
+
+
+# ---- which picture GPT sees (camera.CameraFrames supplies Picture objects) ----------------------------
+def test_state_change_sends_the_state_machine_input_frame_of_that_moment():
+    import cv2
+    from craft_voice.camera import Picture
+    asked = []
+
+    def frames(at=None):
+        asked.append(at)
+        return Picture(np.full((360, 640, 3), 200, np.uint8), 'input', clock.now - 0.4, 123, '/pucks')
+    clock = Clock()
+    backend = Backend('퍽을 싣기 시작할게요.')
+    narrator, texts = make(backend, frames=frames, clock=clock)
+    narrator.planning_state('Idle')
+    narrator.planning_state('Ready')          # the change happens at 100.0
+    clock.now = 101.0                         # GPT gets to it a second later
+    run(narrator)
+    assert asked == [100.0]                   # the picture of the moment of the change, not of "now"
+    _, prompt, jpeg = backend.calls[0]
+    assert cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR).mean() == pytest.approx(200, abs=2)
+    assert '상태머신이 받은 인식 입력과 같은 프레임, 0.4초 전 사진' in prompt
+    assert narrator.stats['image_input'] == 1 and narrator.stats['image_latest'] == 0
+
+
+def test_scene_uses_its_own_time_and_reports_a_newest_frame_fallback():
+    from craft_voice.camera import Picture
+    asked = []
+    clock = Clock()
+
+    def frames(at=None):
+        asked.append(at)
+        return Picture(np.zeros((36, 64, 3), np.uint8), 'latest', clock.now, 0)
+    backend = Backend()
+    narrator, _ = make(backend, frames=frames, clock=clock)
+    narrator.command('describe')
+    run(narrator)
+    assert asked == [100.0] and '최신 카메라 사진, 0.0초 전' in backend.calls[0][1]
+    assert narrator.stats['image_latest'] == 1
+
+
+def test_provider_without_parameters_still_works():
+    backend = Backend()
+    narrator, _ = make(backend, frames=frame)   # laptop demo / bench: newest frame, no time
+    narrator.command('describe')
+    run(narrator)
+    assert backend.calls[0][2][:2] == b'\xff\xd8' and '이미지 첨부됨 (로봇 앞쪽 카메라)\n' in backend.calls[0][1] + '\n'

@@ -14,6 +14,7 @@ call never delays a fault announcement.
 
 from __future__ import annotations
 
+import inspect
 import logging
 import math
 import queue
@@ -116,14 +117,22 @@ class Narrator:
         # fallback TTS still use `player` with a whole WAV.
         self.stream_player = stream_player
         self._stream_failures = 0  # streaming is switched off after 2 player failures in a row
+        # frame_provider(at) -> camera.Picture | BGR | None: `at` is when the job's situation happened (a state
+        # change), so the picture is the frame the state machine was acting on then. A provider without
+        # parameters (laptop demo, bench) just returns its newest frame.
         self.frame_provider = frame_provider
+        try:
+            self._frame_takes_time = frame_provider is not None and bool(inspect.signature(frame_provider).parameters)
+        except (TypeError, ValueError):
+            self._frame_takes_time = False
         self.fallback_tts = fallback_tts
         self.on_text = on_text
         self.on_speaking = on_speaking
         self.log = logger or logging.getLogger('craft_voice')
         self.clock = clock
         self.muted = False
-        self.stats = {'gpt_calls': 0, 'gpt_errors': 0, 'tts_errors': 0, 'spoken': 0, 'dropped': 0}
+        self.stats = {'gpt_calls': 0, 'gpt_errors': 0, 'tts_errors': 0, 'spoken': 0, 'dropped': 0,
+                      'image_input': 0, 'image_latest': 0}
         self._lock = threading.RLock()
         self._think_cv = threading.Condition(self._lock)
         self._speak_cv = threading.Condition(self._lock)
@@ -409,8 +418,8 @@ class Narrator:
         if not self._take_budget():
             self.log.warning(f'GPT budget ({self.config.max_gpt_calls_per_min}/min) used up, {job.kind} skipped')
             return self._fallback(job, '요청이 많아서 잠시 뒤에 다시 물어봐 주세요.'), False
-        jpeg = self._grab_jpeg() if self.config.use_image else None
-        instructions, prompt = self._prompt(job, jpeg is not None)
+        jpeg, note = self._grab_jpeg(job) if self.config.use_image else (None, '')
+        instructions, prompt = self._prompt(job, jpeg is not None, note)
         started = time.monotonic()
         deadline = {'state': self.config.gpt_state_deadline_s, 'scene': self.config.gpt_narrate_deadline_s,
                     'status': self.config.gpt_narrate_deadline_s, 'ask': self.config.gpt_ask_deadline_s}[job.kind]
@@ -439,19 +448,34 @@ class Narrator:
             self.stats['gpt_calls'] += 1
             return True
 
-    def _grab_jpeg(self) -> bytes | None:
+    def _grab_jpeg(self, job: Job | None = None) -> tuple[bytes | None, str]:
+        """(JPEG, note for the prompt). For a state change the picture is taken at the moment of the change."""
         if self.frame_provider is None:
-            return None
+            return None, ''
+        at = None
+        if job is not None:
+            at = job.event.stamp if job.event is not None else job.created
         try:
-            bgr = self.frame_provider()
-            if bgr is None:
-                return None
-            return encode_jpeg(bgr, self.config.image_max_side, self.config.jpeg_quality)
+            picture = self.frame_provider(at) if self._frame_takes_time else self.frame_provider()
+            if picture is None:
+                return None, ''
+            bgr, note = picture, ''
+            source = getattr(picture, 'source', '')
+            if source:  # camera.Picture
+                bgr = picture.bgr
+                age = max(0.0, self.clock() - picture.received)
+                note = (f'상태머신이 받은 인식 입력과 같은 프레임, {age:.1f}초 전 사진' if source == 'input' else
+                        f'최신 카메라 사진, {age:.1f}초 전')
+            jpeg = encode_jpeg(bgr, self.config.image_max_side, self.config.jpeg_quality)
+            if source:
+                with self._lock:
+                    self.stats['image_input' if source == 'input' else 'image_latest'] += 1
+            return jpeg, note
         except Exception as error:
             self.log.warning(f'camera frame unavailable: {type(error).__name__}: {error}')
-            return None
+            return None, ''
 
-    def _prompt(self, job: Job, has_image: bool) -> tuple[str, str]:
+    def _prompt(self, job: Job, has_image: bool, image_note: str = '') -> tuple[str, str]:
         cfg = self.config
         language = LANGUAGE.get(cfg.language, cfg.language)
         instructions = (
@@ -487,7 +511,8 @@ class Narrator:
             now = self.clock()
             context = self.tracker.context_text(now)
             sensed = self.tracker.perception_text(now) or '- (센서 인식 정보 없음)'
-        camera = f'이미지 첨부됨 ({cfg.camera_description})' if has_image else '이미지 없음'
+        where = cfg.camera_description + (f', {image_note}' if image_note else '')
+        camera = f'이미지 첨부됨 ({where})' if has_image else '이미지 없음'
         return instructions, (f'[요청]\n{request}\n\n[로봇 상태]\n{context}\n\n[센서가 확인한 것]\n{sensed}'
                               f'\n\n[카메라]\n{camera}')
 
