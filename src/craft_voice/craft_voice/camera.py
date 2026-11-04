@@ -4,8 +4,8 @@ planning_master acts on perception inputs (YOLO detections, puck and knob observ
 messages carries the exact camera stamp of the frame it was computed from: perception_master copies
 frame_meta[4] into header.stamp. So the picture behind what the state machine is acting on can be found
 by stamp. craft_sensors reuses each of its 4 shared-memory slots after ~0.13 s, so the matching frame is
-copied as soon as the input arrives (at most every min_interval_s) and kept for max_age_s (at most
-KEEP_MAX copies).
+copied as soon as the input arrives and kept for max_age_s. At most KEEP_MAX copies are kept, so copies are
+at least max(min_interval_s, max_age_s / (KEEP_MAX - 1)) apart: those always cover max_age_s.
 
 pick(at) returns the input frame the state machine had at time `at` (a state change), the newest input
 frame when `at` is now, or the newest camera frame when there is no input frame: no perception running,
@@ -56,9 +56,10 @@ class CameraFrames:
         self.reader = reader  # ShmFrameReader for d435/c310, None for image topics
         self.mode = mode
         self.max_age_s = max_age_s
-        self.min_interval_s = min_interval_s
+        self.min_interval_s = max(min_interval_s, max_age_s / (KEEP_MAX - 1))
         self.clock = clock
-        self.stats = {'input_frames': 0, 'input_unmatched': 0, 'input_lost': 0}
+        # lost: the slot was reused before it could be copied; busy: still locked by the writer after retries
+        self.stats = {'input_frames': 0, 'input_unmatched': 0, 'input_lost': 0, 'input_busy': 0}
         self._lock = threading.Lock()
         self._read_lock = threading.Lock()   # ShmFrameReader keeps one fd/mmap: one copy at a time
         self._latest = None                  # (received, frame_meta or image message, stamp_ns)
@@ -103,12 +104,16 @@ class CameraFrames:
                 self._seen.append(stamp)
                 self.stats['input_unmatched'] += 1
                 return False
+            if self._reused(item):  # a newer frame went into the same slot: no copy can succeed
+                self._seen.append(stamp)
+                self.stats['input_lost'] += 1
+                return False
         bgr = self._to_bgr(item, tries=COPY_TRIES)  # outside the lock: shm copy or image conversion
         with self._lock:
             if bgr is None:
-                # Slot already overwritten (or still busy, or the image is unreadable). Not marked as seen:
-                # the same frame's input on the other topic may still get it.
-                self.stats['input_lost'] += 1
+                # Still locked by the writer, reused meanwhile, or the image is unreadable. Not marked as
+                # seen: the same frame's input on the other topic may still get it.
+                self.stats['input_busy'] += 1
                 return False
             if stamp in self._seen:
                 return False
@@ -119,6 +124,12 @@ class CameraFrames:
             self._captured_at = now
             self.stats['input_frames'] += 1
         return True
+
+    def _reused(self, item) -> bool:
+        """Lock held. Shared memory: a newer frame_meta points at the same slot offset."""
+        if self.reader is None or not isinstance(item, list):
+            return False
+        return any(isinstance(m, list) and m[0] == item[0] and m[3] > item[3] for m in self._recent.values())
 
     # ---- for the narrator ----------------------------------------------------------------------
     def pick(self, at: float | None = None) -> Picture | None:

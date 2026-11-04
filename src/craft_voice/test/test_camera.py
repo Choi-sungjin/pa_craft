@@ -65,7 +65,8 @@ def test_slot_already_reused_falls_back_to_the_newest_frame(tmp_path):
     for seq in range(1, 8):
         frames.on_meta(put(path, seq))                       # slot of frame 2 now holds frame 6
     assert not frames.on_input(stamp(2), '/pucks')
-    assert frames.stats == {'input_frames': 0, 'input_unmatched': 0, 'input_lost': 1}
+    assert not frames.on_input(stamp(2), '/objects')        # same frame on the other topic: counted once
+    assert frames.stats == {'input_frames': 0, 'input_unmatched': 0, 'input_lost': 1, 'input_busy': 0}
     picture = frames.pick()
     assert picture.source == 'latest' and np.all(picture.bgr == 7) and picture.stamp_ns == stamp(7)
 
@@ -203,7 +204,8 @@ def test_a_busy_slot_is_not_lost_for_the_other_topic(tmp_path):
         assert not frames.on_input(stamp(1), '/objects')
         fcntl.flock(writer, fcntl.LOCK_UN)
     assert frames.on_input(stamp(1), '/pucks')               # same frame, other topic: still copied
-    assert frames.pick().topic == '/pucks' and frames.stats['input_lost'] == 1
+    assert frames.pick().topic == '/pucks'
+    assert frames.stats == {'input_frames': 1, 'input_unmatched': 0, 'input_lost': 0, 'input_busy': 1}
 
 
 def test_kept_for_max_age_whatever_the_interval():
@@ -222,3 +224,36 @@ def test_unreadable_image_never_raises():
     frames = CameraFrames(None)
     frames.on_image(SimpleNamespace(format='jpeg', data=b''), stamp(1))   # cv2.error, not ValueError
     assert not frames.on_input(stamp(1), '/objects') and frames.pick() is None
+
+
+def test_retention_covers_max_age_even_with_a_tiny_interval():
+    clock = Clock(0.0)
+    frames = CameraFrames(None, min_interval_s=0.03, max_age_s=3.0, clock=clock)
+    for i in range(120):                                     # 30 fps inputs for 4 s
+        clock.t = i / 30
+        frames.on_image(SimpleNamespace(encoding='bgr8', height=H, width=W, step=W * 3, data=bytes([i]) * (H * W * 3)),
+                        i + 1)
+        frames.on_input(i + 1, '/objects')
+    at = clock.t - 2.5
+    picture = frames.pick(at=at)
+    assert at - 0.1 <= picture.received <= at + 0.1         # the frame of that moment, not one 0.4 s later
+    assert len(frames._inputs) <= 64                         # memory stays bounded
+
+
+def test_reused_slot_is_not_retried():
+    class GoneReader:
+        calls = 0
+
+        def snapshot(self, meta):
+            GoneReader.calls += 1
+            return None
+
+        def close(self):
+            pass
+    frames = CameraFrames(GoneReader(), min_interval_s=0.0)
+    frames.on_meta([100, W, H, 1, 11, 1])
+    frames.on_meta([100, W, H, 5, 55, 1])                    # frame 5 went into the slot of frame 1
+    started = time.monotonic()
+    assert not frames.on_input(11, '/objects') and not frames.on_input(11, '/pucks')
+    assert GoneReader.calls == 0 and time.monotonic() - started < 0.003
+    assert frames.stats['input_lost'] == 1 and frames.stats['input_busy'] == 0

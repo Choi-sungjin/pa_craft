@@ -14,7 +14,7 @@ voice_node:
     #        Falls back to the newest frame when perception is not running or the stamp matches nothing.
     # latest: always the newest camera frame.
     image_source: input
-    input_frame_interval_s: 0.2   # copy an input frame at most this often (the shm slot is reused in ~0.13 s)
+    input_frame_interval_s: 0.2   # copy an input frame at most this often (at least frame_max_age_s / 63: 64 copies kept)
     image_max_side: 512           # longer side after resizing, before JPEG
     jpeg_quality: 80
 
