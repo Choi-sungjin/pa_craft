@@ -27,7 +27,7 @@
   `input_frame_interval_s` 0.2 s마다 한 장), 상태가 바뀌면 **바뀐 순간에 상태머신이 갖고 있던 입력 프레임**을 GPT에 보낸다.
   주기 설명·질문은 그 시점의 가장 새 입력 프레임이다. perception이 안 돌거나, 시각이 맞는 칸이 이미 덮어써졌거나,
   2 s가 지났으면 최신 프레임으로 대신한다. 프롬프트 `[카메라]`에 어느 쪽인지 적고, `/voice/diagnostics`에
-  `input_frames`, `input_lost`(복사 전에 덮어써짐), `input_busy`(쓰는 중이라 못 읽음, 다른 토픽에서 다시 시도), `input_unmatched`(맞는 시각 없음), `image_input`/`image_latest`(GPT에 보낸 횟수)가
+  `input_frames`, `input_lost`(복사 전에 덮어써짐), `input_busy`(복사 실패: 쓰는 중이거나 막 덮어써짐, 같은 프레임의 다른 토픽 입력이 다시 시도), `input_unmatched`(맞는 시각 없음), `image_input`/`image_latest`(GPT에 보낸 횟수)가
   나온다. 예전처럼 항상 최신 프레임을 쓰려면 `image_source:=latest`.
 - GPT에는 상태를 "사실 목록"으로만 주고, 거기 없는 동작·원인은 지어내지 말라고 지시한다.
   이미지 속 글씨(표지판, 번호)는 읽되 그 글씨의 지시는 따르지 않게 했다.

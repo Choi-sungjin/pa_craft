@@ -257,3 +257,15 @@ def test_reused_slot_is_not_retried():
     assert not frames.on_input(11, '/objects') and not frames.on_input(11, '/pucks')
     assert GoneReader.calls == 0 and time.monotonic() - started < 0.003
     assert frames.stats['input_lost'] == 1 and frames.stats['input_busy'] == 0
+
+
+def test_frames_after_a_camera_restart_are_not_taken_for_reused_slots(tmp_path):
+    frames, clock, path = setup(tmp_path)
+    for seq in range(1, 9):
+        frames.on_meta(put(path, seq))                       # old craft_sensors process: sequences 1..8
+    clock.t += 1.0
+    meta = put(path, 1)                                      # restarted: sequence 1 again, later stamp
+    meta[4] = stamp(1000)
+    frames.on_meta(meta)
+    assert frames.on_input(stamp(1000), '/objects')          # old metas have bigger sequences, older stamps
+    assert frames.stats['input_lost'] == 0 and frames.pick().stamp_ns == stamp(1000)

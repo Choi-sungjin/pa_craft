@@ -126,10 +126,12 @@ class CameraFrames:
         return True
 
     def _reused(self, item) -> bool:
-        """Lock held. Shared memory: a newer frame_meta points at the same slot offset."""
+        """Lock held. Shared memory: a newer frame_meta points at the same slot offset. Newer means a later
+        stamp too: craft_sensors counts sequences from 0 again after a restart, stamps keep increasing."""
         if self.reader is None or not isinstance(item, list):
             return False
-        return any(isinstance(m, list) and m[0] == item[0] and m[3] > item[3] for m in self._recent.values())
+        return any(isinstance(m, list) and m[0] == item[0] and m[3] > item[3] and m[4] > item[4]
+                   for m in self._recent.values())
 
     # ---- for the narrator ----------------------------------------------------------------------
     def pick(self, at: float | None = None) -> Picture | None:
