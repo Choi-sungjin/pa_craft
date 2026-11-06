@@ -1,0 +1,42 @@
+# Dice demo (dice_demo): take the stored pucks out of the clock and stand them on the box as a dice face.
+# Lengths in metres, angles in degrees. Raw poses: motor degrees LM, shoulder, elbow, wrist_pitch, tool_roll, gripper
+# (checkarm / teacharm readings).
+dice_demo:
+  # Every run starts and ends here (reassembled 2026-11-06; carriage lined up with clock 12).
+  nominal_raw_deg: [548.3, 84.9, 100.1, 16.8, 90.0, 141.9]  # LM 548.3 = clock 12 (belt re-fit 2026-11-07; was 858.3)
+  # Between the nominal pose and any work, both ways (2026-11-06).
+  via_raw_deg: [548.3, 92.5, 182.9, 104.6, 90.0, 141.9]
+  # Jaws closed on a stored puck 28 mm down from its top (it stands 35 mm out of the slot) at the loading guide.
+  # TEACH after the 2026-11-06 reassembly. null: the dry run uses the old loading pose below; the robot run stops.
+  clock_grasp_raw_deg: null
+  old_load_urdf_deg: [15.68, 4.85, -107.42, 0.0]  # shoulder, elbow, wrist_pitch, tool_roll URDF (2026-11-03)
+  old_unload_depth: 0.03
+  release_gripper_deg: 147.9   # part open going into the slot (full open hits it); on the box: full open
+  lm_backlash: 0.002           # the LM stops ~2 mm short: aim this much further toward the LM motor
+  unload_above: 0.06           # swing in this high over the clock grasp, then straight down
+  lift: 0.03                   # straight up out of the slot, tool angle kept (2.68 cm clears the slot)
+  carry_above: 0.075           # puck bottom over the box top while over the box (placed pucks are 60 mm)
+  release_above: 0.005         # puck bottom over the box top when the jaws open
+  down_step: 0.01              # put-down line in pieces this tall
+  put_roll_deg: -90.0          # tool_roll over the box: jaws close left-right
+  # Box, centred on the LM centre; x from the LiDAR centre (+: robot left), ahead of the LiDAR face.
+  box_x: -0.0125
+  box_gap: 0.01
+  box_w: 0.205
+  box_d: 0.205
+  box_h: 0.07
+  pip: 0.0475                  # box quarters (0.05125) are 1-3 mm past the LM ends
+  puck_r: 0.015
+  puck_h: 0.06
+  grasp_depth: 0.028           # fingertips below the puck top
+  finger_beyond_tcp: 0.027     # tool_tcp = middle of the 54 mm usable grip
+  finger_thick: 0.03           # jaw past the puck surface along the closing direction (from the meshes; MEASURE)
+  finger_half_width: 0.0175
+  release_open: 0.019          # jaw travel per side, grip -> full open (URDF jaw -0.0018 -> -0.021; MEASURE)
+  clear: 0.005
+  lidar_center_x: 0.128
+  lidar_front_y: 0.034
+  floor_z: 0.0
+  hw_z_correction: -0.010      # the real TCP sits ~10 mm above the model (2026-11-03, before the reassembly)
+  limit_margin_deg: 3.0
+  max_tilt_deg: 30.0

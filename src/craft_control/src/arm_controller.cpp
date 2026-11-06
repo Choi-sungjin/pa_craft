@@ -32,7 +32,7 @@ bool ArmController::configure(
   ik_joint_names_ = ik_joint_names;
   motor_directions_ = motor_directions;
   motor_offsets_ = motor_offsets;
-  tolerance_ = tolerance;
+  tolerance_ = default_tolerance_ = tolerance;
   return true;
 }
 

@@ -73,7 +73,11 @@ target_link_libraries(perception_master PRIVATE perception_modules
   rclcpp::rclcpp tf2_ros::tf2_ros ament_index_cpp::ament_index_cpp ${perception_typesupport}
   ${std_msgs_TARGETS} ${diagnostic_msgs_TARGETS})
 
-install(TARGETS perception_master perception_modules
+# Offline PuckAxis on recorded sessions (demo/puck_compare).
+add_executable(puck_axis_offline tools/puck_axis_offline.cpp)
+target_link_libraries(puck_axis_offline PRIVATE perception_modules opencv_imgcodecs)
+
+install(TARGETS perception_master perception_modules puck_axis_offline
   EXPORT perception_modules_export
   ARCHIVE DESTINATION lib LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME})

@@ -22,6 +22,12 @@ public:
   const std::string & get_joint_name() const {return joint_name_;}
   bool is_target_reached(double current_angle) const;  // within tolerance [motor rad]
 
+  // Arrival tolerance of the current task [motor rad]: max(configured, tolerance); 0 = configured.
+  void set_task_tolerance(double tolerance)
+  {
+    tolerance_ = tolerance > default_tolerance_ ? tolerance : default_tolerance_;
+  }
+
 private:
   std::string joint_name_;
   double min_angle_ = 0.0;
@@ -30,6 +36,7 @@ private:
   double offset_ = 0.0;
   double meters_per_rad_ = 0.0;  // measured linear travel per motor radian
   double tolerance_ = 0.0;
+  double default_tolerance_ = 0.0;
   double target_position_ = 0.0;
   bool conversion_ready_ = false;
   bool has_target_ = false;

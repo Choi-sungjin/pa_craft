@@ -38,10 +38,17 @@ public:
   // All four motor feedback angles within tolerance of the stored target.
   bool is_target_reached(const ArmJoints & current_pose) const;
 
+  // Arrival tolerance of the current task [motor rad]: max(configured, tolerance); 0 = configured.
+  void set_task_tolerance(double tolerance)
+  {
+    tolerance_ = tolerance > default_tolerance_ ? tolerance : default_tolerance_;
+  }
+
 private:
   ArmIkJointValues min_angle_{};
   ArmIkJointValues max_angle_{};
   double tolerance_ = 0.0;
+  double default_tolerance_ = 0.0;
   ArmIkJointNames ik_joint_names_{};
   ArmIkJointValues motor_directions_{};
   ArmIkJointValues motor_offsets_{};

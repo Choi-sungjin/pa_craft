@@ -26,7 +26,7 @@ bool LmController::configure(
   direction_ = direction;
   offset_ = offset;
   meters_per_rad_ = meters_per_rad;
-  tolerance_ = tolerance;
+  tolerance_ = default_tolerance_ = tolerance;
   conversion_ready_ = meters_per_rad > 0.0;
   return true;
 }

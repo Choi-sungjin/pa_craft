@@ -209,8 +209,16 @@ def main():
         if args.dry_run:
             return 0
 
+        d.spin(1.0)
+        if d.state == 'Fault':
+            # Planning wants map-frame odom and obstacles within 10 s of launch, but the map frame only exists
+            # once localized: a late run finds it latched in "initialization timeout". Now the map is there.
+            print('[demo] planning is in Fault (start-up timeout before localization?): RESET')
+            d.cmd('RESET')
+            d.spin(3.0, lambda: d.state != 'Fault')
         if not d.spin(20, lambda: d.state in ('Ready', 'Run.AwaitRequest')):
-            print(f'[demo] planning not ready (state {d.state}): control/odom/lidar/arm joints fresh?'); return 1
+            print(f'[demo] planning not ready (state {d.state}): see /planning/diagnostics (control, odom, LiDAR '
+                  'and, unless launched with arm:=false, arm joints must be fresh)'); return 1
         if d.state == 'Ready':
             d.cmd('START')
             if not d.spin(5, lambda: d.state == 'Run.AwaitRequest'):

@@ -28,6 +28,7 @@
 #include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/float64.hpp"
 #include "std_msgs/msg/int32.hpp"
+#include "std_msgs/msg/string.hpp"
 #include "geometry_msgs/msg/transform_stamped.hpp"
 #include "geometry_msgs/msg/twist.hpp"
 #include "tf2_ros/transform_broadcaster.h"
@@ -86,6 +87,13 @@ public:
     return lines;
   }
 
+  // A keyword line for the firmware (e.g. "TIME,1500").
+  bool write_line(const std::string & text)
+  {
+    const std::string line = text + "\n";
+    return ::write(fd_, line.data(), line.size()) == static_cast<ssize_t>(line.size());
+  }
+
   bool write_values(const std::vector<double> & values)
   {
     std::string line;
@@ -102,6 +110,32 @@ private:
   int fd_ = -1;
   std::string rx_buf_;
 };
+
+// Firmware diagnostic line "D,reason,motor id,code,lowest V,V per motor..." (CraftMotorFirmware.h FaultReason).
+struct BoardDiag
+{
+  int reason = 0;
+  std::string text;  // the latched fault cause in words, empty when none
+};
+
+static std::string describe_board_fault(int reason, int id, int code)
+{
+  const std::string m = "motor " + std::to_string(id);
+  switch (reason) {
+    case 1: {
+      char bits[8];
+      std::snprintf(bits, sizeof bits, "0x%02x", code & 0xff);
+      return m + " hardware error " + bits + " (1 input voltage, 4 overheating, 8 encoder, 16 electrical shock, " +
+             "32 overload)";
+    }
+    case 2: return m + " torque found off: it rebooted (power dip / loose power or bus cable?)";
+    case 3: return m + " did not answer (bus cable / power?)";
+    case 4: return m + " write failed";
+    case 5: return "startup failed at " + m;
+    case 6: return "invalid axis configuration or hardware not confirmed";
+    default: return "unknown cause " + std::to_string(reason);
+  }
+}
 
 // "1.0,2,3\r" -> {1, 2, 3}; false on junk
 static bool parse_csv(const std::string & line, std::vector<double> & v)
@@ -282,6 +316,8 @@ public:
 
     // ROS2 publishers and subscribers
     arm_lm_state_pub_ = create_publisher<std_msgs::msg::Int32>("/control/arm_lm_state", 10);
+    arm_diag_pub_ = create_publisher<std_msgs::msg::String>("/control/arm_diag", 10);
+    wheel_diag_pub_ = create_publisher<std_msgs::msg::String>("/control/wheel_clock_diag", 10);
     gripper_grasped_pub_ = create_publisher<std_msgs::msg::Bool>("/control/gripper_grasped", 10);
     wheel_state_pub_ = create_publisher<std_msgs::msg::Int32>("/control/wheel_state", 10);
     clock_state_pub_ = create_publisher<std_msgs::msg::Int32>("/control/clock_state", 10);
@@ -367,18 +403,47 @@ private:
     return value;
   }
 
+  // A firmware diagnostic line: published raw, logged when the latched cause changes, warns on a low supply.
+  bool take_diag(const std::string & line, const char * board, BoardDiag & diag,
+    const rclcpp::Publisher<std_msgs::msg::String>::SharedPtr & pub)
+  {
+    if (line.rfind("D,", 0) != 0) return false;
+    std::vector<double> v;
+    if (!parse_csv(line.substr(2), v) || v.size() < 4) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "bad %s diagnostic line: %s", board, line.c_str());
+      return true;
+    }
+    std_msgs::msg::String msg;
+    msg.data = line.back() == '\r' ? line.substr(0, line.size() - 1) : line;
+    pub->publish(msg);
+    const int reason = static_cast<int>(v[0]);
+    if (reason != diag.reason) {
+      diag.reason = reason;
+      diag.text = reason ? describe_board_fault(reason, static_cast<int>(v[1]), static_cast<int>(v[2])) : "";
+      if (reason) RCLCPP_ERROR(get_logger(), "%s board fault: %s", board, diag.text.c_str());
+    }
+    if (v[3] > 0.0 && v[3] < low_supply_voltage_) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "%s motors: supply dipped to %.1f V", board, v[3]);
+    }
+    return true;
+  }
+
   bool read_arm_lm_feedback()
   {
     if (!arm_lm_serial_) return false;
     const auto lines = arm_lm_serial_->read_lines();
+    std::vector<std::string> feedback;
+    for (const auto & line : lines) {
+      if (!take_diag(line, "arm", arm_diag_, arm_diag_pub_)) feedback.push_back(line);
+    }
 
-    for (auto it = lines.rbegin(); it != lines.rend(); ++it) { // reverse order: newest first
+    for (auto it = feedback.rbegin(); it != feedback.rend(); ++it) { // reverse order: newest first
       const auto & line = *it;
       std::vector<double> v;
 
       // Validate the line: must be CSV, correct number of values, all finite
-      // LM + four arm motors + gripper + state + current + imu_ok, gx, gy, gz, ax, ay, az
-      if (!parse_csv(line, v) || v.size() != 15)
+      // LM + four arm motors + gripper + state + the six motor currents [A] + imu_ok, gx, gy, gz, ax, ay, az
+      if (!parse_csv(line, v) || v.size() != 20)
       {
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "bad arm+LM OpenCR line: %s", line.c_str());
         continue;
@@ -391,7 +456,8 @@ private:
         continue;
       }
 
-      // Parse the line: slide, shoulder, elbow, wrist_pitch, tool_roll, gripper, arm_lm_state, gripper_current_a
+      // Parse the line: slide, shoulder, elbow, wrist_pitch, tool_roll, gripper, arm_lm_state, then the currents [A]
+      // in the same order (LM .. gripper)
       lm_angle_ = v[0];
       arm_joints_[0] = v[1];  // shoulder
       arm_joints_[1] = v[2];  // elbow
@@ -399,8 +465,9 @@ private:
       arm_joints_[3] = v[4];  // tool roll
       gripper_angle_ = v[5];
       arm_lm_state_ = static_cast<int>(v[6]);
-      gripper_current_a_ = v[7];
-      publish_board_imu(arm_imu_pub_, v, 8, "lm_arm_imu");
+      for (std::size_t i = 0; i < motor_current_a_.size(); ++i) {motor_current_a_[i] = v[7 + i];}
+      gripper_current_a_ = v[12];
+      publish_board_imu(arm_imu_pub_, v, 13, "lm_arm_imu");
 
       have_arm_lm_feedback_ = true; // 정상 arm+LM 피드백을 한 번이라도 받은 적이 있는가
       return true;
@@ -411,8 +478,12 @@ private:
   bool read_clock_wheel_feedback()
   {
     const auto lines = clock_wheel_serial_->read_lines();
+    std::vector<std::string> feedback;
+    for (const auto & line : lines) {
+      if (!take_diag(line, "clock+wheel", wheel_diag_, wheel_diag_pub_)) feedback.push_back(line);
+    }
 
-    for (auto it = lines.rbegin(); it != lines.rend(); ++it) { // reverse order: newest first
+    for (auto it = feedback.rbegin(); it != feedback.rend(); ++it) { // reverse order: newest first
       const auto & line = *it;
       std::vector<double> v;
 
@@ -731,6 +802,8 @@ private:
     msg.name.insert(msg.name.end(), names.begin(), names.end());
     msg.position.push_back(*lm_position);
     msg.position.insert(msg.position.end(), positions->begin(), positions->end());
+    // effort: motor current [A] (signed, raw motor sign), LM and the four arm motors; overload is judged from these.
+    msg.effort.assign(motor_current_a_.begin(), motor_current_a_.begin() + 5);
     arm_joint_feedback_pub_->publish(msg);
   }
 
@@ -791,7 +864,14 @@ private:
             (c.joints.name.size() == 5 || (c.joints.name.size() == 6 && c.joints.name[5] == "gripper"))) {
           arm.name.assign(c.joints.name.begin()+1, c.joints.name.begin()+5);
           arm.position.assign(c.joints.position.begin()+1, c.joints.position.begin()+5);
-          valid = validate_arm_target(arm) && validate_lm_target(c.joints.name[0], c.joints.position[0]) &&
+          // duration_s: travel time of the LM and the arm joints (time-based profile; 0 = their speed caps).
+          // tolerance_rad: arrival tolerance of this move (0 = control.yaml), up to kMaxTaskTolerance.
+          valid = std::isfinite(c.duration_s) && c.duration_s >= 0.0 && c.duration_s <= kMaxArmMoveS &&
+            std::isfinite(c.tolerance_rad) && c.tolerance_rad >= 0.0 && c.tolerance_rad <= kMaxTaskTolerance &&
+            (c.position_i_gains.empty() || (c.position_i_gains.size() == craft_control::kArmMotors &&
+              std::all_of(c.position_i_gains.begin(), c.position_i_gains.end(),
+                [](uint16_t g) {return g <= kMaxPositionIGain;}))) &&
+            validate_arm_target(arm) && validate_lm_target(c.joints.name[0], c.joints.position[0]) &&
             (c.joints.name.size() == 5 ||
              (gripper_mapping_confirmed_ && gripper_controller_.is_valid_open_angle(c.joints.position[5])));
           participants[4] = c.joints.name.size() == 6;
@@ -821,9 +901,30 @@ private:
       case TaskCommand::NAVIGATE: set_path_target(c.path, c.require_goal_heading); set_wheel_target(c.speed); break;
       case TaskCommand::MANIPULATOR:
         set_arm_target(arm); set_lm_target(c.joints.position[0]);
+        arm_move_ms_ = static_cast<int>(std::lround(c.duration_s * 1000.0));
+        // Same arrival tolerance here and on the board (its state stays 1 until every axis is inside it).
+        arm_controller_.set_task_tolerance(c.tolerance_rad);
+        lm_controller_.set_task_tolerance(c.tolerance_rad);
+        arm_tolerance_cdeg_ = static_cast<int>(std::lround(c.tolerance_rad * 18000.0 / M_PI));
+        // Position I gains of this move: board axes 1..4 (LM is 0), one IGAIN line each, before its targets. No
+        // gains: the board's power-up gains (IGAIN,BOOT), once after any task that set some (and once at start: a
+        // board left by an earlier control_master may still hold them).
+        arm_gain_lines_.clear();
+        for (size_t i = 0; i < c.position_i_gains.size(); ++i) {
+          arm_gain_lines_.push_back("IGAIN," + std::to_string(i + 1) + "," + std::to_string(c.position_i_gains[i]));
+        }
+        if (c.position_i_gains.empty() && arm_gains_modified_) arm_gain_lines_.push_back("IGAIN,BOOT");
+        if (!c.position_i_gains.empty()) arm_gains_modified_ = true;  // cleared once IGAIN,BOOT is written
+        send_arm_move_time_ = true;  // before this task's first targets (control_loop)
         if (c.joints.position.size() == 6) set_gripper_target(false, c.joints.position[5]);
         break;
-      case TaskCommand::GRIPPER: set_gripper_target(c.close, gripper_open_angle_of(c)); break;
+      case TaskCommand::GRIPPER:
+        set_gripper_target(c.close, gripper_open_angle_of(c));
+        arm_move_ms_ = 0;  // the gripper alone, at its speed cap (time-based on the arm board)
+        arm_tolerance_cdeg_ = -1;  // no TOL line: the arm keeps the last move's tolerance
+        arm_gain_lines_.clear();   // nor its I gains
+        send_arm_move_time_ = true;
+        break;
       case TaskCommand::CLOCK: set_clock_target(c.clock_slot); break;
       case TaskCommand::WAIT: wait_duration_ = c.duration_s; break;
     }
@@ -910,7 +1011,23 @@ private:
       const double gripper_motor_command = gripper_controller_.compute_command(gripper_angle_);
       // Shared OpenCR transport only: independent controllers, fixed hardware channel order.
       // A stale board must expire its firmware watchdog and hold its own measured position.
-      const bool command_sent = arm_feedback_fresh && arm_lm_serial_->write_values({
+      // A new MANIPULATOR task: its travel time goes first, so the firmware times the move to its targets.
+      // TOL (0.01 deg, 0 = the firmware's own) only with a MANIPULATOR task; a GRIPPER task keeps the last one.
+      // IGAIN lines first (each sent once; a failed write is retried on the next loop).
+      while (send_arm_move_time_ && arm_feedback_fresh && !arm_gain_lines_.empty() &&
+        arm_lm_serial_->write_line(arm_gain_lines_.front()))
+      {
+        if (arm_gain_lines_.front() == "IGAIN,BOOT") arm_gains_modified_ = false;
+        arm_gain_lines_.erase(arm_gain_lines_.begin());
+      }
+      if (send_arm_move_time_ && arm_feedback_fresh && arm_gain_lines_.empty() &&
+        (arm_tolerance_cdeg_ < 0 ||
+         arm_lm_serial_->write_line("TOL," + std::to_string(arm_tolerance_cdeg_))) &&
+        arm_lm_serial_->write_line("TIME," + std::to_string(arm_move_ms_)))
+      {
+        send_arm_move_time_ = false;
+      }
+      const bool command_sent = arm_feedback_fresh && !send_arm_move_time_ && arm_lm_serial_->write_values({
           lm_motor_command, arm_motor_commands[0], arm_motor_commands[1],
           arm_motor_commands[2], arm_motor_commands[3], gripper_motor_command});
       arm_tx_ok_ = command_sent;
@@ -1035,6 +1152,8 @@ private:
     status.ready = !status.fault && arm_ik_mapping_confirmed_ && lm_mapping_confirmed_ &&
       gripper_mapping_confirmed_;
     status.reason = status.fault ? "board/serial fault" : status.ready ? "" : "unconfirmed calibration";
+    if (status.fault && !arm_diag_.text.empty()) status.reason += " (arm: " + arm_diag_.text + ")";
+    if (status.fault && !wheel_diag_.text.empty()) status.reason += " (clock+wheel: " + wheel_diag_.text + ")";
     control_status_pub_->publish(status);
   }
 
@@ -1084,6 +1203,7 @@ private:
   double gripper_angle_ = 0.0;
   bool gripper_mapping_confirmed_ = false;
   double gripper_current_a_ = 0.0;
+  std::array<double, 6> motor_current_a_{};  // [A] LM, shoulder, elbow, wrist_pitch, tool_roll, gripper
   int arm_lm_state_ = 0;
   bool have_arm_lm_feedback_ = false;
   craft_control::WheelOdometry wheel_odometry_;
@@ -1108,6 +1228,17 @@ private:
   bool clock_target_sent_ = false;
 
   rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr arm_lm_state_pub_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr arm_diag_pub_, wheel_diag_pub_;
+  BoardDiag arm_diag_, wheel_diag_;
+  double low_supply_voltage_ = 11.0;
+  static constexpr double kMaxArmMoveS = 32.767;  // firmware TIME limit [s]
+  static constexpr double kMaxTaskTolerance = 5.0 * M_PI / 180.0;  // [motor rad] firmware TOL limit 500
+  int arm_tolerance_cdeg_ = -1;  // TOL line of the next MANIPULATOR task [0.01 deg]; -1: none
+  static constexpr uint16_t kMaxPositionIGain = 16383;  // XM430 POSITION_I_GAIN range, firmware IGAIN limit
+  std::vector<std::string> arm_gain_lines_;  // IGAIN lines of the next MANIPULATOR task, sent before TOL/TIME
+  bool arm_gains_modified_ = true;  // the board may hold gains other than its power-up ones
+  int arm_move_ms_ = 0;
+  bool send_arm_move_time_ = false;  // [V] warn when a board's motors report less (12 V supply)
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr gripper_grasped_pub_;
   rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr wheel_state_pub_;
   rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr clock_state_pub_;

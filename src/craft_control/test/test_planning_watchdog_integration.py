@@ -73,8 +73,8 @@ class FakeBoard:
 class Harness:
     def __init__(self, binary, calibrated=True):
         # + imu_ok, gx, gy, gz [rad/s], ax, ay, az [g]: both boards still; lm_arm reads -1 g so
-        # the relay is checked per board.
-        self.arm = FakeBoard([0.05, 0.1, 0.2, 0.3, 0.4, 0.6, 0, 0, 1, 0, 0, 0, 0, 0, -1])
+        # the relay is checked per board. lm_arm: six positions, state, six motor currents [A], IMU.
+        self.arm = FakeBoard([0.05, 0.1, 0.2, 0.3, 0.4, 0.6, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, -1])
         self.drive = FakeBoard([0, 0, 0.7, 0, 0, 1, 0, 0, 0, 0, 0, 1])
         self.log = tempfile.TemporaryFile(mode='w+t')
         config = Path(__file__).resolve().parents[1] / 'config' / 'control.yaml'
@@ -218,13 +218,13 @@ def main():
         h.pump(lambda: h.status is not None and h.status.ready and h.status.stopped, hold=True)
         assert h.node.get_clock().now().nanoseconds == 0
         # Each board's IMU fields are relayed raw (board frame, accel g -> m/s^2) for perception.
-        h.drive.feedback[8], h.arm.feedback[11] = 0.3, -0.3
+        h.drive.feedback[8], h.arm.feedback[16] = 0.3, -0.3
         h.pump(lambda: len(h.imu) == 2 and h.imu['wheel_clock'].angular_velocity.z == 0.3 and
                h.imu['lm_arm'].angular_velocity.z == -0.3, hold=True)
         assert h.imu['wheel_clock'].header.frame_id == 'wheel_clock_imu'
         assert abs(h.imu['wheel_clock'].linear_acceleration.z - 9.80665) < 1e-9
         assert abs(h.imu['lm_arm'].linear_acceleration.z + 9.80665) < 1e-9
-        h.drive.feedback[8] = h.arm.feedback[11] = 0
+        h.drive.feedback[8] = h.arm.feedback[16] = 0
         # Teleop drives the wheels without a planning heartbeat (mapping runs) on the skid steer
         # separation, and a stale input stops them again.
         teleop = h.node.create_publisher(Twist, '/control/teleop/cmd_vel', 10)

@@ -20,7 +20,7 @@ from craft_interfaces.msg import TaskCommand
 
 HERE = Path(__file__).resolve().parent
 HZ = 20
-ARM_SPEED = math.radians(41.0)  # [rad/s] profile velocity 30 x 0.229 rpm
+ARM_SPEED = math.radians(41.2)  # [rad/s] profile velocity 30 x 0.229 rpm
 LM_SPEED = 0.028  # [m/s] LM profile velocity 180
 HOLD = 10  # frames between steps
 # Start pose (URDF): the rest pose of the 2026-11-03 11:28 run; override with 4 numbers on the command line.

@@ -362,6 +362,34 @@ TEST(LmController, TargetReachedComparesMotorAngle)
   EXPECT_FALSE(controller.is_target_reached(-1.7));
 }
 
+// A via move widens the arrival tolerance for its task only; 0 (or less than configured) is the configured one.
+TEST(ArmLmController, TaskToleranceWidensOnlyUpward)
+{
+  craft_control::ArmController arm;
+  ASSERT_TRUE(arm.configure(
+    {-10, -10, -10, -10}, {10, 10, 10, 10},
+    {"shoulder_joint", "elbow_joint", "wrist_pitch_joint", "tool_roll_joint"},
+    {1, 1, 1, 1}, {0, 0, 0, 0}, 0.01));
+  arm.set_target({0.1, 0.2, 0.3, 0.4});
+  EXPECT_FALSE(arm.is_target_reached({0.14, 0.2, 0.3, 0.4}));
+  arm.set_task_tolerance(0.05);
+  EXPECT_TRUE(arm.is_target_reached({0.14, 0.2, 0.3, 0.4}));
+  EXPECT_FALSE(arm.is_target_reached({0.16, 0.2, 0.3, 0.4}));
+  arm.set_task_tolerance(0.001);  // below the configured: the configured
+  EXPECT_TRUE(arm.is_target_reached({0.105, 0.2, 0.3, 0.4}));
+  arm.set_task_tolerance(0.0);
+  EXPECT_FALSE(arm.is_target_reached({0.14, 0.2, 0.3, 0.4}));
+
+  craft_control::LmController lm;
+  ASSERT_TRUE(lm.configure("slide_joint", -5.0, 5.0, -1.0, 0.2, 0.005, 0.01));
+  lm.set_target(0.01);  // -1.8 motor rad
+  EXPECT_FALSE(lm.is_target_reached(-1.76));
+  lm.set_task_tolerance(0.05);
+  EXPECT_TRUE(lm.is_target_reached(-1.76));
+  lm.set_task_tolerance(0.0);
+  EXPECT_FALSE(lm.is_target_reached(-1.76));
+}
+
 TEST(GripperController, CloseCompletesOnAngleOrGrasp)
 {
   craft_control::GripperController controller;

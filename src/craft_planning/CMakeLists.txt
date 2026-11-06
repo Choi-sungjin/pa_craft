@@ -20,7 +20,8 @@ find_package(PNG REQUIRED)
 find_package(Threads REQUIRED)
 
 add_library(planning_modules
-  src/state_machine.cpp src/path_planner.cpp src/arm_planner.cpp src/planning_config.cpp src/grasp_region.cpp)
+  src/state_machine.cpp src/path_planner.cpp src/arm_planner.cpp src/planning_config.cpp src/grasp_region.cpp
+  src/dice_demo.cpp)
 target_compile_features(planning_modules PUBLIC cxx_std_17)
 target_compile_options(planning_modules PRIVATE -Wall -Wextra -Wpedantic)
 target_include_directories(planning_modules PUBLIC
@@ -38,7 +39,11 @@ target_compile_options(planning_master PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(planning_master PRIVATE planning_modules
   ament_index_cpp::ament_index_cpp tf2_ros::tf2_ros ${tf2_geometry_msgs_TARGETS}
   craft_perception::craft_perception__rosidl_typesupport_cpp ${std_msgs_TARGETS} ${diagnostic_msgs_TARGETS})
-install(TARGETS planning_modules planning_master
+add_executable(dice_demo src/dice_demo_main.cpp)
+target_compile_features(dice_demo PRIVATE cxx_std_17)
+target_compile_options(dice_demo PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(dice_demo PRIVATE planning_modules ament_index_cpp::ament_index_cpp)
+install(TARGETS planning_modules planning_master dice_demo
   ARCHIVE DESTINATION lib LIBRARY DESTINATION lib RUNTIME DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)
 install(FILES v75_ws/src/v75_robot_description/urdf/v75_robot.urdf
@@ -59,7 +64,7 @@ install(FILES README.md IMPLEMENTATION.md DESTINATION share/${PROJECT_NAME})
 if(BUILD_TESTING)
   find_package(ament_cmake_pytest REQUIRED)
   find_package(ament_cmake_gtest REQUIRED)
-  foreach(module state_machine path_planner_cpp arm_planner planning_config grasp_region)
+  foreach(module state_machine path_planner_cpp arm_planner planning_config grasp_region dice_demo)
     ament_add_gtest(test_${module} test/test_${module}.cpp)
     target_link_libraries(test_${module} planning_modules)
     target_compile_definitions(test_${module} PRIVATE

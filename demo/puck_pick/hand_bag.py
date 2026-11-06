@@ -21,7 +21,7 @@ from sensor_msgs.msg import JointState
 
 PORT = '/dev/opencr_arm_lm'
 NAMES = ['LM', 'shoulder', 'elbow', 'wrist_pitch', 'tool_roll', 'gripper']
-FIELDS = 15  # lm_arm CSV line length (6 positions, state, imu_ok, gx gy gz ax ay az, ...)
+FIELDS = 20  # lm_arm CSV line length (6 positions, state, 6 currents, imu_ok, gx gy gz ax ay az)
 TOPIC = '/hand/arm_motor'
 
 

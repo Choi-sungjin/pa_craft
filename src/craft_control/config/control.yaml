@@ -68,7 +68,7 @@ control_master:
     wheel_yaw_rate_coeffs: [0.099025]
     # Both OpenCR on-board IMUs are relayed raw on /control/imu/{wheel_clock,lm_arm} (board frame,
     # gyro offset included); craft_perception's imu_processor turns them into the chassis yaw rate.
-    max_v: 0.26           # [m/s] nominal Waffle Pi maximum linear speed
+    max_v: 0.12           # [m/s] nominal Waffle Pi maximum linear speed
     # Host limits target speed. OpenCR firmware must configure DYNAMIXEL Profile Acceleration(108)
     # and owns the motor velocity PID, feedforward, acceleration profile, and motor-level tracking.
     # Profile Acceleration must be nonzero; zero makes target-velocity changes effectively immediate.
@@ -98,23 +98,24 @@ control_master:
     # OpenCR must accept/report unwrapped motor radians (e.g. 12 -> 7 commands -5*pi/6).
     clock_slot_count: 12
     clock_slot_angle: 0.5235987755982988  # [motor rad/slot] 30 degrees
-    clock_zero_angle: 2.9042278753185644  # [motor rad] 166.4 degrees, slot 12 at the loading guide
+    clock_zero_angle: 2.8693212902786778  # [motor rad] 164.4 degrees, slot 12 at the loading guide (2026-11-07, checked by checkwheel at 12; was 135.2, 45.4, 44.8, 73.9, 166.4)
     # Firmware clock zero_tick stays 0: apply this offset here only.
     # Recheck physical alignment after a motor power cycle/multi-turn reset.
     clock_direction: 1.0  # +1: CCW motor rotation increases slot numbers; -1: reverse
     clock_angle_tolerance: 0.03490658503988659  # [rad] 2 degrees; tune alignment tolerance
 
     # Rotational arm motors only: shoulder, elbow, wrist_pitch, tool_roll [motor rad].
-    # Measured degrees: shoulder 44.6–185, elbow 35.2–320.6, wrist_pitch -16.7–250.5, tool_roll -234.1–247.8
+    # Measured degrees: shoulder 44.6–185, elbow 36.3–309.2 (new bracket, 2026-11-06; was 35.2–320.6),
+    # wrist_pitch -110.7–152.1 (2026-11-06 after the reassembly; was -16.7–250.5), tool_roll -234.1–247.8
     # (2026-11-02; was 39–187, 38–323, 70.1–340, -180–180).
     # Limits below keep a 5-degree margin inside those (sync is approximate):
-    # shoulder 49.6–180, elbow 40.2–315.6, wrist_pitch -11.7–245.5. tool_roll stays -175–175: a range
+    # shoulder 49.6–180, elbow 41.3–304.2, wrist_pitch -105.7–148.1 (upper end 4 deg inside: the clock pick, 2026-11-06). tool_roll stays -175–175: a range
     # over one turn would make the firmware boot unwrap ambiguous.
     # Rounded inward to 4 decimals: ControlMaster sends '%.4f', and the firmware rejects a whole
     # frame if any value falls outside its limits, so limits must be exactly representable.
     # The lying-puck grasp (URDF elbow 196.4, wrist -135.1 deg) stays inside these limits.
-    arm_min_angle: [0.8657, 0.7017, -0.2042, -3.0543]
-    arm_max_angle: [3.1415, 5.5082, 4.2847, 3.0543]
+    arm_min_angle: [0.8657, 0.7209, -1.8448, -3.0543]
+    arm_max_angle: [3.1415, 5.3092, 2.5848, 3.0543]
 
     # Rotational part of /ik_solution; ControlMaster routes slide_joint to LmController.
     arm_ik_joint_names: [shoulder_joint, elbow_joint, wrist_pitch_joint, tool_roll_joint]
@@ -130,24 +131,36 @@ control_master:
     arm_joint_directions: [1.0, 1.0, -1.0, 1.0]
     # wrist_pitch: the reference-pose value (100.16 deg) tilted the tool ~22 deg toward the robot on hardware
     # (2026-11-02); the hand-set 'wrist up' was not the 2026-10-24 pose. Now from its measured stops (both ends
-    # moved -86.8 / -89.5 deg): 209.96 - 88.15 = 121.80 deg. Recheck with the tool held vertical (level).
+    # moved -86.8 / -89.5 deg): 209.96 - 88.15 = 121.80 deg. 2026-11-06 reassembly: the stops moved again,
+    # -16.7 -> -110.7 and 250.5 -> 152.1 (-94.0 / -98.4 deg): 121.80 - 96.20 = 25.60 deg (+-2.2 from the two ends).
+    # 2026-11-06 evening: whole arm held straight up by jog (shoulder-elbow and elbow-wrist axes and the gripper
+    # vertical) read raw [91.1, 185.3, 17.3] at URDF [24.00, 52.61, 13.39] deg: offsets 67.10, 132.69, 30.69
+    # (were 71.65, 117.89, 25.60; the taught clock grasp and box place then come out with the tool vertical).
     # tool_roll: aligned (jaws front-back) re-measured at raw 90.9 deg (2026-11-03, sis1 failed on the alignment; was 94.00).
-    arm_joint_offsets: [1.250528, 2.057569, 2.125811, 1.586504]  # [motor rad] 71.65, 117.89, 121.80, 90.90 deg
+    arm_joint_offsets: [1.171116, 2.315877, 0.535642, 1.586504]  # [motor rad] 67.10, 132.69, 30.69, 90.90 deg
     arm_angle_tolerance: 0.008726646259971648  # [motor rad] 0.5 degree per joint, matches firmware lm_arm (was 1, before that 2: up to ~9 mm TCP height at the grasp)
 
     # Independent LM controller: target displacement [m] -> motor angle [rad].
     lm_linear_joint_name: slide_joint
     lm_mapping_confirmed: true
-    # Measured -399.4 to 509.2 degrees (2026-11-02; was -391.8 to 527.5); 5-degree margin below.
-    lm_min_angle: -6.8835  # [motor rad] -394.4 degrees, 4 decimals rounded inward
-    lm_max_angle: 8.7999  # [motor rad] 504.2 degrees, 4 decimals rounded inward
+    # 2026-11-07: timing belt re-tensioned (it slipped a tooth at a time at the idler) and re-fitted. Re-measured
+    # after the next power-up: the end away from the motor at 136.2, the motor-side end at 1052.0, clock 12 at 548.3.
+    # The travel is the same 102 mm; it now takes 915.8 deg (the old 931.7 counted the belt slipping): see
+    # lm_meters_per_rad. With slide zero 63.3 mm from the motor end the 5-degree limits below are slide -38.1 / +62.7 mm,
+    # the URDF slide limits.
+    # Before: measured 579.6 to 1511.3 degrees (2026-11-05, guide moved; was -399.4 to 509.2, -391.8 to 527.5).
+    # 5-degree margin below. Keep equal to firmware/lm_arm/config.h.
+    lm_min_angle: 2.4645  # [motor rad] 141.2 degrees, 4 decimals rounded inward (was 10.2032 = 584.6)
+    lm_max_angle: 18.2735  # [motor rad] 1047.0 degrees, 4 decimals rounded inward (was 26.2898 = 1506.3)
     # Motor raw + and URDF slide_joint + (axis -X) both move the carriage toward the LM motor.
     lm_motor_direction: 1.0
     # The earlier reported 317.2-degree zero was withdrawn; do not use it.
-    # Slide zero stays 63.3 mm from the motor end (URDF slide origin): 509.2 deg - 63.3 mm (was -11.6 deg).
-    lm_motor_offset: -0.9593711975242669  # [motor rad] -54.97 degrees at slide position zero (2026-11-02)
-    # Measured 0.102 m travel over 908.6 degrees of motor rotation (was 0.108 m over 919.3).
-    lm_meters_per_rad: 0.0064320597736456046  # [m/motor rad]; zero disables conversion
+    # Slide zero stays 63.3 mm from the motor end (URDF slide origin): 1511.3 deg - 63.3 mm
+    # (2026-11-05; was 509.2 deg - 63.3 mm = -54.97 deg, before that -11.6 deg). 2026-11-07: 1052.0 deg - 63.3 mm.
+    lm_motor_offset: 8.441551859979706  # [motor rad] 483.67 degrees at slide position zero (2026-11-07; was 933.10)
+    # Measured 0.102 m travel (rail 164 mm - carriage 62 mm) over 915.8 degrees of motor rotation (2026-11-07, belt
+    # re-tensioned; was 931.7 with the belt slipping at the idler, 2026-11-05; before that 908.6, 0.108 m over 919.3).
+    lm_meters_per_rad: 0.006381491057364487  # [m/motor rad]; zero disables conversion (was 0.006272587217274227)
     lm_angle_tolerance: 0.008726646259971648  # [motor rad] 0.5 degree = ~0.06 mm carriage, matches firmware lm_arm (was 2)
 
     # Gripper uses a separate Bool command: true=close/grasp, false=open/release.

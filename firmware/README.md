@@ -6,7 +6,7 @@ TODO를 실제 구현으로 교체했습니다. 호스트는 `src/craft_control/
 | 보드 / 스케치 | 명령 CSV | 피드백 CSV |
 | --- | --- | --- |
 | `wheel_clock/wheel_clock.ino` | `wheel_l,wheel_r,clock` | `wheel_l,wheel_r,clock,wheel_state,clock_state` + IMU 7개 |
-| `lm_arm/lm_arm.ino` | `lm,shoulder,elbow,wrist_pitch,tool_roll,gripper` | 같은 6개 위치 + `arm_lm_state,gripper_current_a` + IMU 7개 |
+| `lm_arm/lm_arm.ino` | `lm,shoulder,elbow,wrist_pitch,tool_roll,gripper` | 같은 6개 위치 + `arm_lm_state` + 같은 순서의 전류 6개 [A] + IMU 7개 |
 
 USB CDC `Serial`, 115200 설정, ASCII CSV, 줄 끝 `\n`입니다. `\r\n`도 받습니다.
 피드백은 명령을 받기 전부터 자체 송신하며 정상 버스에서는 약 50 Hz입니다.
@@ -57,9 +57,17 @@ LM의 m→rad 변환과 IK 관절 매핑은 호스트가 담당합니다.
   **일치시켰습니다**(2026-10-27, 이전 LM 2도·팔 1도). 보드는 각 축이 이 범위 안에 들어올
   때까지 `state=1`(moving)을 보내므로, 한쪽만 바꾸면 호스트가 더 좁을 때 작업이 끝나지
   않습니다. 바꿀 때는 두 곳을 같이 바꾸고 `resetarm`으로 다시 올립니다.
-- `PROFILE_ACCELERATION` 예시 raw 값은 10, 위치축 `PROFILE_VELOCITY`는 30입니다.
-  실제 모델의 단위와 하중에 맞춰 조정하세요. 가속 프로파일과 PID는 DYNAMIXEL이 담당합니다.
-  `DRIVE_MODE=0`으로 정방향·속도 기반 프로파일을 설정하고 물리 방향은 소프트웨어로 환산합니다.
+  2026-11-07부터 호스트가 이동마다 LM·팔 축의 허용오차를 넓힐 수 있습니다(`TOL,<0.01도>`, 아래 키워드 명령).
+  기본값 0.5도는 그대로입니다.
+- 위치축은 **시간 기반 프로파일**입니다(`DRIVE_MODE` bit 2, `kTimeBased`, 2026-11-06). 이동마다 `PROFILE_VELOCITY`에
+  이동 시간[ms], `PROFILE_ACCELERATION`에 램프 시간(이동 시간의 25%)을 씁니다. 그래서 한 명령의 모든 축이 같이
+  출발하고 같이 도착합니다(관절 공간에서 직선 경로). `config.h`의 `PROFILE_VELOCITY` 값은 속도 상한으로 씁니다.
+  이동 시간은 가장 먼 축이 이 상한(램프 포함 최고 속도)을 넘지 않도록 늘어납니다.
+  - 상한 (2026-11-07): 팔 4축은 50 × 0.229 rpm = **68.7 deg/s**(이전 30 = 41.2)이고, 60은 넘기지 않습니다.
+    LM은 180 = 41.2 rpm ≈ 28 mm/s로, 무부하 46 rpm의 90%라 그대로 둡니다. 그리퍼는 30이며 이동 시간의 70%를 씁니다(`kTimeScale`).
+  - 근거: 11/06~07 bag에서 숄더 전류는 속도(15~57 deg/s)와 무관하게 최대 1.1 A(정지 전류 2.3 A의 절반, 중력이 지배)였습니다.
+    실측 최고 속도는 상한의 약 1.34배(50에서 약 90~97 deg/s)이고, 절반 부하 XM430-W350의 약 125~140 deg/s 아래입니다.
+  - 목표는 바뀐 축에만 씁니다. 같은 목표를 다시 쓰면 시간 기반 이동이 처음부터 다시 시작되기 때문입니다.
 
 clock은 각도를 0~2π로 접지 않습니다. 음수와 2π 초과 목표를 그대로 raw 위치로
 변환하므로 호스트가 계산한 최단 회전 목표를 추종합니다. Extended Position의
@@ -91,6 +99,29 @@ clock은 각도를 0~2π로 접지 않습니다. 음수와 2π 초과 목표를 
   무시하고 `state=2`입니다. `HOLD`는 그 자리의 위치를 목표로 잡고 토크를 다시 켭니다.
   최초 명령 이후의 의도한 해제이므로 위의 "예상하지 않은 토크 해제" 오류가 아닙니다.
   호스트 단축 명령: `relaxarm` / `holdarm` (`~/.bashrc`, control_master 종료 후).
+
+## 키워드 명령과 진단 줄 (lm_arm, 2026-11-06~07)
+
+CSV 목표 줄 사이에 아래 한 줄짜리 키워드를 보낼 수 있습니다(`CraftProtocol.h`). 형식이 틀리면 무시합니다.
+control_master가 MANIPULATOR 작업마다 `IGAIN` → `TOL` → `TIME` → 목표 순서로 보냅니다(`src/craft_control/README.md`).
+
+| 줄 | 동작 |
+| --- | --- |
+| `RELAX` / `HOLD` | 토크 끄기 / 그 자리에서 다시 켜기 (위 정지 및 오류 처리) |
+| `TIME,<0..32767>` | 다음 이동의 시간[ms]. 0이면 속도 상한대로 |
+| `TOL,<0..500>` | 느슨한 축(`kLooseTolerance`: LM과 팔 4축, 그리퍼 제외)의 도착 허용오차[0.01도]. 0이면 각 축 자기 값(0.5도). 보드의 `state=0` 판정에 씁니다 |
+| `IGAIN,<축 0..N-1>,<0..16383>` | 그 위치축의 `POSITION_I_GAIN`(RAM)을 바로 씁니다 |
+| `IGAIN,BOOT` | 모든 위치축을 켜질 때 값(`kPositionIGains`, 0/130/100/200/100/0)으로 되돌립니다 |
+
+`IGAIN` 쓰기가 실패하면 다른 쓰기 실패와 똑같이 영구 오류(`state=2`)로 래치됩니다.
+
+**진단 줄.** 1초마다, 그리고 오류가 난 순간에 `D,<reason>,<motor id>,<code>,<최소 전압>,<모터별 전압...>`을 보냅니다.
+reason: 1 하드웨어 오류, 2 토크 꺼짐/재부팅, 3 무응답, 4 쓰기 실패, 5 시작 실패, 6 설정 오류.
+control_master는 이 줄을 `/control/arm_diag`로 내보내고, 오류 원인을 상태 메시지에 붙입니다.
+`checkarm`은 이 줄로 READY / FAULT / 저전압(10.5 V 미만)을 색깔로 표시합니다.
+
+**포트가 닫혀 있을 때.** 피드백과 진단 줄은 `if (Serial)`(DTR)일 때만 보냅니다. 읽는 쪽이 없으면 OpenCR의 `vcp_write`가
+줄마다 100 ms씩 기다리기 때문입니다. 그러면 루프가 몇 초씩 걸리고, 1200 baud 업로드 요청도 무시됩니다(2026-11-06).
 
 ## 빌드 및 업로드
 

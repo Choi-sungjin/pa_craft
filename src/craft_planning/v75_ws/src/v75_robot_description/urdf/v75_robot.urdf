@@ -138,8 +138,9 @@
          was 0.12225 (122.25 mm, CAD), which put every TCP 8.25 mm above the real one. -->
     <origin xyz="0.129 0.051 0.114" rpy="0 0 0" />
     <axis xyz="1 -4.17700833006e-17 -1.45864345059e-18" />
-    <!-- 5-degree margin inside measured motor limits (2026-11-02); previous lower=-0.3848 upper=2.0237. -->
-    <limit effort="0" velocity="0" lower="-0.3848" upper="1.8910" />
+    <!-- 5-degree margin inside measured motor limits 44.6-185 deg, offset 67.10 (straight-up pose, 2026-11-06);
+         previous lower=-0.3848 upper=1.8910 (offset 71.65), before that -0.3848 / 2.0237. -->
+    <limit effort="0" velocity="0" lower="-0.3054" upper="1.9703" />
   </joint>
   <joint name="elbow_joint" type="revolute">
     <parent link="shoulder_link" />
@@ -148,8 +149,10 @@
          was 0 0.077280 0.173574 (190 mm), CAD 0 0.0764664888983 0.171746546037 (188.0 mm). -->
     <origin xyz="0 0.076060 0.170833" rpy="0 0 0" />
     <axis xyz="1 -6.34787704949e-17 -3.21286950234e-19" />
-    <!-- 5-degree margin inside measured motor limits (2026-11-02); previous lower=-1.4379 upper=3.4490. -->
-    <limit effort="0" velocity="0" lower="-1.3559" upper="3.4506" />
+    <!-- 5-degree margin inside measured motor limits (new bracket 36.3-309.2 deg, 2026-11-06), offset 132.69
+         (straight-up pose, 2026-11-06); previous lower=-1.3366 upper=3.2516 (offset 117.89), before that
+         -1.3559 / 3.4506, -1.4379 / 3.4490. -->
+    <limit effort="0" velocity="0" lower="-1.5949" upper="2.9933" />
   </joint>
   <joint name="wrist_pitch_joint" type="revolute">
     <parent link="elbow_link" />
@@ -158,9 +161,11 @@
          Measured 95 mm axis to axis (2026-10-26), direction kept; was 0 0.089498 0.021309 (92 mm). -->
     <origin xyz="0 0.092417 0.022004" rpy="0 0 0" />
     <axis xyz="1 -6.34787704949e-17 -3.21286950234e-19" />
-    <!-- 5-degree margin inside measured motor limits -16.7–250.5 deg, offset 121.80 deg (2026-11-02);
-         previous lower=-2.5366 upper=1.9523 (offset 100.16), before that -2.3655 / 2.3537. -->
-    <limit effort="0" velocity="0" lower="-2.1589" upper="2.3300" />
+    <!-- 5-degree margin inside measured motor limits -110.7–152.1 deg, offset 30.69 deg (straight-up pose,
+         2026-11-06; 25.60 from the stops); previous lower=-2.1205 upper=2.2916, -2.1589 / 2.3300 (-16.7–250.5,
+         offset 121.80, 2026-11-02), before that -2.5366 / 1.9523. -->
+    <!-- lower end 4 deg inside the measured 152.1 (148.1 raw) for the clock pick over pose (2026-11-06). -->
+    <limit effort="0" velocity="0" lower="-2.0491" upper="2.3804" />
   </joint>
   <joint name="tool_roll_joint" type="revolute">
     <parent link="wrist_pitch_link" />
@@ -207,9 +212,9 @@
   <joint name="tool_tcp_joint" type="fixed">
     <parent link="tool_roll_link" />
     <child link="tool_tcp" />
-    <!-- Measured horn face to open fingertip 133 mm (horn->gripper 48 + gripper 85; CAD 125.3), jaws stretched
-         by fit_measured.py. TCP at the middle of the 30 mm usable grip, 15 mm behind the tip; was 0.115 (36 mm grip). -->
-    <origin xyz="0 0.118 0" rpy="0 0 0" />
+    <!-- Measured horn face to fingertip 132 mm, usable grip 54 mm from the tip (2026-11-06). TCP at the middle of
+         the usable grip, 27 mm behind the tip. Was 0.118 (tip 133, 30 mm grip), before that 0.115 (36 mm grip). -->
+    <origin xyz="0 0.105 0" rpy="0 0 0" />
   </joint>
   <link name="base_link_vis_green">
     <visual name="base_link_green">

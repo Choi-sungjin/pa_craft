@@ -38,7 +38,8 @@ ASSUME = dict(
     puck_ahead=0.13,    # LiDAR front face -> puck CENTRE, straight ahead (-Y) [m]
     puck_size=(0.03, 0.03, 0.06),  # box x, y, height [m]; cylinder r 0.03 h 0.06 uses the same grasp height
     puck_height=0.06,   # [m]
-    finger_beyond_tcp=0.015,   # jaw mesh tip past tool_tcp along the tool axis [m] (TCP = middle of the 30 mm usable grip)
+    finger_beyond_tcp=0.027,   # fingertip past tool_tcp along the tool axis [m] (TCP = middle of the 54 mm usable grip,
+                               # tip 132 mm from the tool-roll horn, 2026-11-06; was 0.015 for a 30 mm grip)
     finger_clearance=0.003,    # fingertip height above the shelf top at grasp [m]
     approach_above=0.04,  # TCP height above the grasp point for approach [m] (needs 29 of the 30 deg lean)
     # On the 7 cm shelf the wrist_pitch lower limit binds as the TCP rises above the grasp.
@@ -216,6 +217,29 @@ def ros_to_urdf(p):
     return np.array([a['center_x'] - y, a['center_y'] + x, a['floor_z'] + z])  # front = +Y
 
 
+def grasp_at(x_offset, ahead):
+    """Grasp TCP (URDF base_link) of a standing puck x_offset along the LM axis from the LiDAR centre and
+    ahead of the LiDAR front face, on the shelf. Fingertips end grasp_coverage of the puck height below its
+    top; the TCP sits finger_beyond_tcp above them."""
+    a = ASSUME
+    grasp_z = max(a['puck_height'] * (1 - a['grasp_coverage']) + a['finger_beyond_tcp'],
+                  a['finger_beyond_tcp'] + a['finger_clearance'])
+    return np.array([a['lidar_center_x'] + x_offset, a['lidar_front_y'] - ahead,
+                     a['floor_z'] + a['shelf_height'] + grasp_z + a['hw_z_correction']])
+
+
+def motor_bad(q, ctrl):
+    """Names of the joints whose motor angle (control.yaml offsets/directions) is outside the motor limits."""
+    motor = [ctrl['arm_joint_offsets'][i] + ctrl['arm_joint_directions'][i] * q[n]
+             for i, n in enumerate(Chain.NAMES[1:])]
+    lm_motor = ctrl['lm_motor_offset'] + ctrl['lm_motor_direction'] * q['slide_joint'] / ctrl['lm_meters_per_rad']
+    bad = [n for n, m, l, h in zip(Chain.NAMES[1:], motor, ctrl['arm_min_angle'], ctrl['arm_max_angle'])
+           if not l <= m <= h]
+    if not ctrl['lm_min_angle'] <= lm_motor <= ctrl['lm_max_angle']:
+        bad.append('LM')
+    return bad
+
+
 def main():
     a = ASSUME
     if '--lying' in sys.argv:
@@ -223,14 +247,9 @@ def main():
     ch = Chain(URDF)
     ctrl = yaml.safe_load(open(CONTROL_YAML))['control_master']['ros__parameters']
     off, dirs = ctrl['arm_joint_offsets'], ctrl['arm_joint_directions']
-    lo_m, hi_m = ctrl['arm_min_angle'], ctrl['arm_max_angle']
-    lm_m = (ctrl['lm_min_angle'], ctrl['lm_max_angle'])
-    # Fingertips end grasp_coverage of the puck height below its top; TCP sits finger_beyond_tcp above them.
-    grasp_z = max(a['puck_height'] * (1 - a['grasp_coverage']) + a['finger_beyond_tcp'],
-                  a['finger_beyond_tcp'] + a['finger_clearance'])
     px, py = a['lidar_center_x'] + a['puck_x_offset'], a['lidar_front_y'] - a['puck_ahead']
     top = a['floor_z'] + a['shelf_height']
-    grasp = np.array([px, py, top + grasp_z + a['hw_z_correction']])
+    grasp = grasp_at(a['puck_x_offset'], a['puck_ahead'])
     if a['lying']:  # the taught pose; the puck's near end sits grasp_coverage of its length inside the jaws
         q = {n: math.radians(v) for n, v in zip(Chain.NAMES[1:], a['taught_grasp_urdf_deg'])}
         T = ch.fk(q)
@@ -270,9 +289,7 @@ def main():
         tool_dir = ch.fk(q)[:3, 1]
         motor = [off[i] + dirs[i] * q[n] for i, n in enumerate(Chain.NAMES[1:])]
         lm_motor = ctrl['lm_motor_offset'] + ctrl['lm_motor_direction'] * q['slide_joint'] / ctrl['lm_meters_per_rad']
-        mbad = [n for n, m, l, h in zip(Chain.NAMES[1:], motor, lo_m, hi_m) if not l <= m <= h]
-        if not lm_m[0] <= lm_motor <= lm_m[1]:
-            mbad.append('LM')
+        mbad = motor_bad(q, ctrl)
         print(f'[{name}] tcp={np.round(tcp, 4)}  fk_err={err * 1000:.2f} mm  tool_dir={np.round(tool_dir, 3)}')
         print('    URDF  ' + '  '.join(f'{n.split("_")[0]} {q[n]:+.4f}' for n in Chain.NAMES) + f'  jaw {jaw:+.4f}')
         print('    motor ' + f'LM {math.degrees(lm_motor):.1f}  ' +

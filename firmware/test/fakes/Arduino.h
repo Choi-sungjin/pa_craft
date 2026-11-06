@@ -16,6 +16,8 @@ struct HardwareSerial {};
 extern HardwareSerial Serial3;
 struct TestSerial {
   std::string input, output;
+  bool connected = true;  // a host has the port open (DTR)
+  explicit operator bool() const { return connected; }
   void begin(int) {}
   int available() const { return input.size(); }
   int read() { char c = input.front(); input.erase(0, 1); return c; }

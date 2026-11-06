@@ -90,6 +90,16 @@ or physical motion validation has been performed for these settings.
 `TaskCommand.joints` carries the five-joint IK result: slide [m], then shoulder,
 elbow, wrist_pitch and tool_roll [rad]. ControlMaster validates the complete manipulator
 command before setting Arm and LM targets; invalid or uncalibrated requests are rejected.
+
+Per MANIPULATOR task (2026-11-06/07), sent to the arm board before the task's targets:
+
+| TaskCommand field | Meaning | Board line |
+| --- | --- | --- |
+| `duration_s` | travel time of the LM and arm joints (time-based profile, all axes start and arrive together); 0 = the firmware speed caps; at most 32.767 s. A GRIPPER task sends `TIME,0` | `TIME,<ms>` |
+| `tolerance_rad` | arrival tolerance of the LM and the four arm motors [motor rad] for this task; 0 = `control.yaml` (0.5 deg); at most 5 deg. Used by ArmController/LmController (`set_task_tolerance`) and by the board's state 0, so both agree | `TOL,<0.01 deg>` |
+| `position_i_gains` | shoulder, elbow, wrist_pitch, tool_roll Position I gain from this task on (0..16383). Empty: the board's power-up gains (`IGAIN,BOOT`, sent once after a task that set some, and at the first task) | `IGAIN,<axis>,<gain>` |
+
+The demo runner sets them per step: `demo/puck_pick/README.md` (dice demo).
 The callback queues commands and the control loop applies them once. ControlMaster aggregates
 independent controller results; Planning owns mission ordering. Legacy controller-specific
 planning target subscriptions have been removed to prevent bypassing the task protocol.
