@@ -218,20 +218,22 @@ private:
     return false;
   }
 
-  // One motor per tick (axes, then followers): PRESENT_INPUT_VOLTAGE [V], 0 when it does not answer.
+  // One motor per tick (axes, then followers): PRESENT_INPUT_VOLTAGE [V] and PRESENT_TEMPERATURE [deg C], 0 when it
+  // does not answer.
   void sampleVoltage() {
     const unsigned count = N + follower_count_;
     const unsigned k = voltage_next_ % count;
     const uint8_t id = k < N ? axes_[k].id : followers_[k - N].id;
     int32_t raw;
     const double v = readId(ControlTableItem::PRESENT_INPUT_VOLTAGE, id, raw) ? raw * 0.1 : 0.0;
+    temperature_[k] = readId(ControlTableItem::PRESENT_TEMPERATURE, id, raw) ? static_cast<int>(raw) : 0;
     voltage_[k] = v;
     if (v > 0 && (voltage_min_ == 0 || v < voltage_min_)) voltage_min_ = v;
     voltage_next_ = (k + 1) % count;
   }
 
-  // "D,reason,motor id,code,lowest V since the last line,V per motor (axes, then followers)". Starts with a
-  // letter so the numeric feedback parsers skip it.
+  // "D,reason,motor id,code,lowest V since the last line,V per motor (axes, then followers),-1,deg C per motor"
+  // (-1 marks where the temperatures start; 2026-11-07). Starts with a letter so the numeric feedback parsers skip it.
   void publishDiagnostic() {
     Serial.print('D'); Serial.print(',');
     Serial.print(static_cast<int>(fault_reason_)); Serial.print(',');
@@ -239,6 +241,8 @@ private:
     Serial.print(static_cast<int>(fault_code_)); Serial.print(',');
     Serial.print(voltage_min_, 1);
     for (unsigned k = 0; k < N + follower_count_; ++k) { Serial.print(','); Serial.print(voltage_[k], 1); }
+    Serial.print(','); Serial.print(-1);
+    for (unsigned k = 0; k < N + follower_count_; ++k) { Serial.print(','); Serial.print(temperature_[k]); }
     Serial.println();
     voltage_min_ = 0;
   }
@@ -548,6 +552,7 @@ private:
   unsigned diag_ticks_ = 0;
   double voltage_[N + kMaxFollowers] = {};
   double voltage_min_ = 0;
+  int temperature_[N + kMaxFollowers] = {};
   unsigned voltage_next_ = 0;
 };
 

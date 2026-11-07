@@ -107,11 +107,11 @@ PLACE_ABOVE_RAW_DEG = [593.2, 99.9, 256.6, -80.3, 90.0]
 # After the release the jaws turn 90 deg off the puck (as the clock load does, sis1 back 1) before going up.
 PLACE_RELEASE_ROLL_RAW_DEG = 0.0
 # Dice (--dice [N], 2026-11-07): the stored pucks of the clock one after the other onto the box as dice face N (1-6,
-# default 6). 3x3 grid on the box centre, 60 mm apart. Box moved 2026-11-07: its centre on the line through the
-# carousel centre and slot 12 (LM 548.3 = clock 12, gripper at LiDAR centre -7.5 mm; was -12.5), 112.5 mm ahead of
-# the LiDAR face: rows 172.5 / 112.5 / 52.5 mm ahead; centre column = the clock-12 LM. Columns +-60 mm are past the LM
-# ends (puck centre reach -63.1 .. +37.8 mm), so the side columns sit at the LM ends instead: right -63.0 (4.5 mm off
-# the 60 mm grid), left +37.7 (14.8 mm off: OVER the 10 mm the rules allow; was 9.8 with the box at -12.5). Computed in the URDF model from the centre place pose (box top + 12 mm), the held puck's bottom kept on the
+# default 6). 3x3 grid on the box centre, 60 mm apart. Box centre on the LM middle (2026-11-07, user: fits the
+# rules best; LM 594.1, gripper at LiDAR centre -12.65 mm; was -7.5 on the clock-12 line, LM 548.3, before that
+# -12.5), 112.5 mm ahead of the LiDAR face: rows 172.5 / 112.5 / 52.5 mm ahead. Columns +-60 mm are past the LM ends
+# (puck centre reach -63.0 .. +37.7 mm), so the side columns sit at the LM ends instead, both 9.65 mm off the 60 mm
+# grid (the rules allow 10; with the box on the clock-12 line left was 14.8, right 4.5). Computed in the URDF model from the centre place pose (box top + 12 mm), the held puck's bottom kept on the
 # vertical line over its pip: place, 40 mm and 75 mm over it (75: the puck bottom 15 mm over the placed pucks' tops;
 # the tool leans up to 17 deg there, the wrist limits). Each row aims 26 mm farther out than its target (puck 1 landed
 # 26 mm short, 2026-11-07). Jaws close left-right (tool_roll raw 0); no roll turn after the release (the open jaws
@@ -123,13 +123,38 @@ PLACE_RELEASE_ROLL_RAW_DEG = 0.0
 # -96.16]; far 40 stays +3, unused since the 40 mm stop went and +5 is past the wrist_pitch limit). Far 75
 # stays (3 mm up is past the wrist_pitch limit; it is only the clearance height). Was far 0 [130.43, 213.48, -93.01],
 # 40 [122.4, 206.69, -99.83]; near 0 [88.49, 281.42, -67.01], 40 [90.36, 255.07, -91.49], 75 [84.93, 237.75, -105.24].
+# Front-back error fed forward (2026-11-07 run sis3 6, six pucks; DICE_EY_MM): every pose of a row moved toward the
+# robot by its ey (URDF model, height and tool angle kept, so the vertical line too). Was far 0 [132.0, 206.38,
+# -98.54], 40 [124.31, 199.82, -104.79], 75 [113.7, 205.16, -101.06]; middle 0 [107.02, 258.68, -71.22], 40 [110.62,
+# 227.68, -98.61], 75 [100.79, 222.06, -103.07]; near 0 [88.53, 282.59, -65.8], 40 [90.13, 256.58, -90.21], 75 [84.41,
+# 239.76, -103.75]. Far 0 then 2 mm up (2026-11-07 run sis_1107_1343: the far put-down was held 2.0 mm over its
+# target before the release (it touched ~1.5 mm earlier than in sis_1107_1237/1246, middle and near as before) and
+# dropped 9.6 mm under it after; was [127.88, 216.12, -92.92]).
 DICE_ROWS = {
-    'far': {0: [132.0, 206.38, -98.54], 40: [124.31, 199.82, -104.79], 75: [113.7, 205.16, -101.06]},
-    'middle': {0: [107.02, 258.68, -71.22], 40: [110.62, 227.68, -98.61], 75: [100.79, 222.06, -103.07]},
-    'near': {0: [88.53, 282.59, -65.8], 40: [90.13, 256.58, -90.21], 75: [84.41, 239.76, -103.75]},
+    'far': {0: [128.37, 213.68, -94.87], 40: [119.75, 210.33, -98.83], 75: [110.2, 212.18, -97.54]},
+    'middle': {0: [103.7, 263.61, -69.61], 40: [106.61, 234.35, -95.95], 75: [97.07, 227.14, -101.71]},
+    'near': {0: [88.22, 282.87, -65.83], 40: [89.83, 256.87, -90.22], 75: [84.13, 239.95, -103.84]},
 }
-# robot left = away from the LM motor; centre was 592.8 (box at -12.5)
-DICE_COLS_LM_RAW_DEG = {'left': 142.0, 'centre': 548.3, 'right': 1046.2}
+# Placement error as formulas (2026-11-07 run sis3 6 choi, six pucks, measured on the box; the box is not quite flat
+# and a released puck can shift, ~1 mm). x = toward the LM motor, y = away from the LM, both from where the puck was
+# aimed [mm]; xc = aimed puck centre toward the LM motor from the LiDAR centre [mm]; t = (row ahead - 112.5) / 60
+# (near -1, middle 0, far +1).
+#   ex = -9.83 - 0.0298 (xc - 12.65)    away end -8.3, motor end -11.3; no row trend (+0.5 per row), rms 0.9
+#   ey = 10.5 + 2.75 t - 6.75 t^2       near +1.0, middle +10.5, far +6.5; no column trend (+0.3), rms 0.7
+# ex is fed forward on the LM (dice_lm), ey on the row poses (DICE_ROWS, moved once in the model). Measured pairs
+# (ex, ey) far/middle/near: away end -8,7 / -7,10 / -10,0; motor end -11,6 / -12,11 / -11,2.
+DICE_EX_MM = (-9.83, -0.0298, 12.65)  # a, b, xc0: ex = a + b (xc - xc0)
+DICE_EY_MM = {'far': 6.5, 'middle': 10.5, 'near': 1.0}  # applied to DICE_ROWS above
+# Box and grid (2026-11-07): the side columns cannot reach the 60 mm grid (the LM ends), so the box centre sits in
+# the middle of where the pucks really land at the LM ends (with ex: -46.0 .. +51.7 mm, middle +2.8): both side
+# columns land ~11.2 mm inside their grid points, the centre column on it. Was the LM middle (+12.65, LM 594.1, before
+# ex was known), the clock-12 line (+7.5, LM 548.3), +12.5.
+DICE_BOX_X_MM = 2.8   # box centre toward the LM motor from the LiDAR centre
+DICE_GRID_MM = 60.0
+DICE_COL_STEPS = {'left': -1, 'centre': 0, 'right': 1}  # robot left = away from the LM motor
+# sis3 cal away|mid|motor: three pucks (far, middle, near) at an LM end / the LM middle with no ex correction, to
+# re-measure ex (ey is in the rows, so y shows what is left). The columns are 50 mm apart: one per run.
+DICE_CAL_LM_RAW_DEG = {'away': 142.0, 'mid': 594.1, 'motor': 1046.2}
 DICE_PLACE_ROLL_RAW_DEG = 0.0  # jaws close left-right over the box
 # Pips as (row, column), the picture seen from behind the robot: top row = far. 2 and 3 on the far-left / near-right
 # diagonal. Put down column by column from the robot's left, far to near in each, so the held puck never passes over a
@@ -142,8 +167,11 @@ DICE_FACES = {
     5: [('far', 'left'), ('near', 'left'), ('middle', 'centre'), ('far', 'right'), ('near', 'right')],
     6: [('far', 'left'), ('middle', 'left'), ('near', 'left'), ('far', 'right'), ('middle', 'right'), ('near', 'right')],
 }
-# The face: a bare 1-6 on the command line (sis3 4, sis3 4 choi); default 6.
-DICE_FACE = next((int(a) for a in sys.argv[1:] if a in ('1', '2', '3', '4', '5', '6')), 6)
+# The face: a bare 1-6 or cal on the command line (sis3 4, sis3 4 choi, sis3 cal motor); default 6.
+DICE_FACE = next((a if a == 'cal' else int(a) for a in sys.argv[1:] if a in ('1', '2', '3', '4', '5', '6', 'cal')), 6)
+# sis3 cal away|mid|motor: one column of the bend map, far to near (default mid).
+DICE_CAL_COL = next((a for a in sys.argv[1:] if a in DICE_CAL_LM_RAW_DEG), 'mid')
+DICE_FACES['cal'] = [('far', DICE_CAL_COL), ('middle', DICE_CAL_COL), ('near', DICE_CAL_COL)]
 # The clock brings the next stored puck to the guide one slot at a time (after each place, the arm over the box).
 # ASSUMED order: slot 12 first, then 1, 2, ... (one slot each, +30 deg); change if the pucks sit the other way round.
 DICE_SLOTS = [12, 1, 2, 3, 4, 5]
@@ -466,6 +494,27 @@ def pick_steps(n):
     ]
 
 
+def dice_lm(col):
+    """URDF slide [m] for a column and a note for the step name. Grid columns: the grid point (DICE_BOX_X_MM +
+    DICE_GRID_MM steps) with ex fed forward (DICE_EX_MM), kept inside the LM limits (an LM end cannot go further
+    out: the note says how far it lands from its grid point). cal columns: their LM point as it is."""
+    ch = plan.Chain(plan.URDF)
+    # puck centre toward the LM motor from the LiDAR centre = slide - x0 (the arm moves in the plane of the shoulder)
+    x0 = ch.origin('slide_joint')[0] + ch.origin('shoulder_joint')[0] - plan.ASSUME['lidar_center_x']
+    if col in DICE_CAL_LM_RAW_DEG:
+        slide = teach.raw_to_target([DICE_CAL_LM_RAW_DEG[col], 0, 0, 0, 0, 0])[0]
+        return slide, f', x {(slide - x0) * 1000:+.1f} mm, no ex'
+    a, b, xc0 = DICE_EX_MM
+    goal = DICE_BOX_X_MM + DICE_GRID_MM * DICE_COL_STEPS[col]
+    aim = (goal - a + b * xc0) / (1 + b)  # aim + ex(aim) = goal
+    lo, hi = sorted(teach.raw_to_target([math.degrees(v), 0, 0, 0, 0, 0])[0] for v in teach.motor_limits()[0])
+    slide = float(min(max(aim / 1000 + x0, lo), hi))
+    x = (slide - x0) * 1000
+    land = x + a + b * (x - xc0)
+    note = f', x {goal:+.1f} mm (LM aim {x:+.1f})'
+    return slide, note + (f', LM end: lands {land - goal:+.1f} mm off' if abs(land - goal) > 0.05 else '')
+
+
 def dice_steps(current_slide=None, start=None):
     """--dice [N]: dice face DICE_FACE from the stored pucks (DICE_*), one timed move per step, ends at the nominal
     pose. Per puck: clock slot to the guide, the pick (pick_steps), the nominal via pose, 75 mm over its pip
@@ -477,7 +526,7 @@ def dice_steps(current_slide=None, start=None):
     total = len(pips)
     s = [('dice 0: to the nominal via pose (gripper stays open)', m, via[:5])]
     for k, (row, col) in enumerate(pips, 1):
-        lm = teach.raw_to_target([DICE_COLS_LM_RAW_DEG[col], 0, 0, 0, 0, 0])[0]
+        lm, ff = dice_lm(col)
         pose = lambda h, row=row, lm=lm: [lm] + teach.raw_to_target([0] + DICE_ROWS[row][h]
                                                                     + [DICE_PLACE_ROLL_RAW_DEG, 0])[1:5]
         n = f'dice {k}/{total}'
@@ -489,7 +538,7 @@ def dice_steps(current_slide=None, start=None):
         s += pick_steps(f'{n} pick:')
         s += [
             (f'{n} to the nominal via pose with the puck', m, via[:5]),
-            (f'{n} 75 mm over the {row}-{col} pip (tool_roll to raw {DICE_PLACE_ROLL_RAW_DEG:g})', m, pose(75)),
+            (f'{n} 75 mm over the {row}-{col} pip (tool_roll to raw {DICE_PLACE_ROLL_RAW_DEG:g}{ff})', m, pose(75)),
             (f'{n} put down on the {row}-{col} pip, one move', m, pose(0)),
             (f'{n} open gripper full (release)', TaskCommand.GRIPPER, False),
             # One move (2026-11-07, the 40 mm stop dropped): TCP up to 7.8 mm off the straight line (near row), along
@@ -497,6 +546,11 @@ def dice_steps(current_slide=None, start=None):
             (f'{n} up to 75 mm, one move', m, pose(75)),
         ]
     s.append(('dice end: to the nominal pose (gripper full open)', m, start))
+    # Shoulder I off while it waits at the nominal pose (2026-11-07, user): run sis_1107_1343 held the nominal pose
+    # at 0.6 A on the shoulder for minutes and the shoulder got hot (48 C, the others 37-40) and weak. Same target, no
+    # move: only the gains change, once it has arrived at 0.5 deg (with no I it may settle ~0.5 deg off, so this
+    # step has the via tolerance). The next run's first step sends the base gains back.
+    s.append(('dice end: hold the nominal pose, shoulder I off', m, start))
     return s
 
 
@@ -608,7 +662,7 @@ AUTO = 'choi' in sys.argv[1:] or '--auto' in sys.argv[1:]
 # 75 mm over the pip keeps 0.5 deg: tried at 3 deg in 0444, the put-down then started while the joints were still
 # swinging from it and pushed the puck 1.2-3.3 mm into the box for 4-6 s (0438 at 0.5 deg: within +-1.1 mm).
 VIA_TOLERANCE_DEG = 3.0
-LOOSE_STEPS = ('via pose', 'up to 75 mm, one move')
+LOOSE_STEPS = ('via pose', 'up to 75 mm, one move', 'shoulder I off')
 
 
 def step_tolerance(name):
@@ -641,6 +695,7 @@ STEP_I_GAINS = {
     'pick: up to 40 mm over the slot': [100, 100, 200, 100],
     'put down on the': [130, 80, 160, 100],
     'up to 75 mm, one move': [130, 80, 160, 100],
+    'shoulder I off': [0, 100, 200, 100],  # dice end, waiting at the nominal pose
 }
 
 

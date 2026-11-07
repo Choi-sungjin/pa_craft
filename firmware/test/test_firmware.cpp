@@ -286,6 +286,7 @@ void diagnostics() {
     for (unsigned i = 0; i < 6; ++i) axes[i] = {static_cast<uint8_t>(i + 1), false, 0.001, 0, 1, -10, 10, 10, 30, 0.035};
     Dynamixel2Arduino bus(Serial3, 84);
     for (unsigned id = 1; id <= 6; ++id) bus.registers[{id, PRESENT_INPUT_VOLTAGE}] = id == 4 ? 115 : 121;
+    bus.registers[{2, PRESENT_TEMPERATURE}] = 61;
     craft::MotorBoard<6> board(bus, axes, true, 1000000, 0.00269);
     board.begin();
     for (unsigned k = 0; k < craft::kDiagTicks; ++k) {
@@ -293,7 +294,7 @@ void diagnostics() {
       test_time_ms += 20;
       board.tick();
     }
-    assert(Serial.output.find("\nD,0,0,0,11.5,12.1,12.1,12.1,11.5,12.1,12.1\n") != std::string::npos);
+    assert(Serial.output.find("\nD,0,0,0,11.5,12.1,12.1,12.1,11.5,12.1,12.1,-1,0,61,0,0,0,0\n") != std::string::npos);
     Serial = {};
     bus.registers[{3, static_cast<uint8_t>(c.item)}] = c.value;
     test_time_ms += 20;
