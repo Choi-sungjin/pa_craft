@@ -1,0 +1,36 @@
+{
+  "schema": "square_far20_validation_v1",
+  "method": "square_far20_spec_reimplementation_v1",
+  "provenance": "independent_spec_reimplementation",
+  "calibration": "uppercam_selected_calibration.json",
+  "files": {
+    "uppercam_square_far20_estimator.py": "a0ccdbfd0a5703b3c2079ea558805bf443144f333c8c447eb445e512477db848",
+    "uppercam_fast5_box_range.py": "044159eb5dcec52311cc331b1625209c48cf08c76b521bfed77e4cb78ab75ec9",
+    "uppercam_box_range.py": "92feeafb88608c37433a34f1272b6e6dfa038b18705a7ffdae96c7be53da55f3",
+    "uppercam_estimator.py": "9f014a65cdb67f7be64ebf915d7e087533d2c868b8cc2439d117e2ba061bfb9d",
+    "uppercam_selected_adapter.py": "d2930522b5e854ad4dcc5b6136f9b0fcdd0859ca1b72741d8ff2c7cfc9669dc0",
+    "uppercam_gap_calibration.py": "9675f118a4d4dfe3af3d19bffc3ce7a0983b2bd52415e475e41062be17895c3f",
+    "uppercam_causal_median.py": "5c58d5c8bada0a7b84340ae5419b4b5eb66309d6ee287b1c8faefc0c828915c0",
+    "uppercam_selected_calibration.json": "c634f08ebb26f3b9095233a58e20d184f56d3dab6acf69f9e3e604b10f51c106",
+    "@urdf": "2e230ca6acdd60d03958f274ddd0253ae286d9ab44e57c3ad08984a964343730",
+    "uppercam_geometry_pool.py": "8598d826405198f83689910f5f0ffc76e04aa7483b090234834d05565d33c2f6"
+  },
+  "evidence": {
+    "source": "boxgap_1108_1236 single bag, 8 placements",
+    "detected_frames": 863,
+    "holdout_frames": 432,
+    "holdout_mae_mm": 1.1235547034676903,
+    "holdout_p95_abs_mm": 3.2335816778324395,
+    "independent_placement_validation": false,
+    "runtime_note": "geometry math unchanged; bounded ordered two-worker runtime; selected median extrapolation flag follows supplied filter"
+  },
+  "operating_limits": {
+    "min_gap_mm": 10.0,
+    "max_gap_mm": 80.0,
+    "extrapolated_valid": false,
+    "near_uncertainty_m": 0.005,
+    "far_uncertainty_m": 0.01,
+    "uncertainty_switch_mm": 30.0,
+    "note": "temporary thresholds for tested range, not a guaranteed bound"
+  }
+}

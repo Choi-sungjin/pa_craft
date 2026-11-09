@@ -281,6 +281,8 @@ void PerceptionMaster::configure() {
   filter.persist_frames = static_cast<int>(param<int64_t>("lidar_obstacle.filter.persist_frames"));
   filter.neighbor_cells = static_cast<int>(param<int64_t>("lidar_obstacle.filter.neighbor_cells"));
   filter.min_cluster_points = static_cast<int>(param<int64_t>("lidar_obstacle.filter.min_cluster_points"));
+  filter.memory_s = param<double>("lidar_obstacle.filter.memory_s");
+  obstacle_odom_frame_ = param<std::string>("lidar_obstacle.odom_frame");
   if (!obstacle_filter_.configure(filter)) throw std::invalid_argument("invalid lidar_obstacle.filter configuration");
   odometry_topic_ = param<std::string>("odometry_source_topic");
   map_frame_ = param<std::string>("map_frame");
@@ -382,6 +384,36 @@ void PerceptionMaster::connect() {
     obstacle_map_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>("/perception/lidar/map",
       rclcpp::QoS(1).transient_local().reliable(), [this](nav_msgs::msg::OccupancyGrid::ConstSharedPtr map) {
         std::lock_guard<std::mutex> lock(obstacle_filter_mutex_); obstacle_filter_.set_map(*map);
+      });
+    planning_command_sub_ = create_subscription<std_msgs::msg::String>("/planning/command", 10,
+      [this](const std_msgs::msg::String &command) {
+        if (command.data != "START" && command.data != "RESET") return;
+        // Finish any in-flight publication before clearing; old scan callbacks may
+        // still arrive afterwards, so the acquisition-time barrier remains active.
+        std::lock_guard<std::mutex> cycle_lock(obstacle_cycle_mutex_);
+        const auto stamp = now();
+        obstacle_reset_stamp_ns_ = stamp.nanoseconds();
+        {
+          std::lock_guard<std::mutex> lock(obstacle_filter_mutex_);
+          obstacle_filter_.reset();  // Persistence and memory only; preserve the map.
+        }
+        {
+          std::lock_guard<std::mutex> lock(scan_mutex_);
+          scan_.reset(); rear_scan_.reset();
+        }
+        geometry_msgs::msg::PoseArray empty;
+        empty.header.frame_id = map_frame_;
+        empty.header.stamp = stamp;
+        lidar_obstacle_pub_->publish(empty);
+        RCLCPP_INFO(get_logger(), "%s: obstacle history and memory cleared before planning", command.data.c_str());
+      });
+    task_command_sub_ = create_subscription<craft_interfaces::msg::TaskCommand>("/planning/task_command", 10,
+      [this](const craft_interfaces::msg::TaskCommand &c) {
+        using craft_interfaces::msg::TaskCommand;
+        if (c.kind != TaskCommand::NAVIGATE || c.operation != TaskCommand::EXECUTE || c.task_id == navigate_task_id_) return;
+        navigate_task_id_ = c.task_id;
+        std::lock_guard<std::mutex> lock(obstacle_filter_mutex_); obstacle_filter_.clear_memory();
+        RCLCPP_INFO(get_logger(), "new drive (task %lu): obstacle memory cleared", static_cast<unsigned long>(c.task_id));
       });
   }
   if (lidar_input_mode_ == "raw" && enabled("lidar_obstacle")) {
@@ -687,10 +719,13 @@ std::optional<lidar_processing::Pose2D> PerceptionMaster::lidar_pose(const std::
 }
 
 bool PerceptionMaster::lidar_obstacle(Task &task) {
+  std::lock_guard<std::mutex> cycle_lock(obstacle_cycle_mutex_);
   sensor_msgs::msg::LaserScan::ConstSharedPtr input, rear;
   uint64_t id;
   { std::lock_guard<std::mutex> lock(scan_mutex_); input = scan_; rear = rear_scan_; id = scan_id_; }
-  if (!input || task.seen == id || !is_fresh_input(input->header.stamp)) return false;
+  if (!input || task.seen == id || !is_fresh_input(input->header.stamp) ||
+      rclcpp::Time(input->header.stamp).nanoseconds() <= obstacle_reset_stamp_ns_) return false;
+  if (rear && rclcpp::Time(rear->header.stamp).nanoseconds() <= obstacle_reset_stamp_ns_) rear.reset();
   std::optional<sensor_msgs::msg::LaserScan> merged;
   if (lidar_input_mode_ == "raw") {
     if (!lidar_processing::ScanMerger::is_valid_input(*input)) { task.seen = id; return false; }
@@ -711,23 +746,34 @@ bool PerceptionMaster::lidar_obstacle(Task &task) {
     merged_scan_pub_->publish(*merged);  // Preserve SLAM/RViz input without a merger node.
   }
   task.seen = id;
-  auto obstacles = lidar_.detect_obstacles(merged ? *merged : *input);
+  const auto &scan = merged ? *merged : *input;
+  auto obstacles = lidar_.detect_obstacles(scan);
   if (!obstacles) return false;
-  if (obstacle_filter_enabled_) filter_obstacles(*obstacles);
+  if (obstacle_filter_enabled_) filter_obstacles(*obstacles, scan);
   lidar_obstacle_pub_->publish(*obstacles);
   return true;
 }
 
-// Keep only obstacle points worth avoiding (LidarObstacleFilter, judged in the map frame); without map TF the
-// raw points go out so planning still sees everything.
-void PerceptionMaster::filter_obstacles(geometry_msgs::msg::PoseArray &obstacles) {
+// Keep only obstacle points worth avoiding (LidarObstacleFilter, judged in the map frame), plus the remembered ones
+// out of view (lidar_obstacle.filter.memory_s; cleared by the scan's rays), published in the map frame at the scan
+// stamp: the robot pose of that stamp = odom->scan frame at the stamp (EKF, never behind the scan) with the latest
+// map->odom (slam_toolbox's correction, which changes slowly and lags the newest scan by its processing time).
+// Planning then uses the points as they are, with no TF of its own at the scan stamp: it used to drop every message
+// whose map->odom had not reached the stamp yet, and a 0.5 s run faulted a drive as stale input (2026-11-08).
+// Without map TF the raw points go out in the scan frame so planning still sees everything.
+void PerceptionMaster::filter_obstacles(geometry_msgs::msg::PoseArray &obstacles, const sensor_msgs::msg::LaserScan &scan) {
   geometry_msgs::msg::TransformStamped tf;
   try {
-    tf = tf_buffer_->lookupTransform(map_frame_, obstacles.header.frame_id, tf2::TimePointZero);
-  } catch (const std::exception &e) {
-    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "obstacle filter off (no %s TF: %s), raw points",
-                         map_frame_.c_str(), e.what());
-    return;
+    tf = tf_buffer_->lookupTransform(map_frame_, tf2::TimePointZero, obstacles.header.frame_id,
+                                     tf2_ros::fromRclcpp(rclcpp::Time(obstacles.header.stamp)), obstacle_odom_frame_);
+  } catch (const std::exception &) {
+    try {  // odom->scan frame not at the stamp yet (startup): the latest pose
+      tf = tf_buffer_->lookupTransform(map_frame_, obstacles.header.frame_id, tf2::TimePointZero);
+    } catch (const std::exception &e) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "obstacle filter off (no %s TF: %s), raw points",
+                           map_frame_.c_str(), e.what());
+      return;
+    }
   }
   const auto &q = tf.transform.rotation;
   const double yaw = std::atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z));
@@ -737,16 +783,33 @@ void PerceptionMaster::filter_obstacles(geometry_msgs::msg::PoseArray &obstacles
   for (const auto &p : obstacles.poses) {
     points.push_back({tx + c * p.position.x - s * p.position.y, ty + s * p.position.x + c * p.position.y});
   }
+  // Every return of the scan (not only those within lidar_obstacle.max_range_m) for the memory's free-space rays.
+  // The scan is in obstacles' frame (base_link, merged): its rays start at that frame's origin.
+  std::vector<std::array<double, 2>> ray_ends;
+  ray_ends.reserve(scan.ranges.size());
+  for (size_t i = 0; i < scan.ranges.size(); ++i) {
+    const double r = scan.ranges[i], a = scan.angle_min + i * scan.angle_increment;
+    if (!std::isfinite(r) || r < scan.range_min || r > scan.range_max) continue;
+    const double x = r * std::cos(a), y = r * std::sin(a);
+    ray_ends.push_back({tx + c * x - s * y, ty + s * x + c * y});
+  }
   std::vector<bool> keep;
+  std::vector<std::array<double, 2>> remembered;
   {
     std::lock_guard<std::mutex> lock(obstacle_filter_mutex_);
     if (!obstacle_filter_.has_map()) {
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "obstacle filter: no map yet, walls not removed");
     }
     keep = obstacle_filter_.filter(points);
+    remembered = obstacle_filter_.remember(rclcpp::Time(obstacles.header.stamp).seconds(), {tx, ty}, ray_ends,
+                                           points, keep);
   }
   std::vector<geometry_msgs::msg::Pose> kept;
-  for (size_t i = 0; i < keep.size(); ++i) {if (keep[i]) kept.push_back(obstacles.poses[i]);}
+  const auto add = [&kept](const std::array<double, 2> &m) {
+      geometry_msgs::msg::Pose p; p.position.x = m[0]; p.position.y = m[1]; p.orientation.w = 1; kept.push_back(p);};
+  for (size_t i = 0; i < keep.size(); ++i) {if (keep[i]) add(points[i]);}
+  for (const auto &m : remembered) add(m);
+  obstacles.header.frame_id = map_frame_;
   obstacles.poses.swap(kept);
 }
 

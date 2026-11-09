@@ -24,7 +24,7 @@ os.environ.setdefault('ROS_LOG_DIR', str(Path(tempfile.gettempdir()) / 'craft-co
 import rclpy
 from rclpy.parameter import Parameter
 from rclpy.qos import qos_profile_sensor_data
-from geometry_msgs.msg import PoseStamped, Twist
+from geometry_msgs.msg import PointStamped, PoseStamped, Twist
 from nav_msgs.msg import Odometry, Path as RosPath
 from sensor_msgs.msg import Imu, JointState
 from std_msgs.msg import Bool, Int32
@@ -60,6 +60,9 @@ class FakeBoard:
                 pending += os.read(self.master, 4096)
                 while b'\n' in pending:
                     line, pending = pending.split(b'\n', 1)
+                    # Firmware configuration lines are not position/velocity targets.
+                    if line.startswith((b'IGAIN,', b'TOL,', b'TIME,')):
+                        continue
                     self.command = [float(value) for value in line.split(b',')]
                     self.last_command_at = time.monotonic()
 
@@ -71,18 +74,19 @@ class FakeBoard:
 
 
 class Harness:
-    def __init__(self, binary, calibrated=True):
+    def __init__(self, binary, calibrated=True, sim_time=True):
         # + imu_ok, gx, gy, gz [rad/s], ax, ay, az [g]: both boards still; lm_arm reads -1 g so
         # the relay is checked per board. lm_arm: six positions, state, six motor currents [A], IMU.
         self.arm = FakeBoard([0.05, 0.1, 0.2, 0.3, 0.4, 0.6, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, -1])
         self.drive = FakeBoard([0, 0, 0.7, 0, 0, 1, 0, 0, 0, 0, 0, 1])
         self.log = tempfile.TemporaryFile(mode='w+t')
         config = Path(__file__).resolve().parents[1] / 'config' / 'control.yaml'
-        arguments = [str(binary), '--ros-args', '--params-file', str(config)]
+        rates = Path(__file__).resolve().parents[2] / 'craft_bringup' / 'config' / 'rates.yaml'
+        arguments = [str(binary), '--ros-args', '--params-file', str(config), '--params-file', str(rates)]
         overrides = {
             'arm_lm_port': self.arm.port,
             'clock_wheel_port': self.drive.port,
-            'use_sim_time': 'true',
+            'use_sim_time': str(sim_time).lower(),
             'arm_ik_mapping_confirmed': str(calibrated).lower(),
             'lm_mapping_confirmed': str(calibrated).lower(),
             'lm_meters_per_rad': '1.0',
@@ -96,6 +100,8 @@ class Harness:
             'arm_joint_offsets': '[0.0,0.0,0.0,0.0]',
             'arm_joint_directions': '[1.0,1.0,1.0,1.0]',
             'lm_motor_offset': '0.0',
+            'lm_min_angle': '-3.0',
+            'lm_max_angle': '3.0',
             # Fixed wheel geometry for the teleop check below (geometric skid estimate).
             'wheel_radius': '0.033',
             'wheel_track': '0.289',
@@ -106,11 +112,14 @@ class Harness:
             arguments.extend(['-p', f'{name}:={value}'])
         self.process = subprocess.Popen(arguments, stdout=self.log, stderr=subprocess.STDOUT)
         self.node = rclpy.create_node('planning_watchdog_integration', parameter_overrides=[
-            Parameter('use_sim_time', value=True)])
+            Parameter('use_sim_time', value=sim_time)])
         self.held = None
         self.board_states = {}
         self.joints = None
         self.joint_samples = 0
+        self.lookahead_times = []
+        self.node.create_subscription(PointStamped, "/control/lookahead_point",
+                                      lambda m: self.lookahead_times.append(time.monotonic()), 100)
         self.node.create_subscription(Bool, '/control/planning_held', self._on_held, 10)
         for board in ['arm_lm', 'wheel', 'clock']:
             self.node.create_subscription(
@@ -161,6 +170,7 @@ class Harness:
     def send_targets(self):
         odom = Odometry()
         odom.header.frame_id = 'map'
+        odom.header.stamp = self.node.get_clock().now().to_msg()
         odom.pose.pose.orientation.w = 1.0
         self.odom_pub.publish(odom)
 
@@ -244,6 +254,11 @@ def main():
         h.pump(lambda: h.results.get(101) is not None and h.drive.command[0] > 0,
                hold=False,commands=True)
         assert list(h.results[101].controllers) == [0,0,1,0,0]
+        before = len(h.lookahead_times)
+        h.run_for(.5, hold=False, commands=True)
+        count = len(h.lookahead_times) - before
+        assert 9 <= count <= 11, f"lookahead publish count {count} in 0.5 s"
+        print(f"LOOKAHEAD_RATE_PASS: {count} messages / 0.5 s", flush=True)
         h.nav(102)
         h.pump(lambda:h.results.get(102) is not None,hold=False,commands=True)
         assert h.results[102].status==TaskResult.REJECTED

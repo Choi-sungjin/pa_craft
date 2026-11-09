@@ -1,0 +1,16 @@
+# Applied after ekf.yaml and ekf_lidar.yaml only when wheel_free:=true.
+# Disable every wheel measurement; LiDAR vx and IMU yaw rate remain enabled.
+# EKF prediction still continues between scans and after scan loss. A separate
+# freshness guard must stop navigation when valid LiDAR odometry goes stale.
+ekf_local:
+  ros__parameters:
+    predict_to_current_time: false
+    odom0_config: [false, false, false, false, false, false,
+                   false, false, false, false, false, false,
+                   false, false, false]
+ekf_global:
+  ros__parameters:
+    predict_to_current_time: false
+    odom0_config: [false, false, false, false, false, false,
+                   false, false, false, false, false, false,
+                   false, false, false]

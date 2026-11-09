@@ -117,7 +117,7 @@ control_master가 MANIPULATOR 작업마다 `IGAIN` → `TOL` → `TIME` → 목�
 
 **진단 줄.** 1초마다, 그리고 오류가 난 순간에 `D,<reason>,<motor id>,<code>,<최소 전압>,<모터별 전압...>,-1,<모터별 온도[°C]...>`을 보냅니다.
 `-1`은 온도가 시작되는 자리 표시입니다(2026-11-07 추가, 전압과 같이 한 틱에 한 모터씩 `PRESENT_TEMPERATURE`를 읽고 응답이 없으면 0).
-checkarm은 아직 `-1` 뒤를 전압으로 읽습니다(`~/.bashrc` `_craft_check` 수정 필요).
+checkarm(`ca`)은 `-1` 앞을 전압, 뒤를 온도로 따로 표시합니다(55 °C 이상 노랑, 70 °C 이상 빨강).
 reason: 1 하드웨어 오류, 2 토크 꺼짐/재부팅, 3 무응답, 4 쓰기 실패, 5 시작 실패, 6 설정 오류.
 control_master는 이 줄을 `/control/arm_diag`로 내보내고, 오류 원인을 상태 메시지에 붙입니다.
 `checkarm`은 이 줄로 READY / FAULT / 저전압(10.5 V 미만)을 색깔로 표시합니다.

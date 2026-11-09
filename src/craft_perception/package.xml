@@ -17,6 +17,7 @@
   <depend>geometry_msgs</depend>
   <depend>std_msgs</depend>
   <depend>diagnostic_msgs</depend>
+  <depend>craft_interfaces</depend>
   <depend>ament_index_cpp</depend>
   <depend>libopencv-dev</depend>
   <depend>ncnn</depend>

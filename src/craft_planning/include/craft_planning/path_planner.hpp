@@ -23,12 +23,23 @@ struct PathPlannerConfig
   double r_min = 0.08, r_hi_global = 0.40, r_tol = 0.01;
   // Speed limits for PathPlan::speed_limit and the approach-length choice (A*+arc Waffle Pi values).
   double v_ref = 0.26, w_max = 1.82, a_lat_max = 0.50, a_lon_max = 0.50;
+  // global_local speed profile: both wheels within max_wheel [wheel rad/s] with the turn added (wheel_radius [m],
+  // wheel_separation = control's effective skid steer separation [m]); a_lon_max up from and down to v_min [m/s],
+  // which it holds over the last stop_distance [m] (the arrival tolerance) and never goes below.
+  double wheel_radius = 0.033, wheel_separation = 0.333, max_wheel = 7.8, v_min = 0.03, stop_distance = 0.10;
   // Straight, turn-free final stretch before a goal whose heading is required (ALIGN).
   double approach_len = 0.30;
   int occupancy_threshold = 65;
   bool goal_heading_required = false;  // A*+arc ALIGN approach along the goal heading
   std::vector<double> stl_slice_heights{0.1, 0.2, 0.3};
   std::size_t max_cells = 2000000, max_expansions = 500000;
+  // "arc": A*+arc, the whole path at once (STOP_TURN segments). "global_local": 8-connected A* + line-of-sight
+  // pruning, smoothed (clearance + curvature, every point within local_max_dev of the polyline) and splined once,
+  // is the global path (planned again only when blocked); the robot drives a local path, the global window
+  // [ego - local_behind, ego + local_ahead] cut from it unchanged with its speed profile, renewed after
+  // local_update of progress.
+  std::string mode = "arc";
+  double local_behind = 1.0, local_ahead = 4.0, local_update = 2.0, local_max_dev = 0.20;
 };
 
 // A*+arc waypoint in map_frame. STOP_TURN: stop and turn in place to theta; PASS: fillet of radius R;
@@ -51,7 +62,32 @@ struct PathPlan
   std::vector<double> speed_limit;  // per pose [m/s]
   std::size_t expanded = 0;         // A* states expanded
   std::string error;
+  // global_local mode: the global path (0.02 m samples, start at the odometry, end at the goal); path is then
+  // the local path cut from it.
+  nav_msgs::msg::Path global;
+  // plan_box: the goal of the chosen face (heading into the box) and that face's outward normal [rad, map].
+  geometry_msgs::msg::PoseStamped goal;
+  double face_normal = 0;
 };
+
+// A box to drive up to (map frame): centre, yaw of one face normal [rad], side [m], and the goal standoff = base_link
+// to the face it approaches [m] (LiDAR front face offset + the gap left).
+struct BoxTarget
+{
+  double x = 0, y = 0, yaw = 0, side = 0.205, standoff = 0.29;
+};
+
+// A box being approached and the chosen face goal (PathPlan::goal of plan_box). Along the approach (entry approach_len
+// behind the goal -> goal, padding wide) the box's own padding does not block: the goal sits inside it (the upper cam
+// gap and the final stop are closer than the padding). The box itself, walls and obstacles still block.
+struct BoxApproach
+{
+  BoxTarget box;
+  geometry_msgs::msg::Pose goal;
+};
+
+// Arc length [m] along path of the point on it nearest to p (0 for an empty path).
+double path_progress(const nav_msgs::msg::Path & path, const geometry_msgs::msg::Point & p);
 
 class PathPlanner
 {
@@ -59,14 +95,42 @@ public:
   // Invalid maps/configuration throw invalid_argument; the prior snapshot remains intact.
   // Completed configuration is immutable, so const queries may run concurrently.
   void configure(const PathPlannerConfig & config);
+  // heading_required: end along the goal heading over approach_len (as goal_heading_required, for this call). In
+  // global_local mode any heading works; arc mode rounds it to the nearest quarter turn.
+  // box: the goal approaches this box (its padding does not block the approach, see BoxApproach).
   PathPlan plan(
     const nav_msgs::msg::Odometry & odom,
     const geometry_msgs::msg::PoseStamped & goal,
+    const geometry_msgs::msg::PoseArray & map_obstacles = geometry_msgs::msg::PoseArray(),
+    bool heading_required = false, const BoxTarget * box = nullptr) const;
+  // Drive up to a box: one goal per face (standoff from the face along its normal, heading into the box). A face is
+  // approachable only when its goal, the approach entry approach_len behind it and the line between are clear of
+  // the inflated map + obstacles, the box's own padding aside (checked before A*); each approachable face is planned
+  // with its heading required and the shortest global path wins (PathPlan::goal, face_normal). Any box yaw.
+  // face_normal: only the face whose outward normal is nearest this [rad, map] (a correction keeps its face).
+  // stage_lead > 0: the path ends at the stage point instead, approach_len + stage_lead behind the goal on the face
+  // normal, an ordinary path (no heading): the robot stops there, turns square and docks straight (planning). The
+  // stage point and the dock line stage -> goal must be clear as well.
+  PathPlan plan_box(
+    const nav_msgs::msg::Odometry & odom, const BoxTarget & box,
+    const geometry_msgs::msg::PoseArray & map_obstacles = geometry_msgs::msg::PoseArray(),
+    const double * face_normal = nullptr, double stage_lead = 0.0) const;
+  // An ordinary path toward a point that is itself blocked (a box): to the free cell nearest to it, the one nearest
+  // the robot among equals. No heading, no approach (plan_box takes over close by).
+  PathPlan plan_toward(
+    const nav_msgs::msg::Odometry & odom, double x, double y,
     const geometry_msgs::msg::PoseArray & map_obstacles = geometry_msgs::msg::PoseArray()) const;
+  // global_local mode: the local path for the robot at odom, the window of global around it (samples of global
+  // itself) with its speed profile. Returns path + speed_limit; ok = false when the window is blocked (retryable).
+  PathPlan local_path(
+    const nav_msgs::msg::Path & global, const nav_msgs::msg::Odometry & odom,
+    const geometry_msgs::msg::PoseArray & map_obstacles = geometry_msgs::msg::PoseArray(),
+    const BoxApproach * approach = nullptr) const;
   // Every sample (and between samples) outside the inflated map plus obstacles, as A*+arc checks it.
   bool collision_free(
     const nav_msgs::msg::Path & path,
-    const geometry_msgs::msg::PoseArray & map_obstacles = geometry_msgs::msg::PoseArray()) const;
+    const geometry_msgs::msg::PoseArray & map_obstacles = geometry_msgs::msg::PoseArray(),
+    const BoxApproach * approach = nullptr) const;
 
 private:
   struct Data;

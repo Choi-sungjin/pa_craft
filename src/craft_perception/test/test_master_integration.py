@@ -101,6 +101,7 @@ def main():
             os.ftruncate(fd, 4 * size)
         child = subprocess.Popen([
             args.executable, '--ros-args', '--params-file', str(args.config.resolve()),
+            '--params-file', str(Path(__file__).resolve().parents[2] / 'craft_bringup/config/rates.yaml'),
             '--params-file', overrides.name,
             '-p', f'd435.yolo.model_dir:={Path(args.model).resolve()}',
             '-p', f'c310.yolo.model_dir:={Path(args.model).resolve()}',

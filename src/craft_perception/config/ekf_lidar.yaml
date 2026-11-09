@@ -3,7 +3,10 @@
 # a loosely trusted backup for long featureless stretches where scan matching slides along the corridor.
 #   odom0 wheels : vx, vy (nonholonomic 0) at wheel_vx_variance 0.0025, vyaw at wheel_vyaw_variance 0.01
 #                  (control.yaml); control raises both 100x while the wheel and IMU yaw rates disagree (slip).
-#   odom1 LiDAR  : vx, vy at 0.0009 (perception.yaml lidar_odometry.twist_variance) -> ~75 % of x/y.
+#   odom1 LiDAR  : vx at 0.0009 (perception.yaml lidar_odometry.twist_variance) -> ~75 % of x. Not vy (2026-11-09):
+#                  the robot cannot slide sideways, yet the EKF held vy +0.003..0.007 m/s at 0.05 m/s (~5 deg) and drove
+#                  "sideways": yaw -6 deg while moving straight along x, so the box dock (Pure Pursuit
+#                  converging by that yaw) ended 25-27 mm off the line twice.
 #   imu0         : vyaw at 0.0001 -> ~99 % of the yaw rate against the wheels' 0.01.
 # No pose fusion from either odometry: their own headings drift apart from the IMU's.
 #
@@ -19,7 +22,7 @@ ekf_local:
                    false, false, false]
     odom1: /perception/lidar/odom
     odom1_config: [false, false, false, false, false, false,
-                   true,  true,  false, false, false, false,
+                   true,  false, false, false, false, false,
                    false, false, false]
     odom1_queue_size: 10
 
@@ -30,6 +33,6 @@ ekf_global:
                    false, false, false]
     odom1: /perception/lidar/odom
     odom1_config: [false, false, false, false, false, false,
-                   true,  true,  false, false, false, false,
+                   true,  false, false, false, false, false,
                    false, false, false]
     odom1_queue_size: 10

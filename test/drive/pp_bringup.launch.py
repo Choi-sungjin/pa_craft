@@ -17,12 +17,13 @@ from launch_ros.parameter_descriptions import ParameterValue
 
 def generate_launch_description():
     control_yaml = os.path.join(get_package_share_directory('craft_control'), 'config', 'control.yaml')
+    rates_yaml = os.path.join(get_package_share_directory('craft_bringup'), 'config', 'rates.yaml')
     ekf_yaml = os.path.join(get_package_share_directory('craft_perception'), 'config', 'ekf.yaml')
     return LaunchDescription([
         DeclareLaunchArgument('task_timeout_s', default_value='120.0',
                               description='control task timeout for this test [s]'),
         Node(package='craft_control', executable='control_master', output='screen',
-             parameters=[control_yaml, {'task_timeout_s': ParameterValue(
+             parameters=[control_yaml, rates_yaml, {'task_timeout_s': ParameterValue(
                  LaunchConfiguration('task_timeout_s'), value_type=float),
                  # Drive-only: the arm board port must exist, but its fault does not hold the wheels.
                  'require_arm_board': False}]),

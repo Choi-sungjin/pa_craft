@@ -11,10 +11,11 @@ slam_toolbox:
     mode: mapping
     transform_publish_period: 0.05  # publish map->odom at 20 Hz
     max_laser_range: 8.0  # lidar_processor merger caps ranges at 8 m
-    # Process scans on a time trigger (~5 Hz) while moving: the 0.5 m / 0.5 rad defaults gave ~9 s
+    # Process scans on a time trigger while moving: the 0.5 m / 0.5 rad defaults gave ~9 s
     # between corrections and 15-22 cm pose jumps. The tiny travel thresholds only stop identical
-    # scans from piling into the pose graph while the robot stands still.
-    minimum_time_interval: 0.2
+    # scans from piling into the pose graph while the robot stands still. 0.1 = every scan of the 10 Hz
+    # LiDAR (2026-11-08, was 0.2: map->odom then lagged the newest scan by up to 0.3 s).
+    minimum_time_interval: 0.1
     minimum_travel_distance: 0.01
     minimum_travel_heading: 0.01
     # Scan matching uses the last N scans as its local map. At ~5 Hz the default 10 spans only ~2 s

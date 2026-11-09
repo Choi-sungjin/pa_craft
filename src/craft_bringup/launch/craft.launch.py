@@ -3,7 +3,7 @@ import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (DeclareLaunchArgument, EmitEvent, GroupAction, IncludeLaunchDescription,
-                            RegisterEventHandler)
+                            RegisterEventHandler, OpaqueFunction)
 from launch.events import matches_action
 from lifecycle_msgs.msg import Transition
 from launch.conditions import IfCondition
@@ -31,6 +31,13 @@ def in_group(name):
         ["'", LaunchConfiguration('group'), f"' in ('all', '{name}')"]))
 
 
+def validate_localization_inputs(context):
+    if (LaunchConfiguration('wheel_free').perform(context) == 'true' and
+            LaunchConfiguration('lidar_odom').perform(context) != 'true'):
+        raise RuntimeError('wheel_free:=true requires lidar_odom:=true in every launch group')
+    return []
+
+
 def generate_launch_description():
     ekf_yaml = os.path.join(get_package_share_directory('craft_perception'), 'config', 'ekf.yaml')
     slam_yaml = os.path.join(get_package_share_directory('craft_perception'), 'config', 'slam.yaml')
@@ -43,13 +50,19 @@ def generate_launch_description():
     # lidar_odom:=true: ekf.yaml + ekf_lidar.yaml (LiDAR odometry x/y); repeating ekf.yaml is a no-op.
     ekf_params = [ekf_yaml, PythonExpression(["'", ekf_lidar_yaml, "' if '", LaunchConfiguration('lidar_odom'),
                                               "' == 'true' else '", ekf_yaml, "'"])]
+    wheel_free_yaml = os.path.join(get_package_share_directory('craft_perception'), 'config', 'ekf_wheel_free.yaml')
+    ekf_params.append(PythonExpression(["'", wheel_free_yaml, "' if '", LaunchConfiguration('wheel_free'),
+                                        "' == 'true' else ('", ekf_lidar_yaml, "' if '", LaunchConfiguration('lidar_odom'),
+                                        "' == 'true' else '", ekf_yaml, "')"]))
     camera_yaml = os.path.join(get_package_share_directory('craft_sensors'), 'config', 'camera.yaml')
+    # Loop rates and timeouts of the three masters, after each master's own yaml.
+    rates_yaml = os.path.join(get_package_share_directory('craft_bringup'), 'config', 'rates.yaml')
     control_yaml = os.path.join(get_package_share_directory('craft_control'), 'config', 'control.yaml')
     planning_yaml = os.path.join(get_package_share_directory('craft_planning'), 'config', 'planning.yaml')
     # arm:=false drives with the wheel/clock board alone: control skips the arm board, planning is Ready without arm joints.
     arm_enabled = ParameterValue(LaunchConfiguration('arm'), value_type=bool)
     perception_yaml = os.path.join(get_package_share_directory('craft_perception'), 'config', 'perception.yaml')
-    perception_params = [perception_yaml, {
+    perception_params = [perception_yaml, rates_yaml, {
         'lidar.input_mode': LaunchConfiguration('lidar_input_mode'),
         # Each LiDAR's kept field of view around its outward axis [deg] (perception.yaml default 180 = +-90).
         'lidar.front_fov_deg': ParameterValue(LaunchConfiguration('lidar_fov_deg'), value_type=float),
@@ -65,10 +78,12 @@ def generate_launch_description():
         Node(package='craft_perception', executable='perception_master', output='screen',
              parameters=perception_params, condition=in_group('perception')),
         Node(package='craft_planning', executable='planning_master', output='screen',
-             parameters=[planning_yaml, {'map_file': LaunchConfiguration('map_file'), 'require_arm_joints': arm_enabled}],
+             parameters=[planning_yaml, rates_yaml, {'map_file': LaunchConfiguration('map_file'), 'require_arm_joints': arm_enabled,
+                                                    'require_lidar_localization': ParameterValue(
+                                                        LaunchConfiguration('wheel_free'), value_type=bool)}],
              condition=in_group('planning')),
         Node(package='craft_control', executable='control_master', output='screen',
-             parameters=[control_yaml, {'arm_enabled': arm_enabled}], condition=in_group('control')),
+             parameters=[control_yaml, rates_yaml, {'arm_enabled': arm_enabled}], condition=in_group('control')),
     ]
 
     # Everything that is not a master: camera drivers, LiDAR, EKF, SLAM.
@@ -80,7 +95,7 @@ def generate_launch_description():
                      'lidar_processor.launch.py'),
         launch_arguments={'start_processor': 'false'}.items(),
         condition=IfCondition(LaunchConfiguration('start_lidar'))))
-    # ekf_local owns odom->base_link (wheel + IMU; + LiDAR odometry x/y with lidar_odom:=true). map->odom: slam_toolbox (localization:=slam, slam.yaml)
+    # ekf_local owns odom->base_link (IMU and optional wheel/LiDAR velocity). map->odom: slam_toolbox (localization:=slam, slam.yaml)
     # or ekf_global fusing slam_toolbox's pose (localization:=ekf, ekf.yaml + slam_ekf.yaml).
     nodes.append(Node(package='robot_localization', executable='ekf_node', name='ekf_local', output='screen',
                       parameters=ekf_params, remappings=[('odometry/filtered', '/odometry/local')]))
@@ -115,6 +130,8 @@ def generate_launch_description():
                       lifecycle_node_matcher=matches_action(slam),
                       transition_id=Transition.TRANSITION_ACTIVATE))]))]
     return LaunchDescription([
+        DeclareLaunchArgument('wheel_free', default_value='false', choices=['true', 'false'],
+                              description='Exclude wheel odometry from EKFs; requires lidar_odom:=true'),
         DeclareLaunchArgument('lidar_fov_deg', default_value='180.0',
                               description='front and rear LiDAR field of view kept in /lidar/merged [deg]'),
         DeclareLaunchArgument('arm', default_value='true', choices=['true', 'false'],
@@ -147,10 +164,11 @@ def generate_launch_description():
         DeclareLaunchArgument('map_file', default_value='maps/maze.stl',
                               description='Gazebo binary STL, ROS map YAML or block text '
                                           '(relative to craft_planning share)'),
-        DeclareLaunchArgument('d435_model_dir', default_value='models/knob_sign',
+        DeclareLaunchArgument('d435_model_dir', default_value='models/knob_sign_v4',
                               description='D435 YOLO NCNN model; relative to craft_perception share'),
-        DeclareLaunchArgument('c310_model_dir', default_value='models/knob_sign',
+        DeclareLaunchArgument('c310_model_dir', default_value='models/knob_sign_v4',
                               description='C310 YOLO NCNN model (knob_lever); relative to craft_perception share'),
+        OpaqueFunction(function=validate_localization_inputs),
         *masters,
         GroupAction(nodes, scoped=False, condition=in_group('infra')),
     ])

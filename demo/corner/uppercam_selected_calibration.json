@@ -1,0 +1,32 @@
+{
+  "method": "square_far20",
+  "input_reference": "nominal_LDS03_front_face_dx_mm__origin_minus_19",
+  "output_reference": "physical_LDS03_front_face_to_box_forward_gap_mm",
+  "input_knots_mm": [
+    -9.456941906932869,
+    -1.4400677075520179,
+    9.99525507102664,
+    18.898410954101667,
+    27.36452880092538,
+    35.711057252752326,
+    51.27559002676831,
+    59.067224405520136
+  ],
+  "gap_knots_mm": [
+    10.0,
+    20.0,
+    30.0,
+    40.0,
+    50.0,
+    60.0,
+    70.0,
+    80.0
+  ],
+  "interpolation": "piecewise_linear",
+  "extrapolation": "linear_end_segments",
+  "temporal_filter": false,
+  "fit_scope": "First chronological half of each gap dwell only; frozen for holdout demo.",
+  "fit_frames": 431,
+  "source_bag": "boxgap_1108_1236/boxgap.db3",
+  "independent_bag_validation": false
+}

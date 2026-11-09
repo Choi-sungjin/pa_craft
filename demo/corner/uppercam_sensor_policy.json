@@ -1,0 +1,12 @@
+{
+  "source": "https://emanual.robotis.com/docs/en/platform/turtlebot3/appendix_lds_03/",
+  "spec_range_min_m": 0.05,
+  "spec_range_max_m": 12.0,
+  "operational_raw_min_m": 0.1,
+  "operational_raw_max_m": 1.0,
+  "handoff_physical_gap_m": 0.10,
+  "camera_experiment_gap_max_m": 0.20,
+  "near_gap_source": "upper_camera",
+  "target_physical_gap_m": 0.01,
+  "note": "Raw LiDAR range is measured from sensor origin. Start handoff experiment at 100 mm physical front-to-box gap, stop and compare fresh LiDAR/camera distances. Camera calibration coverage 10-80 mm is diagnostic, not an operating gate; 0-200 mm is an experiment envelope, not validated accuracy. User-measured axle midpoint to LiDAR front face: 165 mm."
+}

@@ -9,19 +9,12 @@ planning_master:
     mission_file: config/missions.yaml
     # Shared with PerceptionMaster. Empty until the official allocation is published.
     tag_registry_file: config/tag_registry.yaml
-    loop_hz: 20.0
-    replan_period_s: 0.2
-    # While driving the rest of the segment is checked every replan_period_s. Blocked: pause at once, replan only
-    # if still blocked after block_wait_s (a passer-by clears and the same path resumes).
-    block_wait_s: 2.0
+    # Loop rate, replan period, block wait, input timeouts and fsm timeouts: craft_bringup/config/rates.yaml.
     # STOP_TURN corners closer than this to the segment start do not end a segment (shorter than the arrival
     # tolerance, it would "arrive" at once); 3 segments in a row ending where they started fault the run.
     min_segment_m: 0.15
-    # Acquisition age and steady-clock receive watchdogs are checked independently.
-    odom_timeout_s: 0.5
-    joint_timeout_s: 0.5
-    observation_timeout_s: 0.5
-    obstacle_timeout_s: 0.5
+    require_lidar_localization: false  # wheel-free launch enables direct LiDAR odom + IMU guard
+    localization_observation_timeout_s: 0.3
     require_lidar: true
     require_arm_joints: true  # false = drive-only (launch arm:=false): Ready without /control/arm_joints
     joint_state_topic: /control/arm_joints  # Measured URDF joints; requires calibrated control mappings.
@@ -29,12 +22,6 @@ planning_master:
     cruise_speed: 0.26  # [m/s] = control max_v (trial 2026-11-02, was 0.12); control also applies chassis/motor limits.
     goal_tolerance: 0.10  # [m] matches control wheel_goal_tolerance (was 0.03: below SLAM pose noise, overshoot -> 180 deg turn back)
     fsm:
-      initialization_timeout_s: 10.0
-      ready_timeout_s: 5.0
-      compute_timeout_s: 3.0
-      execution_timeout_s: 180.0  # [s] matches control task_timeout_s (was 60: corner demo stopped 1.4 m short on a ~7 m leg at 0.12 m/s)
-      feedback_timeout_s: 0.5
-      stop_timeout_s: 3.0
       max_compute_retries: 1  # Calculations only, never physical action retries.
     # Puck graspable check (no IK): alignment first (lying: long axis within axis_tolerance_deg of chassis
     # forward; standing: any direction), then the puck centre in base_link [m] inside the region measured by
@@ -57,6 +44,76 @@ planning_master:
       min_box_gap: 0.03      # [m] safety gap (user, 2026-11-01): barrier 1 / (d_short - 0.03)
       w_box: 0.003           # [m] 1/d weight, tune by experiment
       w_grasp: 1.0           # tune by experiment
+    # Drive up to a box: /planning/approach_box <name> (demo/corner/run_corner.py --box). PathPlanner::plan_box tries
+    # each face (goal: LiDAR front face gap from the face, heading into the box; the goal, the approach entry
+    # path_planner.approach_len behind it and the line between must be clear of the padding), plans the approachable
+    # ones with the heading required (straight approach_len along the face normal) and drives the shortest at speed.
+    box_approach:
+      camera_enabled: true  # supervised square_far20 camera longitudinal trial
+      # true: LiDAR only builds the dock line (box pose at the stage point, to camera_final_gap); the dock tracks it at
+      # camera_speed and the upper cam is only the stop trigger: a valid gap (minus travel since the frame) <=
+      # camera_final_gap + camera_gap_tolerance stops it; invalid frames are ignored. Line end first: stop, then the
+      # upper cam checks as usual (camera_verify). No camera speed control. (user, 2026-11-09)
+      camera_only_longitudinal: true
+      camera_slow_gap: 0.100   # [m] trigger mode: from here (LiDAR line) to the end at camera_speed (user, 2026-11-09)
+      camera_fast_speed: 0.10  # [m/s] trigger mode: the dock before camera_slow_gap, slowing at a_lon_max
+      camera_final_gap: 0.010
+      camera_gap_tolerance: 0.003
+      handoff_gap: 0.100  # [m] experimental stopped LiDAR-to-camera handoff
+      source_gap_diff: 0.020
+      camera_timeout: 0.500  # age of the selected acquisition, not processing time
+      lidar_observation_timeout: 0.200
+      camera_speed: 0.02
+      camera_calibrated_gap_min: 0.010
+      camera_calibrated_gap_max: 0.080
+      camera_operational_gap_max: 0.200  # [m] operating bound, not a calibration guarantee
+      front_lidar_x: 0.155               # [m] scan origin from base_link, lidar launch geometry
+      front_lidar_fov_deg: 180.0         # [deg] front outward horizontal scan coverage
+      camera_uncertainty_max: 0.005  # near (<= 30 mm) and final
+      camera_far_uncertainty_max: 0.010
+      camera_near_gap: 0.030
+      lidar_uncertainty_max: 0.010
+      observation_initial_timeout: 5.0  # held still while waiting for the first observation
+      camera_confirm_count: 3
+      speed: 0.20         # [m/s] (user, 2026-11-08)
+      gap: 0.08           # [m] LiDAR front face -> box face at the goal: the far end of the upper cam gap calibration
+      front_face_x: 0.165   # [m] axle midpoint to LiDAR front face, user measurement 2026-11-09
+      side: 0.205         # [m]
+      # The box step (user, 2026-11-08): plan to the stage point of every approachable face of the known box below
+      # (PathPlanner::plan_box), drive the shortest, stand still settle_s at the stage point and take the LiDAR box
+      # pose (/perception/box/pose, box_detection_timeout_s in rates.yaml); the dock and the check go by it. Stage
+      # points sit 0.43-0.58 m from the face (LiDAR front): ~20 points on a face at the LDS-03's 1 deg.
+      max_offset: 0.5     # [m] a perceived box farther than this from the known position is another box: ignored
+      # At the face goal (correction parking): stand still settle_s (camera shake, the gap filter), perceive the box
+      # again and check the robot against that face's goal. Within the tolerances the step is done; else back out
+      # reverse_distance straight along the approach at reverse_speed and approach the same face again with the box
+      # as perceived now, at most max_corrections times (then the step fails). /planning/box_alignment reports each
+      # check: [lateral m, yaw rad, forward m (+ = past the goal), aligned 0/1, correction].
+      # The approach itself (2026-11-08: one path into a face could hairpin at the entry, Pure Pursuit cut it and
+      # turned back and forth for 40 s): an ordinary path to the stage point stage_lead behind the approach entry,
+      # stop; then the dock: turn square to the face in place (within yaw_tolerance_deg), straight to the goal at
+      # dock_speed, arriving within dock_goal_tolerance (control TaskCommand goal_tolerance / tolerance_rad).
+      stage_lead: 0.20           # [m]
+      stage_goal_tolerance: 0.03 # [m] the stage drive's arrival (control's 0.10 left the dock 6 cm off the normal)
+      dock_speed: 0.02           # [m/s]
+      dock_lookahead: 0.020      # [m] pursuit target from front reference during the low-speed dock
+      dock_goal_tolerance: 0.01  # [m]
+      settle_s: 0.5
+      lateral_tolerance: 0.020   # [m]
+      yaw_tolerance_deg: 1.0
+      max_corrections: 0  # 0: no back-out and re-dock; out of tolerance the step ends FAILED with the END line (3 = up to three back-outs)
+      reverse_distance: 0.45     # [m] back to the stage point (approach_len + stage_lead): room to straighten out
+      # [m] the line behind blocked (padding, an obstacle): back out the longest clear distance down to this (5 cm
+      # steps); none clear: wait, and fail after block_wait_s.
+      reverse_min_distance: 0.10
+      reverse_speed: 0.10        # [m/s]
+      names: [L1, L2, L3]
+      # Expected [x, y, yaw of a face normal deg], map frame: box_detector on arena5_legend_opt_arena (2026-11-08);
+      # axis-aligned. Only where to drive toward and what to look for (/planning/box_search); the approach uses the
+      # perceived box.
+      L1: [3.577, 1.076, 90.0]
+      L2: [2.352, 3.731, 90.0]
+      L3: [3.777, 5.331, 90.0]
     ik:
       urdf: urdf/v75_robot.urdf
       base_frame: base_link
@@ -66,10 +123,23 @@ planning_master:
       max_iterations: 300
       max_restarts: 30
     path_planner:
+      # global_local (2026-11-07): global = 8-connected A* + line-of-sight pruning, smoothed (clearance + curvature,
+      # points within local_max_dev of the polyline) and splined once (2026-11-08; was per local window), planned
+      # again only when the path is blocked; the robot drives the local path = global window
+      # [ego - local_behind, ego + local_ahead] cut from it unchanged, with a speed profile, renewed (UPDATE_PATH)
+      # after local_update of progress. arc = A*+arc as before.
+      mode: global_local
+      local_behind: 1.0   # [m]
+      local_ahead: 4.0    # [m] window = 5 m
+      local_update: 2.0   # [m] progress since the last local path that renews it
+      local_max_dev: 0.20 # [m] smoothing: global path points stay within this of the line-of-sight polyline
       block_size: 0.05
       res: 0.05
-      r_robot: 0.21
-      margin: 0.03
+      # Safety distance = half the chassis diagonal from the URDF + margin (user, 2026-11-07). base_link meshes of
+      # v75_robot.urdf span 306.5 x 377.7 mm -> half diagonal 243.2 mm. The turning centre sits 12.75 mm behind the
+      # body centre, so the farthest corner is ~253 mm from it: inside the margin.
+      r_robot: 0.243
+      margin: 0.0   # 0.05 had no route through arena5_legend (2026-11-08)
       lam: 0.60
       w_prox: 1.0
       prox_band: 0.15
@@ -83,5 +153,10 @@ planning_master:
       v_ref: 0.26       # [m/s] per-pose speed limit on lines (control still caps at cruise_speed)
       w_max: 1.82       # [rad/s]
       a_lat_max: 0.50   # [m/s^2]
-      a_lon_max: 0.50   # [m/s^2]
+      a_lon_max: 0.25   # [m/s^2] speed profile up/down (wheel boards follow steps at once) = control max_accel; tune (slip)
+      # Speed profile (global_local): both wheels within max_wheel with the turn added, v (1 + |k| s / 2) / r <= max_wheel.
+      wheel_radius: 0.033      # [m] = control wheel_radius
+      wheel_separation: 0.333  # [m] = control skid_steer_factor * wheel_track (1.153 * 0.289, effective separation)
+      max_wheel: 7.8           # [rad/s] = control max_wheel
+      v_min: 0.03              # [m/s] profile floor: the start, and the last goal_tolerance before the goal
       approach_len: 0.30  # [m] straight ALIGN stretch when goal_heading_required

@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>craft_description</name>
+  <version>0.0.0</version>
+  <description>V307 full robot URDF (REP-103, base_link at the four-wheel axle centre) with visual/collision meshes and sensor frames (top / wrist D435, front / rear laser, imu).</description>
+  <maintainer email="noreply@example.com">craft</maintainer>
+  <license>Proprietary</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <export><build_type>ament_cmake</build_type></export>
+</package>

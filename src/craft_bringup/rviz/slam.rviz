@@ -12,9 +12,19 @@ Visualization Manager:
       Reference Frame: map
     - Class: rviz_default_plugins/Map
       Name: SLAM map
-      Enabled: true
+      Enabled: false
       Topic:
         Value: /perception/lidar/map
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+        Depth: 1
+      Alpha: 0.8
+      Color Scheme: map
+    - Class: rviz_default_plugins/Map
+      Name: planning map (1 cm)
+      Enabled: true
+      Topic:
+        Value: /planning/map
         Durability Policy: Transient Local
         Reliability Policy: Reliable
         Depth: 1
@@ -122,6 +132,18 @@ Visualization Manager:
       Line Width: 0.03
       Color: 255; 210; 40
       Alpha: 1
+    - Class: rviz_default_plugins/PointStamped
+      Name: lookahead point
+      Enabled: true
+      Topic:
+        Value: /control/lookahead_point
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+        Depth: 5
+      Color: 0; 255; 255
+      Alpha: 1
+      Radius: 0.04
+      History Length: 1
     - Class: rviz_default_plugins/Pose
       Name: corner goal
       Enabled: true

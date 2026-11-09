@@ -91,6 +91,7 @@ perception + planning, 맵은 posegraph/yaml 같은 base) → `demo/corner/run_c
 - 병합기(`scan_merger`) `floor_roi`: LiDAR별·좌우별 clear 각도(바깥쪽 기준) 안은 전부, 그 밖 ~90°는 5° 구간별 최대 거리.
   값은 perception.yaml `lidar.floor_roi` (fov180_2359, pocket_2309, pocket_2248). 교차 검증: 보지 않은 bag에서 바닥 점
   75~90 % 제거, 맵 벽 점 80~97 % 유지. `/lidar/merged` 자체에 적용되므로 SLAM·위치 찾기·장애물 모두 영향. 화각은 180° 기본.
+- 분석 도구 복구(2026-11-09): `tools/lidar_floor/` (`derive_roi.py`가 위 표를 그대로 재현). 새 bag은 raw 스캔(`/lidar/front|rear/scan`) 포함해서 찍을 것.
 
 **실기 bag 분석 후 수정 (2026-11-01 밤, 커밋 안 됨, 실기 미검증)**
 - bag `~/bags/astar_arc_1804`, `pocket_2309`, `fov90_2321`: (1) 출발점이 margin 안이면 2~6 cm 탈출 구간 → control 도착 허용 10 cm에
@@ -149,7 +150,7 @@ perception + planning, 맵은 posegraph/yaml 같은 base) → `demo/corner/run_c
 | 업사이드다운 | TF roll 180°를 2D 변환에서 인식(스캔 각도 부호 반전) | `lidar_processor/scan_merger.hpp`, perception, `lidar_calibrator` |
 | 실행 편의 | `slam.launch.py`(+bag 자동 `loop_<n>`), `save_map.sh`, `corner_demo.launch.py`; `~/.bashrc`의 `slamall`, `slamsave`(고침: `map_saver_cli -t`) | `src/craft_bringup/` |
 | 분석 도구 | `test/drive/`: `turn_map.py`, `gyro_spin.py`, `odom_compare.py`, `odom_trajectories.py`, `slam_graph.py`; `test/lidar/lidar_check.py` | 각 README |
-| posegraph | 들어 올린 구간 삭제 도구 → `arena3_clean.*`(scan 0~1175) | `tools/posegraph_tool/` |
+| posegraph | 들어 올린 구간 삭제 도구 → `arena3_clean.*`(scan 0~1175) | `tools/mapmaker/posegraph/` |
 | 맵 | `~/maps/arena3.*`(원본), `arena3_clean.*`(데모용) | |
 
 ## 4. 보류 중인 문제
@@ -175,7 +176,7 @@ perception + planning, 맵은 posegraph/yaml 같은 base) → `demo/corner/run_c
 - 맵 저장은 **SLAM을 끄기 전에, Jetson에서**: `slamsave <name>` (내부 `map_saver_cli -t /perception/lidar/map`; `-r map:=`은 무시됨).
   놓쳤으면 bag의 `/perception/lidar/map`에서 꺼낼 수 있다(그래서 `slamall`이 bag을 기본 기록).
 - `ros2 bag record`는 `--topics` 필요(Lyrical).
-- slam_toolbox Karto 링크 시 `${slam_toolbox_LIBRARIES}` 쓰지 말 것(ld 20분+). `tools/posegraph_tool/CMakeLists.txt` 참고.
+- slam_toolbox Karto 링크 시 `${slam_toolbox_LIBRARIES}` 쓰지 말 것(ld 20분+). `tools/mapmaker/posegraph/CMakeLists.txt` 참고.
 - `resetwheel`/`bro`는 보드 잠금(`_craft_locked`)을 쓴다. launch(`slamall`, `corner_demo`)는 보드 점검을 안 한다.
 - 오늘 아침 udev를 잘못 바꿨다가 되돌림: 앞뒤가 바뀌어 보인 원인은 포트가 아니라 yaw 180° 오류였다. 판정은 손으로 LiDAR를
   가려 어느 장치가 막히는지 보는 방식이 확실하다.

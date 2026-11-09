@@ -1,0 +1,64 @@
+# Loop rates and timeouts of the three masters, in one file (2026-11-08). craft.launch.py passes it after each
+# master's own yaml (control.yaml, planning.yaml, perception.yaml); those no longer hold these keys, so every
+# launch or test that starts a master passes this file too. ROS parameter files cannot reference one value from
+# another, so values that must agree are kept next to each other with a note.
+#
+# Not here (their own config, read by other nodes): EKF 50 Hz (craft_perception/config/ekf.yaml), slam_toolbox
+# map->odom 20 Hz and a scan at most every 0.2 s (slam.yaml; slam_ekf.yaml turns map->odom off), LiDAR 10 Hz,
+# OpenCR firmware tick 20 ms (firmware/libraries/CraftMotorFirmware kPeriodMs).
+#
+# Worst case from an obstacle in a scan to the wheels: scan 100 ms + perception persistence (3 frames, perception.yaml
+# lidar_obstacle.filter.persist_frames) + planning replan_period_s + one control period + firmware 20 ms ~ 0.6 s.
+
+/**:  # same name in control_master and planning_master
+  ros__parameters:
+    odom_timeout_s: 0.5  # [s] odometry older than this holds the robot (control: /planning/odom, planning: TF/odom)
+
+control_master:
+  ros__parameters:
+    control_hz: 50.0  # [Hz] control loop: serial I/O with both OpenCR boards, controllers, commands
+    # /planning/hold is a live heartbeat: true or missing/stale input holds every axis. Resume requires fresh false,
+    # /control/planning_held=false, then new targets. Must exceed planning's loop period (1 / loop_hz).
+    planning_watchdog_timeout_s: 0.5
+    # Each OpenCR must supply a valid sample within this steady-clock interval. A previously seen board that times out
+    # reports state=2 until fresh feedback returns.
+    serial_feedback_timeout_s: 0.5
+    teleop_timeout_s: 0.3  # [s] /control/teleop/cmd_vel older than this stops the wheels
+    # [s] = planning fsm.execution_timeout_s (was 60: corner demo stopped 1.4 m short on a ~7 m leg at 0.12 m/s)
+    task_timeout_s: 180.0
+
+planning_master:
+  ros__parameters:
+    loop_hz: 20.0  # [Hz] FSM, heartbeat (/planning/hold), local path renewal
+    # [s] while driving, the rest of the segment is checked this often; also the wait before a compute retry
+    replan_period_s: 0.2
+    # [s] blocked: pause at once, replan only if still blocked after this (a passer-by clears and the same path resumes)
+    block_wait_s: 2.0
+    # [s] acquisition age and steady-clock receive watchdogs are checked independently
+    joint_timeout_s: 0.5
+    observation_timeout_s: 0.5
+    obstacle_timeout_s: 0.5
+    box_detection_timeout_s: 1.0  # [s] /perception/box/pose older than this does not start or check a box approach
+    fsm:
+      initialization_timeout_s: 10.0
+      ready_timeout_s: 5.0
+      compute_timeout_s: 3.0
+      execution_timeout_s: 180.0  # [s] = control task_timeout_s
+      feedback_timeout_s: 0.5
+      stop_timeout_s: 3.0
+
+perception_master:
+  ros__parameters:
+    max_input_age_s: 0.5  # [s] camera/LiDAR/odometry input older than this is not processed
+    # [Hz] upper bound per task: a task only runs on new input (consumers of d435_yolo are capped at its rate).
+    # enabled stays in perception.yaml.
+    schedule:
+      d435_yolo: {hz: 10.0}
+      apriltag: {hz: 15.0}
+      knob_depth: {hz: 10.0}
+      object_detector: {hz: 10.0}
+      obstacle_detector: {hz: 10.0}
+      puck_axis: {hz: 10.0}
+      knob_lever: {hz: 10.0}
+      lidar_obstacle: {hz: 20.0}  # LiDAR scans arrive at 10 Hz: 10 Hz in practice
+      state_estimator: {hz: 100.0}

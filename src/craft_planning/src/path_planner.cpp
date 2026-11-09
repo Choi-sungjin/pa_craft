@@ -285,12 +285,27 @@ Grid obstacle_snapshot(const Grid & original, const geometry_msgs::msg::PoseArra
 {
   require(obstacles.poses.empty() || obstacles.header.frame_id == config.map_frame, "Obstacle frame must match map_frame");
   Grid grid = original;
+  // Each new obstacle cell lowers the clearance around it out to the widest band any check reads (padding +
+  // prox_band): the values of inflating the whole grid again (a min of distances) without a distance transform
+  // over the whole map on every check (1 cm map: ~0.5 M cells, ~0.1 s; the box retries starved the odom input).
+  const double pad = config.r_robot + config.margin, reach = pad + config.prox_band + grid.res;
+  const int k = static_cast<int>(std::ceil(reach / grid.res));
   for (const auto & p : obstacles.poses) {
     require(std::isfinite(p.position.x) && std::isfinite(p.position.y) && std::isfinite(p.position.z), "Obstacle position is not finite");
     const int cell = grid.cell(grid.local(p.position));
-    if (cell >= 0) {grid.occupied[cell] = 1;}
+    if (cell < 0 || grid.occupied[cell]) {continue;}
+    grid.occupied[cell] = 1;
+    const int cx = cell % grid.width, cy = cell / grid.width;
+    for (int dy = -k; dy <= k; ++dy) {
+      for (int dx = -k; dx <= k; ++dx) {
+        const double d = std::max(std::hypot(dx, dy) * grid.res - 0.5 * grid.res, 0.0);
+        if (d > reach || !grid.contains(cx + dx, cy + dy)) {continue;}
+        const int i = grid.index(cx + dx, cy + dy);
+        if (d < grid.clearance[i]) {grid.clearance[i] = d; grid.blocked[i] = grid.occupied[i] || d < pad;}
+      }
+    }
+    grid.blocked[cell] = 1;
   }
-  if (!obstacles.poses.empty()) {inflate(grid, config.r_robot + config.margin);}
   return grid;
 }
 
@@ -608,6 +623,395 @@ Leg plan_leg(const Grid & g, const PathPlannerConfig & c, State start, int gx, i
   leg = std::move(best->second); leg.expanded = expanded;
   return leg;
 }
+
+// ---------------------------------------------------------------------------------------------------------
+// global_local mode (astar8_spline.py smooth_curve): 8-connected A* + line-of-sight pruning, smoothed (clearance +
+// curvature, within local_max_dev of the polyline) and splined once, is the global path; the local path is its
+// window [ego - behind, ego + ahead], cut from it unchanged, with a speed profile.
+// ---------------------------------------------------------------------------------------------------------
+constexpr double kLocalStep = 0.05;     // smoothing point spacing [m]
+constexpr double kLocalSample = 0.02;   // output sample spacing [m]
+constexpr int kLocalIterations = 600;
+constexpr double kSmooth = 0.3, kKappaPull = 0.1, kObstaclePull = 0.3, kClearBand = 0.05, kMaxPush = 0.01;
+
+double clearance_at(const Grid & g, Point p)
+{
+  const int x = std::clamp(static_cast<int>(std::floor(p.x / g.res)), 0, g.width - 1);
+  const int y = std::clamp(static_cast<int>(std::floor(p.y / g.res)), 0, g.height - 1);
+  return g.clearance[g.index(x, y)];
+}
+
+bool segment_free(const Grid & g, Point a, Point b)
+{
+  const int n = std::max(1, static_cast<int>(std::ceil(std::sqrt(squared(b - a)) / (g.res / 4))));
+  for (int k = 0; k <= n; ++k) {if (!point_free(g, lerp(a, b, static_cast<double>(k) / n))) {return false;}}
+  return true;
+}
+
+// 8-connected A* over free cells (no corner cutting), step res * length * (1 + proximity), octile heuristic.
+std::vector<int> astar8_search(const Grid & g, const PathPlannerConfig & c, int start, int goal, std::size_t & expanded)
+{
+  if (g.blocked[start]) {throw RouteUnavailable("Start is in an inflated obstacle");}
+  if (g.blocked[goal]) {throw RouteUnavailable("Goal is in an inflated obstacle");}
+  const double pad = c.r_robot + c.margin, sq2 = std::sqrt(2.0);
+  const int gx = goal % g.width, gy = goal / g.width;
+  const auto h = [&](int i) {
+      const int dx = std::abs(gx - i % g.width), dy = std::abs(gy - i / g.width);
+      return g.res * (std::max(dx, dy) + (sq2 - 1) * std::min(dx, dy));};
+  std::vector<double> best(g.occupied.size(), std::numeric_limits<double>::infinity());
+  std::vector<int> parent(g.occupied.size(), -1);
+  std::vector<uint8_t> closed(g.occupied.size(), 0);
+  using Entry = std::pair<double, int>;
+  std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> open;
+  static constexpr std::array<int, 8> dx8{1, 1, 0, -1, -1, -1, 0, 1}, dy8{0, 1, 1, 1, 0, -1, -1, -1};
+  best[start] = 0; open.push({h(start), start});
+  while (!open.empty()) {
+    const int i = open.top().second; open.pop();
+    if (closed[i]) {continue;}
+    closed[i] = 1;
+    require(++expanded <= c.max_expansions, "A* exceeded max_expansions");
+    if (i == goal) {break;}
+    const int x = i % g.width, y = i / g.width;
+    for (int k = 0; k < 8; ++k) {
+      const int nx = x + dx8[k], ny = y + dy8[k];
+      if (!g.contains(nx, ny) || g.blocked[g.index(nx, ny)]) {continue;}
+      if (dx8[k] && dy8[k] && (g.blocked[g.index(nx, y)] || g.blocked[g.index(x, ny)])) {continue;}
+      const int n = g.index(nx, ny);
+      const double prox = std::clamp((pad + c.prox_band - g.clearance[n]) / c.prox_band, 0.0, 1.0) * c.w_prox;
+      const double cost = best[i] + (dx8[k] && dy8[k] ? sq2 : 1.0) * g.res * (1.0 + prox);
+      if (cost < best[n]) {best[n] = cost; parent[n] = i; open.push({cost + h(n), n});}
+    }
+  }
+  if (!closed[goal]) {throw NoRoute("No route through the inflated map");}
+  std::vector<int> cells;
+  for (int i = goal; i >= 0; i = parent[i]) {cells.push_back(i);}
+  std::reverse(cells.begin(), cells.end());
+  return cells;
+}
+
+// Any-angle polyline: a point is kept only when the straight segment past it would be blocked.
+std::vector<Point> prune_los(const Grid & g, const std::vector<Point> & pts)
+{
+  std::vector<Point> out{pts.front()};
+  std::size_t i = 0;
+  while (i + 1 < pts.size()) {
+    std::size_t j = pts.size() - 1;
+    while (j > i + 1 && !segment_free(g, pts[i], pts[j])) {--j;}
+    out.push_back(pts[j]); i = j;
+  }
+  return out;
+}
+
+std::vector<double> arc_lengths(const std::vector<Point> & pts)
+{
+  std::vector<double> arc(pts.size(), 0.0);
+  for (std::size_t i = 1; i < pts.size(); ++i) {arc[i] = arc[i - 1] + std::sqrt(squared(pts[i] - pts[i - 1]));}
+  return arc;
+}
+
+Point at_arc(const std::vector<Point> & pts, const std::vector<double> & arc, double s)
+{
+  if (s <= 0) {return pts.front();}
+  if (s >= arc.back()) {return pts.back();}
+  const auto k = static_cast<std::size_t>(std::upper_bound(arc.begin(), arc.end(), s) - arc.begin());
+  const double span = arc[k] - arc[k - 1];
+  return lerp(pts[k - 1], pts[k], span > 0 ? (s - arc[k - 1]) / span : 0.0);
+}
+
+std::vector<Point> resample(const std::vector<Point> & pts, double ds)
+{
+  const auto arc = arc_lengths(pts);
+  const int n = std::max(1, static_cast<int>(std::ceil(arc.back() / ds - 1e-9)));
+  std::vector<Point> out;
+  for (int i = 0; i <= n; ++i) {out.push_back(at_arc(pts, arc, arc.back() * i / n));}
+  return out;
+}
+
+struct Projection {double s, distance; Point p;};
+Projection project(const std::vector<Point> & pts, const std::vector<double> & arc, Point q)
+{
+  Projection best{0, std::numeric_limits<double>::infinity(), pts.front()};
+  for (std::size_t i = 0; i + 1 < pts.size(); ++i) {
+    const Point d = pts[i + 1] - pts[i];
+    const double len2 = squared(d);
+    const double t = len2 > 0 ? std::clamp(((q.x - pts[i].x) * d.x + (q.y - pts[i].y) * d.y) / len2, 0.0, 1.0) : 0.0;
+    const Point p = lerp(pts[i], pts[i + 1], t);
+    const double dist = std::sqrt(squared(q - p));
+    if (dist < best.distance) {best = {arc[i] + t * (arc[i + 1] - arc[i]), dist, p};}
+  }
+  if (pts.size() == 1) {best.distance = std::sqrt(squared(q - pts.front()));}
+  return best;
+}
+
+// Natural cubic spline through pts (chord-length parameter), sampled every ds of arc length.
+std::vector<Point> natural_spline(const std::vector<Point> & pts, double ds)
+{
+  const std::size_t n = pts.size();
+  if (n < 3) {return resample(pts, ds);}
+  const auto t = arc_lengths(pts);
+  const auto second = [&](auto coord) {
+      std::vector<double> a(n, 0), b(n, 1), c(n, 0), r(n, 0), m(n, 0);
+      for (std::size_t i = 1; i + 1 < n; ++i) {
+        const double h0 = t[i] - t[i - 1], h1 = t[i + 1] - t[i];
+        a[i] = h0; b[i] = 2 * (h0 + h1); c[i] = h1;
+        r[i] = 6 * ((coord(pts[i + 1]) - coord(pts[i])) / h1 - (coord(pts[i]) - coord(pts[i - 1])) / h0);
+      }
+      for (std::size_t i = 1; i < n; ++i) {const double w = a[i] / b[i - 1]; b[i] -= w * c[i - 1]; r[i] -= w * r[i - 1];}
+      m[n - 1] = r[n - 1] / b[n - 1];
+      for (std::size_t i = n - 1; i-- > 0;) {m[i] = (r[i] - c[i] * m[i + 1]) / b[i];}
+      return m;};
+  const auto mx = second([](Point p) {return p.x;}), my = second([](Point p) {return p.y;});
+  std::vector<Point> dense;
+  for (std::size_t i = 0; i + 1 < n; ++i) {
+    const double h = t[i + 1] - t[i];
+    for (int k = 0; k < 8; ++k) {
+      const double u = h * k / 8, A = (h - u) / h, B = u / h;
+      const auto f = [&](double y0, double y1, double m0, double m1) {
+          return A * y0 + B * y1 + ((A * A * A - A) * m0 + (B * B * B - B) * m1) * h * h / 6;};
+      dense.push_back({f(pts[i].x, pts[i + 1].x, mx[i], mx[i + 1]), f(pts[i].y, pts[i + 1].y, my[i], my[i + 1])});
+    }
+  }
+  dense.push_back(pts.back());
+  return resample(dense, ds);
+}
+
+// Discrete curvature over +-k samples (turning angle / arc), 0 at the ends.
+std::vector<double> curvature(const std::vector<Point> & p, int k = 3)
+{
+  std::vector<double> out(p.size(), 0.0);
+  for (std::size_t i = k; i + k < p.size(); ++i) {
+    const Point a = p[i] - p[i - k], b = p[i + k] - p[i];
+    const double turn = std::atan2(a.x * b.y - a.y * b.x, a.x * b.x + a.y * b.y);
+    const double len = std::sqrt(squared(a)) + std::sqrt(squared(b));
+    out[i] = len > 0 ? 2 * turn / len : 0.0;
+  }
+  return out;
+}
+
+// Samples as collision_free() checks them (each sample and res/2 steps to the next) must be free. A line-of-sight
+// path touches the padding boundary at corners, so a sample can land in a blocked cell corner: push such
+// samples (and the segment ends around a blocked step) out along the clearance gradient, half a cell at a time.
+bool repair_free(const Grid & g, std::vector<Point> & pts, std::size_t first_movable = 1)
+{
+  const auto push = [&](Point & p) {
+      const double h2 = 2 * g.res;
+      const Point grad{(clearance_at(g, p + Point{h2, 0}) - clearance_at(g, p - Point{h2, 0})) / (2 * h2),
+                       (clearance_at(g, p + Point{0, h2}) - clearance_at(g, p - Point{0, h2})) / (2 * h2)};
+      const double norm = std::sqrt(squared(grad));
+      if (norm > 1e-9) {p = p + grad * (0.5 * g.res / norm);}};
+  for (int round = 0; round < 6; ++round) {
+    bool clean = true;
+    for (std::size_t i = 0; i < pts.size(); ++i) {
+      const bool here = point_free(g, pts[i]);
+      const bool step = i + 1 >= pts.size() || [&] {
+          const int n = std::max(1, static_cast<int>(std::ceil(std::sqrt(squared(pts[i + 1] - pts[i])) / (g.res / 2))));
+          for (int k = 0; k <= n; ++k) {if (!point_free(g, lerp(pts[i], pts[i + 1], static_cast<double>(k) / n))) {return false;}}
+          return true;}();
+      if (here && step) {continue;}
+      clean = false;
+      if (i >= first_movable && i + 1 < pts.size()) {push(pts[i]);}
+      if (!step && i + 2 < pts.size() && i + 1 >= first_movable) {push(pts[i + 1]);}
+    }
+    if (clean) {return true;}
+  }
+  return false;
+}
+
+// The whole global polyline smoothed once (astar8_spline.py smooth_curve): clearance + curvature, every point kept
+// within local_max_dev of the polyline, natural-splined at kLocalSample. approach_from: polyline arc length where the
+// goal approach line starts (kept straight), or infinity.
+std::vector<Point> smooth_global(
+  const Grid & g, const PathPlannerConfig & c, const std::vector<Point> & global, double approach_from)
+{
+  const auto arc = arc_lengths(global);
+  auto P = resample(global, kLocalStep);
+  std::vector<uint8_t> fixed(P.size(), 0);
+  fixed.front() = fixed.back() = 1;
+  for (std::size_t i = 0; i < P.size(); ++i) {
+    const auto q = project(global, arc, P[i]);
+    if (q.s >= approach_from - 1e-6 && q.distance < 1e-3) {fixed[i] = 1;}  // goal approach line stays straight
+  }
+  const auto clip = [&](Point p) {
+      const auto q = project(global, arc, p);
+      return q.distance <= c.local_max_dev ? p : q.p + (p - q.p) * (c.local_max_dev / q.distance);};
+  const double pad = c.r_robot + c.margin, target = pad + kClearBand;
+  const double kmax = std::min(c.a_lat_max / (c.v_ref * c.v_ref), c.w_max / c.v_ref);
+  const std::size_t n = P.size();
+  std::vector<Point> upd(n);
+  for (int it = 0; it < kLocalIterations && n > 2; ++it) {
+    const auto k = curvature(P, 1);
+    for (std::size_t i = 1; i + 1 < n; ++i) {
+      Point u = (P[i - 1] + P[i + 1] - P[i] * 2) * kSmooth;
+      const double d = clearance_at(g, P[i]);
+      if (d < target) {
+        const double h2 = 2 * g.res;
+        Point grad{(clearance_at(g, P[i] + Point{h2, 0}) - clearance_at(g, P[i] - Point{h2, 0})) / (2 * h2),
+                   (clearance_at(g, P[i] + Point{0, h2}) - clearance_at(g, P[i] - Point{0, h2})) / (2 * h2)};
+        const double norm = std::max(std::sqrt(squared(grad)), 1e-3);
+        u = u + grad * (std::min(kObstaclePull * (target - d), kMaxPush) / norm);
+      }
+      if (std::abs(k[i]) > kmax) {u = u + (P[i - 1] + P[i + 1] - P[i] * 2) * kKappaPull;}
+      upd[i] = u;
+    }
+    for (std::size_t i = 1; i + 1 < n; ++i) {
+      if (fixed[i]) {continue;}
+      const Point moved = clip(P[i] + upd[i]);
+      if (point_free(g, moved)) {P[i] = moved;}
+    }
+  }
+  auto out = natural_spline(P, kLocalSample);
+  const bool spline_ok = std::all_of(out.begin(), out.end(), [&](Point p) {
+      return point_free(g, p) && project(global, arc, p).distance <= c.local_max_dev + g.res;});
+  if (!spline_ok) {out = resample(P, kLocalSample);}
+  out.front() = P.front(); out.back() = P.back();
+  repair_free(g, out);
+  for (std::size_t i = 0; i < out.size(); ++i) {
+    if (!point_free(g, out[i])) {
+      char text[160];
+      std::snprintf(text, sizeof(text), "Global path blocked at sample %zu/%zu (clearance %.3f m, %s)", i, out.size(),
+        clearance_at(g, out[i]), spline_ok ? "spline" : "polyline");
+      throw RouteUnavailable(text);
+    }
+  }
+  return out;
+}
+
+// Speed profile [m/s] along pts: v_ref, the lateral acceleration and yaw rate at the curvature, and both wheels
+// within max_wheel once the turn is added (v (1 + |k| s / 2) / r <= max_wheel). The wheel boards follow steps at once,
+// so the profile also owns a_lon_max: up from v_min at the first point, down to v_min over the last stop_distance
+// (the robot stops inside it), never below v_min.
+std::vector<double> speed_profile(const PathPlannerConfig & c, const std::vector<Point> & pts, const std::vector<double> & kappa)
+{
+  const auto arc = arc_lengths(pts);
+  std::vector<double> v(pts.size());
+  for (std::size_t i = 0; i < pts.size(); ++i) {
+    const double k = std::abs(kappa[i]);
+    v[i] = std::min({c.v_ref, c.max_wheel * c.wheel_radius / (1 + k * c.wheel_separation / 2),
+      k > 1e-9 ? std::sqrt(c.a_lat_max / k) : c.v_ref, k > 1e-9 ? c.w_max / k : c.v_ref});
+    if (arc.back() - arc[i] <= c.stop_distance) {v[i] = c.v_min;}
+  }
+  const auto step = [&](std::size_t from, std::size_t to) {
+      v[to] = std::min(v[to], std::sqrt(v[from] * v[from] + 2 * c.a_lon_max * std::abs(arc[to] - arc[from])));};
+  v.front() = std::min(v.front(), c.v_min);
+  for (std::size_t i = 1; i < v.size(); ++i) {step(i - 1, i);}
+  for (std::size_t i = v.size() - 1; i-- > 0;) {step(i + 1, i);}
+  for (auto & x : v) {x = std::max(x, c.v_min);}
+  return v;
+}
+
+// Local path: the samples of the smoothed global path within [s_ego - local_behind, s_ego + local_ahead], with the
+// speed profile of that window. It slows down at the window end too, which a renewal moves ahead long before; it
+// starts at v_min local_behind behind the robot, so a renewal does not slow a moving robot (a_lon_max * 2 * 1 m).
+std::vector<Sample> local_window(const Grid & g, const PathPlannerConfig & c, const std::vector<Point> & global, double s_ego)
+{
+  const auto arc = arc_lengths(global);
+  const auto kappa_all = curvature(global);
+  std::vector<Point> pts;
+  std::vector<double> kappa;
+  for (std::size_t i = 0; i < global.size(); ++i) {
+    if (arc[i] >= s_ego - c.local_behind - 1e-9 && arc[i] <= s_ego + c.local_ahead + 1e-9) {
+      pts.push_back(global[i]); kappa.push_back(kappa_all[i]);
+    }
+  }
+  if (pts.size() < 2) {throw RouteUnavailable("Robot is past the global path");}
+  for (std::size_t i = 0; i < pts.size(); ++i) {
+    if (!point_free(g, pts[i])) {
+      char text[128];
+      std::snprintf(text, sizeof(text), "Local path blocked at sample %zu/%zu (clearance %.3f m)", i, pts.size(),
+        clearance_at(g, pts[i]));
+      throw RouteUnavailable(text);
+    }
+  }
+  const auto v = speed_profile(c, pts, kappa);
+  std::vector<Sample> samples;
+  for (std::size_t i = 0; i < pts.size(); ++i) {
+    const Point d = i + 1 < pts.size() ? pts[i + 1] - pts[i] : pts[i] - pts[i - 1];
+    samples.push_back({pts[i], std::atan2(d.y, d.x), kappa[i], v[i]});
+  }
+  return samples;
+}
+
+Point to_map(const Grid & g, Point p)
+{
+  const double c = std::cos(g.yaw), s = std::sin(g.yaw);
+  return {g.ox + c * p.x - s * p.y, g.oy + s * p.x + c * p.y};
+}
+
+geometry_msgs::msg::PoseStamped map_pose(const Grid & g, Point local, double yaw, const std::string & frame)
+{
+  geometry_msgs::msg::PoseStamped pose; pose.header.frame_id = frame;
+  const auto p = to_map(g, local);
+  pose.pose.position.x = p.x; pose.pose.position.y = p.y;
+  pose.pose.orientation.z = std::sin((yaw + g.yaw) / 2); pose.pose.orientation.w = std::cos((yaw + g.yaw) / 2);
+  return pose;
+}
+
+void fill_local(PathPlan & r, const Grid & g, const std::vector<Sample> & samples, const std::string & frame)
+{
+  r.path = nav_msgs::msg::Path(); r.path.header.frame_id = frame; r.speed_limit.clear();
+  for (const auto & s : samples) {r.path.poses.push_back(map_pose(g, s.p, s.yaw, frame)); r.speed_limit.push_back(s.v);}
+}
+
+std::vector<Point> local_points(const Grid & g, const nav_msgs::msg::Path & path)
+{
+  std::vector<Point> out;
+  for (const auto & pose : path.poses) {
+    const auto p = g.local(pose.pose.position);
+    if (out.empty() || squared(p - out.back()) > 1e-12) {out.push_back(p);}
+  }
+  return out;
+}
+}  // namespace
+
+namespace
+{
+constexpr double kBoxTolerance = 0.08;  // [m] map box outline vs the box_approach centre/side
+
+// The approach to box: within padding of the line entry (approach_len behind goal) -> goal, cells blocked only by the
+// box's padding are freed (the inflation is redone with the box cleared). Occupied cells (the box itself) stay
+// blocked. goal and heading in grid-local coordinates. The box-free inflation runs on a crop around the line that
+// reaches every band a check reads (padding + prox_band) past the corridor, not on the whole map.
+void open_approach(Grid & g, const PathPlannerConfig & c, const BoxTarget & box, Point goal, double heading)
+{
+  const double pad = c.r_robot + c.margin;
+  const Point entry = goal - Point{std::cos(heading), std::sin(heading)} * (c.approach_len + g.res);
+  const Point seg = goal - entry;
+  const double len2 = squared(seg), m = 2 * pad + c.prox_band + 2 * g.res;
+  const int x0 = std::max(0, static_cast<int>(std::floor((std::min(entry.x, goal.x) - m) / g.res)));
+  const int y0 = std::max(0, static_cast<int>(std::floor((std::min(entry.y, goal.y) - m) / g.res)));
+  const int x1 = std::min(g.width, static_cast<int>(std::ceil((std::max(entry.x, goal.x) + m) / g.res)));
+  const int y1 = std::min(g.height, static_cast<int>(std::ceil((std::max(entry.y, goal.y) + m) / g.res)));
+  if (x0 >= x1 || y0 >= y1) {return;}
+  geometry_msgs::msg::Point centre_map; centre_map.x = box.x; centre_map.y = box.y;
+  const Point centre = g.local(centre_map);
+  const double cy = std::cos(box.yaw - g.yaw), sy = std::sin(box.yaw - g.yaw), half = box.side / 2 + kBoxTolerance;
+  Grid without; without.width = x1 - x0; without.height = y1 - y0; without.res = g.res;
+  without.occupied.resize(static_cast<std::size_t>(without.width) * without.height);
+  for (int y = y0; y < y1; ++y) {
+    for (int x = x0; x < x1; ++x) {
+      const int i = g.index(x, y);
+      const Point d = g.center(i) - centre;
+      const bool in_box = std::abs(cy * d.x + sy * d.y) <= half && std::abs(-sy * d.x + cy * d.y) <= half;
+      without.occupied[without.index(x - x0, y - y0)] = in_box ? 0 : g.occupied[i];
+    }
+  }
+  inflate(without, pad);  // the crop's edge counts as occupied: the corridor stays m - pad (>= every band) inside it
+  for (int y = y0; y < y1; ++y) {
+    for (int x = x0; x < x1; ++x) {
+      const int i = g.index(x, y), j = without.index(x - x0, y - y0);
+      const Point p = g.center(i);
+      const double t = std::clamp(((p.x - entry.x) * seg.x + (p.y - entry.y) * seg.y) / len2, 0.0, 1.0);
+      if (squared(p - (entry + seg * t)) > pad * pad) {continue;}
+      g.blocked[i] = g.occupied[i] || without.blocked[j];
+      g.clearance[i] = without.clearance[j];
+    }
+  }
+}
+
+void open_approach(Grid & g, const PathPlannerConfig & c, const BoxApproach * approach)
+{
+  if (approach) {open_approach(g, c, approach->box, g.local(approach->goal.position), pose_yaw(approach->goal) - g.yaw);}
+}
 }  // namespace
 
 struct PathPlanner::Data {PathPlannerConfig config; Grid grid;};
@@ -619,12 +1023,19 @@ void PathPlanner::configure(const PathPlannerConfig & config)
     for (const double p : {config.res, config.block_size, config.prox_band, config.arc_sample}) {require(std::isfinite(p) && p > 0, "Planner lengths must be positive and finite");}
     for (const double p : {config.r_robot, config.margin, config.lam, config.w_prox}) {require(std::isfinite(p) && p >= 0, "Planner costs and footprint must be nonnegative and finite");}
     for (const double p : {config.r_hi_global, config.r_tol, config.v_ref, config.w_max, config.a_lat_max,
-         config.a_lon_max, config.approach_len}) {require(std::isfinite(p) && p > 0, "Planner fillet/speed parameters must be positive and finite");}
+         config.a_lon_max, config.approach_len, config.wheel_radius, config.wheel_separation, config.max_wheel, config.v_min}) {require(std::isfinite(p) && p > 0, "Planner fillet/speed parameters must be positive and finite");}
+    require(std::isfinite(config.stop_distance) && config.stop_distance >= 0 && config.v_min <= config.v_ref,
+      "stop_distance must be nonnegative and v_min at most v_ref");
     require(std::isfinite(config.r_min) && config.r_min >= 0 && config.r_min <= config.r_hi_global, "r_min must be in [0, r_hi_global]");
     require(std::isfinite(config.r_robot + config.margin) && config.max_cells > 0 &&
       config.max_cells <= static_cast<std::size_t>(std::numeric_limits<int>::max() / 8) && config.max_expansions > 0 &&
       config.occupancy_threshold >= 1 && config.occupancy_threshold <= 100, "Invalid planner resource limit or occupancy threshold");
     require(!config.stl_slice_heights.empty(), "STL slice heights must be nonempty");
+    require(config.mode == "arc" || config.mode == "global_local", "path_planner mode must be arc or global_local");
+    for (const double p : {config.local_behind, config.local_ahead, config.local_update, config.local_max_dev}) {
+      require(std::isfinite(p) && p >= 0, "Local path lengths must be finite and nonnegative");
+    }
+    require(config.local_ahead > config.local_update, "local_ahead must exceed local_update");
     for (const double z : config.stl_slice_heights) {require(std::isfinite(z), "STL slice height is not finite");}
     auto data = std::make_shared<Data>(); data->config = config; auto & grid = data->grid; grid.res = config.res;
     const auto path = std::filesystem::path(config.map_file);
@@ -647,7 +1058,7 @@ void PathPlanner::configure(const PathPlannerConfig & config)
 
 PathPlan PathPlanner::plan(
   const nav_msgs::msg::Odometry & odom, const geometry_msgs::msg::PoseStamped & goal,
-  const geometry_msgs::msg::PoseArray & map_obstacles) const
+  const geometry_msgs::msg::PoseArray & map_obstacles, bool heading_required, const BoxTarget * box) const
 {
   // A start just inside the margin (tracking error, a robot placed near a wall) leaves straight to the nearest
   // free cell within this distance while the body itself (r_robot) stays clear; it is a STOP_TURN segment.
@@ -658,7 +1069,8 @@ PathPlan PathPlanner::plan(
     const auto & config = data->config;
     require(odom.header.frame_id == config.map_frame && goal.header.frame_id == config.map_frame, "Map, goal and odometry must use the same frame");
     const double start_yaw = pose_yaw(odom.pose.pose), goal_yaw = pose_yaw(goal.pose);
-    const auto grid = obstacle_snapshot(data->grid, map_obstacles, config);
+    const bool heading = config.goal_heading_required || heading_required;
+    auto grid = obstacle_snapshot(data->grid, map_obstacles, config);
     const Point start = grid.local(odom.pose.pose.position), target = grid.local(goal.pose.position);
     const int first = grid.cell(start), last = grid.cell(target);
     require(first >= 0 && last >= 0, "Start or goal is outside the map");
@@ -690,8 +1102,54 @@ PathPlan PathPlanner::plan(
       for (int i = 0; i < k; ++i) {escape.push_back({lerp(start, p, static_cast<double>(i) / k), yaw, 0.0, config.v_ref});}
       from.x = chosen % grid.width; from.y = chosen / grid.width;
     }
+    if (config.mode == "global_local") {
+      // Global: 8-connected A* (to the approach entry when the goal heading is required) + line-of-sight pruning.
+      // The approach is the straight approach_len along the goal heading, any angle: entry -> goal.
+      int goal_cell = last;
+      std::optional<Point> entry;
+      if (heading) {
+        const Point u{std::cos(goal_yaw - grid.yaw), std::sin(goal_yaw - grid.yaw)};
+        entry = target - u * config.approach_len;
+        if (box) {open_approach(grid, config, *box, target, goal_yaw - grid.yaw);}
+        goal_cell = grid.cell(*entry);
+        if (!point_free(grid, target)) {throw RouteUnavailable("Approach goal in the padding");}
+        if (goal_cell < 0 || !point_free(grid, *entry) || !segment_free(grid, *entry, target)) {
+          throw RouteUnavailable("Goal approach line crosses an inflated obstacle");
+        }
+      }
+      std::vector<Point> cells;
+      for (const int i : astar8_search(grid, config, grid.index(from.x, from.y), goal_cell, result.expanded)) {
+        cells.push_back(grid.center(i));
+      }
+      std::vector<Point> global{start};
+      for (const auto & q : prune_los(grid, cells)) {if (squared(q - global.back()) > 1e-12) {global.push_back(q);}}
+      if (entry) {  // the exact entry instead of its cell centre, so the approach keeps the goal heading
+        if (global.size() > 1 && segment_free(grid, global[global.size() - 2], *entry)) {global.back() = *entry;}
+        else if (squared(*entry - global.back()) > 1e-12) {global.push_back(*entry);}
+      }
+      if (squared(target - global.back()) > 1e-12) {global.push_back(target);}
+      const bool approach = entry.has_value();
+      const auto arc = arc_lengths(global);
+      const double approach_from = approach && global.size() >= 2 ?
+        arc.back() - std::sqrt(squared(target - global[global.size() - 2])) : std::numeric_limits<double>::infinity();
+      const auto smooth = smooth_global(grid, config, global, approach_from);
+      result.global.header.frame_id = config.map_frame;
+      for (std::size_t i = 0; i < smooth.size(); ++i) {
+        const Point d = i + 1 < smooth.size() ? smooth[i + 1] - smooth[i] : smooth[i] - smooth[i - 1];
+        result.global.poses.push_back(map_pose(grid, smooth[i], std::atan2(d.y, d.x), config.map_frame));
+      }
+      result.global.poses.front().pose.position.x = odom.pose.pose.position.x;
+      result.global.poses.front().pose.position.y = odom.pose.pose.position.y;
+      result.global.poses.back().pose.position.x = goal.pose.position.x;
+      result.global.poses.back().pose.position.y = goal.pose.position.y;
+      fill_local(result, grid, local_window(grid, config, smooth, 0.0), config.map_frame);
+      result.path.poses.front().pose.position = result.global.poses.front().pose.position;
+      if (arc_lengths(smooth).back() <= config.local_ahead) {result.path.poses.back().pose.position = result.global.poses.back().pose.position;}
+      result.ok = true;
+      return result;
+    }
     const Leg leg = plan_leg(grid, config, from, last % grid.width, last / grid.width,
-      config.goal_heading_required ? quarter(goal_yaw) : -1, std::min(config.arc_sample, grid.res / 2));
+      heading ? quarter(goal_yaw) : -1, std::min(config.arc_sample, grid.res / 2));
     std::vector<Sample> samples = escape;
     samples.insert(samples.end(), leg.path.begin(), leg.path.end());
     if (!escape.empty()) {result.stops.push_back(escape.size());}
@@ -731,12 +1189,149 @@ PathPlan PathPlanner::plan(
   return result;
 }
 
-bool PathPlanner::collision_free(const nav_msgs::msg::Path & path, const geometry_msgs::msg::PoseArray & map_obstacles) const
+PathPlan PathPlanner::plan_box(
+  const nav_msgs::msg::Odometry & odom, const BoxTarget & box, const geometry_msgs::msg::PoseArray & map_obstacles,
+  const double * face_normal, double stage_lead) const
+{
+  PathPlan best;
+  double best_length = kInfinity;
+  std::string why;
+  bool retryable = !map_obstacles.poses.empty();
+  try {
+    const auto data = std::atomic_load(&data_); require(data != nullptr, "Planner has not been configured");
+    const auto & config = data->config;
+    require(std::isfinite(box.x) && std::isfinite(box.y) && std::isfinite(box.yaw) && box.side > 0 && box.standoff > 0,
+      "Invalid box target");
+    const double reach = box.side / 2 + box.standoff;  // box centre -> goal
+    for (int k = 0; k < 4; ++k) {
+      const double normal = box.yaw + k * kPi / 2, heading = normal + kPi;
+      if (face_normal && std::abs(std::remainder(normal - *face_normal, 2 * kPi)) > kPi / 4) {continue;}
+      geometry_msgs::msg::PoseStamped goal;
+      goal.header.frame_id = config.map_frame;
+      goal.pose.position.x = box.x + reach * std::cos(normal);
+      goal.pose.position.y = box.y + reach * std::sin(normal);
+      goal.pose.orientation.z = std::sin(heading / 2); goal.pose.orientation.w = std::cos(heading / 2);
+      char face[48];
+      std::snprintf(face, sizeof(face), "face %d (normal %.0f deg)", k, normal * 180 / kPi);
+      // plan() rejects a face before A* when its goal, entry or approach line is in the padding (box padding aside).
+      auto p = plan(odom, goal, map_obstacles, true, &box);
+      if (!p.ok) {why += std::string(face) + ": " + p.error + "; "; retryable = retryable || p.retryable; continue;}
+      if (stage_lead > 0) {  // stop at the stage point, then dock straight (the face itself checked above)
+        // A stage point in the padding (a face toward a wall) moves up in 5 cm steps, at the latest to the approach
+        // entry (lead 0), which the face check has cleared.
+        std::string stage_why;
+        bool staged = false;
+        for (double lead = stage_lead; !staged && lead > -1e-9; lead -= 0.05) {
+          geometry_msgs::msg::PoseStamped stage = goal;
+          const double back = config.approach_len + std::max(lead, 0.0);
+          stage.pose.position.x -= back * std::cos(heading); stage.pose.position.y -= back * std::sin(heading);
+          nav_msgs::msg::Path line; line.header.frame_id = config.map_frame;
+          line.poses = {stage, goal};
+          const BoxApproach dock{box, goal.pose};
+          if (!collision_free(line, map_obstacles, &dock)) {stage_why = "dock line in the padding"; continue;}
+          auto q = plan(odom, stage, map_obstacles);
+          if (!q.ok) {stage_why = "stage: " + q.error; retryable = retryable || q.retryable; continue;}
+          p = std::move(q); staged = true;
+        }
+        if (!staged) {why += std::string(face) + ": " + stage_why + "; "; continue;}
+      }
+      double length = 0;
+      for (std::size_t i = 1; i < p.global.poses.size(); ++i) {
+        const auto & a = p.global.poses[i - 1].pose.position, & b = p.global.poses[i].pose.position;
+        length += std::hypot(b.x - a.x, b.y - a.y);
+      }
+      if (length < best_length) {best_length = length; best = std::move(p); best.goal = goal; best.face_normal = normal;}
+    }
+    if (!best.ok) {
+      best = PathPlan(); best.error = "No approachable box face: " + why; best.retryable = retryable;
+    }
+  } catch (const std::exception & error) {
+    best = PathPlan(); best.error = error.what();
+  }
+  return best;
+}
+
+PathPlan PathPlanner::plan_toward(
+  const nav_msgs::msg::Odometry & odom, double x, double y, const geometry_msgs::msg::PoseArray & map_obstacles) const
+{
+  PathPlan result;
+  try {
+    const auto data = std::atomic_load(&data_); require(data != nullptr, "Planner has not been configured");
+    const auto & config = data->config;
+    require(odom.header.frame_id == config.map_frame, "Map and odometry must use the same frame");
+    const auto grid = obstacle_snapshot(data->grid, map_obstacles, config);
+    geometry_msgs::msg::Point target_map; target_map.x = x; target_map.y = y;
+    const Point target = grid.local(target_map), robot = grid.local(odom.pose.pose.position);
+    int best = -1; double best_target = kInfinity, best_robot = kInfinity;
+    for (int i = 0; i < static_cast<int>(grid.blocked.size()); ++i) {
+      if (grid.blocked[i]) {continue;}
+      const Point p = grid.center(i);
+      const double dt = std::sqrt(squared(p - target)), dr = std::sqrt(squared(p - robot));
+      if (dt < best_target - grid.res || (dt < best_target + grid.res && dr < best_robot)) {
+        best = i; best_target = std::min(best_target, dt); best_robot = dr;
+      }
+    }
+    if (best < 0) {throw RouteUnavailable("No free cell to drive toward");}
+    const Point g = grid.center(best);
+    geometry_msgs::msg::PoseStamped goal;
+    goal.header.frame_id = config.map_frame;
+    const double c = std::cos(grid.yaw), sn = std::sin(grid.yaw);
+    goal.pose.position.x = grid.ox + c * g.x - sn * g.y; goal.pose.position.y = grid.oy + sn * g.x + c * g.y;
+    goal.pose.orientation.w = 1.0;
+    return plan(odom, goal, map_obstacles);
+  } catch (const RouteUnavailable & error) {
+    result = PathPlan(); result.error = error.what(); result.retryable = true;
+  } catch (const std::exception & error) {
+    result = PathPlan(); result.error = error.what();
+  }
+  return result;
+}
+
+PathPlan PathPlanner::local_path(
+  const nav_msgs::msg::Path & global, const nav_msgs::msg::Odometry & odom,
+  const geometry_msgs::msg::PoseArray & map_obstacles, const BoxApproach * approach) const
+{
+  PathPlan result;
+  try {
+    const auto data = std::atomic_load(&data_); require(data != nullptr, "Planner has not been configured");
+    const auto & config = data->config;
+    require(config.mode == "global_local", "local_path needs path_planner mode global_local");
+    require(global.header.frame_id == config.map_frame && odom.header.frame_id == config.map_frame,
+      "Global path and odometry must use map_frame");
+    auto grid = obstacle_snapshot(data->grid, map_obstacles, config);
+    open_approach(grid, config, approach);
+    const auto pts = local_points(grid, global);
+    require(pts.size() >= 2, "Global path needs two distinct poses");
+    const auto arc = arc_lengths(pts);
+    const double s_ego = project(pts, arc, grid.local(odom.pose.pose.position)).s;
+    fill_local(result, grid, local_window(grid, config, pts, s_ego), config.map_frame);
+    if (s_ego + config.local_ahead >= arc.back()) {result.path.poses.back().pose.position = global.poses.back().pose.position;}
+    result.global = global;
+    result.ok = true;
+  } catch (const RouteUnavailable & error) {
+    result = PathPlan(); result.error = error.what(); result.retryable = true;
+  } catch (const std::exception & error) {
+    result = PathPlan(); result.error = error.what();
+  }
+  return result;
+}
+
+double path_progress(const nav_msgs::msg::Path & path, const geometry_msgs::msg::Point & p)
+{
+  std::vector<Point> pts;
+  for (const auto & pose : path.poses) {pts.push_back({pose.pose.position.x, pose.pose.position.y});}
+  if (pts.size() < 2) {return 0.0;}
+  return project(pts, arc_lengths(pts), {p.x, p.y}).s;
+}
+
+bool PathPlanner::collision_free(
+  const nav_msgs::msg::Path & path, const geometry_msgs::msg::PoseArray & map_obstacles, const BoxApproach * approach) const
 {
   try {
     const auto data = std::atomic_load(&data_);
     if (!data || path.poses.empty() || path.header.frame_id != data->config.map_frame) {return false;}
-    const auto grid = obstacle_snapshot(data->grid, map_obstacles, data->config);
+    auto grid = obstacle_snapshot(data->grid, map_obstacles, data->config);
+    open_approach(grid, data->config, approach);
     Point previous{};
     for (std::size_t i = 0; i < path.poses.size(); ++i) {
       const auto & pose = path.poses[i]; pose_yaw(pose.pose);

@@ -20,6 +20,7 @@ from pathlib import Path
 
 import rclpy
 from rclpy.signals import SignalHandlerOptions
+import numpy as np
 import yaml
 from craft_interfaces.msg import TaskCommand, TaskResult
 from geometry_msgs.msg import PoseStamped
@@ -174,7 +175,8 @@ def main():
     args = ap.parse_args()
     if not 0 < args.speed <= 0.26 or not args.distance > 0:
         sys.exit('speed must be in (0, 0.26] m/s and distance > 0')
-    lookahead = yaml.safe_load(open(CONTROL_YAML))['control_master']['ros__parameters']['lookahead_distance']
+    params = yaml.safe_load(open(CONTROL_YAML))['control_master']['ros__parameters']
+    lookahead = round(float(np.interp(args.speed, params['lookahead_speeds'], params['lookahead_distances'])), 3)
 
     input(f'[pp] {args.distance} m at {args.speed} m/s, offset {args.offset} m, lookahead {lookahead} m. '
           f'Arm folded, clear {args.distance + 0.5:g} m ahead. Enter to start (Ctrl+C stops) ')

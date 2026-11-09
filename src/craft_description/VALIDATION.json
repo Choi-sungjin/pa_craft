@@ -1,0 +1,155 @@
+{
+ "fails": [],
+ "urdf_bbox_m": [
+  [
+   -0.1487,
+   -0.1772,
+   -0.0343
+  ],
+  [
+   0.2255,
+   0.1772,
+   0.646
+  ]
+ ],
+ "cad_brep_bbox_m": [
+  [
+   -0.1487,
+   -0.1772,
+   -0.0343
+  ],
+  [
+   0.2255,
+   0.1772,
+   0.646
+  ]
+ ],
+ "bbox_max_diff_mm": 0.0,
+ "frames_world_m": {
+  "base_footprint": [
+   0.0,
+   0.0,
+   -0.0343
+  ],
+  "front_laser": [
+   0.1907,
+   0.0,
+   0.0567
+  ],
+  "rear_laser": [
+   -0.1157,
+   0.0,
+   0.0507
+  ],
+  "imu_link": [
+   -0.0355,
+   0.0895,
+   0.0351
+  ],
+  "camera_top_color_link": [
+   -0.0621,
+   -0.0325,
+   0.5928
+  ],
+  "camera_top_color_optical_frame": [
+   -0.0621,
+   -0.0325,
+   0.5928
+  ],
+  "camera_top_depth_link": [
+   -0.0621,
+   0.0325,
+   0.5929
+  ],
+  "camera_top_depth_optical_frame": [
+   -0.0621,
+   0.0325,
+   0.5929
+  ],
+  "camera_wrist_color_link": [
+   0.0083,
+   0.0625,
+   0.2814
+  ],
+  "camera_wrist_color_optical_frame": [
+   0.0083,
+   0.0625,
+   0.2814
+  ],
+  "camera_wrist_depth_link": [
+   0.0128,
+   0.0625,
+   0.3462
+  ],
+  "camera_wrist_depth_optical_frame": [
+   0.0128,
+   0.0625,
+   0.3462
+  ],
+  "tcp": [
+   -0.1327,
+   -0.0435,
+   0.3097
+  ]
+ },
+ "camera_top_view_dir": [
+  0.7242,
+  -0.0,
+  -0.6896
+ ],
+ "camera_top_depression_deg": 43.6,
+ "usda_braces_balanced": true,
+ "usda_rigid_bodies": 13,
+ "usda_joints": 12,
+ "joints": [
+  [
+   "lm_slide",
+   "prismatic"
+  ],
+  [
+   "shoulder",
+   "revolute"
+  ],
+  [
+   "elbow",
+   "revolute"
+  ],
+  [
+   "wrist_pitch",
+   "revolute"
+  ],
+  [
+   "tool_roll",
+   "revolute"
+  ],
+  [
+   "jaw_upper",
+   "prismatic"
+  ],
+  [
+   "jaw_lower",
+   "prismatic"
+  ],
+  [
+   "carousel",
+   "continuous"
+  ],
+  [
+   "front_left_wheel",
+   "continuous"
+  ],
+  [
+   "front_right_wheel",
+   "continuous"
+  ],
+  [
+   "rear_left_wheel",
+   "continuous"
+  ],
+  [
+   "rear_right_wheel",
+   "continuous"
+  ]
+ ],
+ "result": "PASS"
+}

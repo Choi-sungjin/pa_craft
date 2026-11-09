@@ -15,6 +15,7 @@ find_package(nav_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(diagnostic_msgs REQUIRED)
+find_package(craft_interfaces REQUIRED)  # /planning/task_command: a new drive clears the obstacle memory
 find_package(rosidl_default_generators REQUIRED)
 find_package(OpenCV 4 REQUIRED COMPONENTS core imgproc)
 if(OpenCV_VERSION VERSION_LESS "4.7")
@@ -71,7 +72,7 @@ endif()
 add_executable(perception_master src/perception_master.cpp)
 target_link_libraries(perception_master PRIVATE perception_modules
   rclcpp::rclcpp tf2_ros::tf2_ros ament_index_cpp::ament_index_cpp ${perception_typesupport}
-  ${std_msgs_TARGETS} ${diagnostic_msgs_TARGETS})
+  ${std_msgs_TARGETS} ${diagnostic_msgs_TARGETS} ${craft_interfaces_TARGETS})
 
 # Offline PuckAxis on recorded sessions (demo/puck_compare).
 add_executable(puck_axis_offline tools/puck_axis_offline.cpp)

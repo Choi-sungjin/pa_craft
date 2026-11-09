@@ -17,6 +17,8 @@ pa_craft/
     ├── craft_bringup/
     │   ├── CMakeLists.txt
     │   ├── package.xml
+    │   ├── config/
+    │   │   └── rates.yaml        # 세 master의 주기·timeout (각 master yaml 뒤에 넘김)
     │   └── launch/
     │       └── craft.launch.py
     ├── craft_control/

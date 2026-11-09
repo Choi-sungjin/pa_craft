@@ -53,7 +53,9 @@ def main():
         try:
             config = Path(get_package_share_directory('craft_perception')) / 'config/perception.yaml'
             master = [str(Path(get_package_prefix('craft_perception')) / 'lib/craft_perception/perception_master'),
-                      '--ros-args', '--params-file', str(config), '-p', f'lidar.input_mode:={args.input_mode}']
+                      '--ros-args', '--params-file', str(config),
+                      '--params-file', str(Path(__file__).resolve().parents[2] / 'craft_bringup/config/rates.yaml'),
+                      '-p', f'lidar.input_mode:={args.input_mode}']
             # Keep only the LiDAR task; camera configuration is still validated.
             for task in ('d435_yolo', 'apriltag', 'knob_depth', 'object_detector',
                          'obstacle_detector', 'puck_axis', 'knob_lever', 'state_estimator'):

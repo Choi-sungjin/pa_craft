@@ -3,7 +3,6 @@ perception_master:
     # Every value below is required: PerceptionMaster::configure() reads them all and
     # C++ keeps no duplicate defaults. Startup fails on a missing or mistyped key.
     executor_threads: 6
-    max_input_age_s: 0.5
     # ekf_local (wheel + IMU) in odom, moved to map via SLAM's map->odom. craft.launch.py overrides it:
     # /odometry/local (localization:=slam) or ekf_global's /odometry/global in map (localization:=ekf).
     odometry_source_topic: /odometry/local
@@ -93,9 +92,9 @@ perception_master:
       frame: camera_color_optical_frame
       shm: /craft_vision
       yolo:  # one inference per frame, shared by knob_depth / object_detector / obstacle_detector
-        model_dir: models/knob_sign  # relative to installed craft_perception share
+        model_dir: models/knob_sign_v4  # relative to installed craft_perception share
         backend: ncnn  # ncnn (laptop/CPU) | tensorrt (Jetson; build with TensorRT)
-        engine: models/knob_sign/model.engine  # tensorrt only: built on the Jetson with trtexec
+        engine: models/knob_sign_v4/model.engine  # tensorrt only: built on the Jetson with trtexec
         ncnn_blobs: [in0, out0]
         tensorrt_blobs: [images, output0]  # Ultralytics ONNX names
         input_size: 640
@@ -129,9 +128,9 @@ perception_master:
       frame: c310_optical_frame
       shm: /craft_c310
       yolo:  # knob_lever runs its own instance on the C310 image
-        model_dir: models/knob_sign
+        model_dir: models/knob_sign_v4
         backend: ncnn  # ncnn (laptop/CPU) | tensorrt (Jetson; build with TensorRT)
-        engine: models/knob_sign/model.engine  # tensorrt only: built on the Jetson with trtexec
+        engine: models/knob_sign_v4/model.engine  # tensorrt only: built on the Jetson with trtexec
         ncnn_blobs: [in0, out0]
         tensorrt_blobs: [images, output0]  # Ultralytics ONNX names
         input_size: 640
@@ -212,11 +211,13 @@ perception_master:
         rear_right_clear_deg: 50.0
         rear_right_max_range_m: [0.73, 0.60, 0.55, 0.58, 0.57, 0.50, 0.52, 0.46]
 
-    # LidarPerception -> /lidar/merged + /perception/lidar/obstacle (PoseArray).
+    # LidarPerception -> /lidar/merged + /perception/lidar/obstacle (PoseArray; map frame once the filter has map TF,
+    # else the scan frame).
     # Preserve the scan timestamp/frame; skip NaN/Inf bins and points beyond 3 m.
     lidar_obstacle:
       max_range_m: 3.0
       stride: 1
+      odom_frame: odom  # obstacles at the scan stamp: odom->base_link then, map->odom latest (filter_obstacles)
       # Raw points (one per beam) -> points worth avoiding, judged in the map frame (2026-11-01: one noise point
       # or a map wall seen 4 cm off made planning replan). Without map TF the raw points go out.
       filter:
@@ -226,16 +227,21 @@ perception_master:
         persist_frames: 3        # the cell (or neighbor_cells around it) seen in this many frames in a row
         neighbor_cells: 2        # 2 x 5 cm per frame at 10 Hz: movers up to ~1 m/s still persist
         min_cluster_points: 3    # 8-connected kept cells with fewer points this frame are dropped
+        # A kept cell stays an obstacle out of view (past the FOV, or in the floor cut beside the chassis) until the
+        # scan's rays pass through it in persist_frames frames in a row, this long after it was last kept, or a new
+        # drive starts (planning EXECUTE of a new Navigate task; 2026-11-08: the robot drove into a box it had stopped
+        # seeing). One drive takes a minute or two: kept for the whole drive. 0 = no memory.
+        memory_s: 300.0          # [s]
 
-    # Master validates these and creates one timer per enabled task. Hz is an upper bound:
-    # a task only runs on new input (consumers of d435_yolo are capped at its rate).
+    # Master validates these and creates one timer per enabled task; the rates (hz) are in
+    # craft_bringup/config/rates.yaml, like max_input_age_s.
     schedule:
-      d435_yolo: {enabled: true, hz: 10.0}
-      apriltag: {enabled: true, hz: 15.0}
-      knob_depth: {enabled: true, hz: 10.0}
-      object_detector: {enabled: true, hz: 10.0}
-      obstacle_detector: {enabled: true, hz: 10.0}
-      puck_axis: {enabled: true, hz: 10.0}
-      knob_lever: {enabled: true, hz: 10.0}
-      lidar_obstacle: {enabled: true, hz: 20.0}
-      state_estimator: {enabled: true, hz: 100.0}
+      d435_yolo: {enabled: true}
+      apriltag: {enabled: true}
+      knob_depth: {enabled: true}
+      object_detector: {enabled: true}
+      obstacle_detector: {enabled: true}
+      puck_axis: {enabled: true}
+      knob_lever: {enabled: true}
+      lidar_obstacle: {enabled: true}
+      state_estimator: {enabled: true}

@@ -1,11 +1,14 @@
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <utility>
+#include <vector>
 
 #include "gtest/gtest.h"
 #include "craft_control/arm_controller.hpp"
 #include "craft_control/clock_controller.hpp"
+#include "craft_control/contact_detector.hpp"
 #include "craft_control/gripper_controller.hpp"
 #include "craft_control/lateral_controller.hpp"
 #include "craft_control/lm_controller.hpp"
@@ -47,24 +50,21 @@ nav_msgs::msg::Path path(std::initializer_list<std::pair<double, double>> points
   return msg;
 }
 
-// Pure Pursuit wheel delta for a target at chassis-frame (x, y): first resampled point >= lookahead.
+// Pure Pursuit wheel delta for a target at lookahead distance along the ray from the origin.
 double expected_wheel_delta(const craft_control::LateralController & controller, double v)
 {
-  for (const auto & pose : controller.target_path().poses) {
-    const double x = pose.pose.position.x;
-    const double y = pose.pose.position.y;
-    const double d = std::hypot(x, y);
-    if (x > 0.0 && d >= 0.31) {
-      return v * (2.0 * y / (d * d)) * kSeparation / (2.0 * kRadius);
-    }
-  }
-  return std::numeric_limits<double>::quiet_NaN();
+  if (controller.target_path().poses.empty()) return std::numeric_limits<double>::quiet_NaN();
+  const auto & end = controller.target_path().poses.back().pose.position;
+  const double length = std::hypot(end.x, end.y);
+  if (length <= 0.0) return std::numeric_limits<double>::quiet_NaN();
+  const double y = 0.31 * end.y / length;
+  return v * (2.0 * y / (0.31 * 0.31)) * kSeparation / (2.0 * kRadius);
 }
 
 craft_control::LateralController lateral()
 {
   craft_control::LateralController controller;
-  controller.configure(kRadius, kTrack, kWheelbase, 0.0, 0.31, 0.03, 0.02);  // lookahead off the 2 cm grid
+  controller.configure(kRadius, kTrack, kWheelbase, 0.0, {0.0}, {0.31}, 0.03, 0.02);  // lookahead off the 2 cm grid
   controller.set_odom(odom());
   return controller;
 }
@@ -770,7 +770,7 @@ TEST(LateralController, SkidSteerSeparation)
 {
   EXPECT_NEAR(lateral().effective_separation(), kTrack + kWheelbase * kWheelbase / kTrack, 1e-12);
   craft_control::LateralController measured;
-  measured.configure(kRadius, kTrack, kWheelbase, 1.8, 0.31, 0.03, 0.02);
+  measured.configure(kRadius, kTrack, kWheelbase, 1.8, {0.0}, {0.31}, 0.03, 0.02);
   EXPECT_NEAR(measured.effective_separation(), 1.8 * kTrack, 1e-12);
   // In-place alignment turns at rotate_angular_speed on the effective separation.
   measured.set_odom(odom());
@@ -785,8 +785,8 @@ TEST(LateralController, TrackingGainScalesPurePursuitOnly)
 {
   craft_control::LateralController plain;
   craft_control::LateralController gained;
-  plain.configure(kRadius, kTrack, kWheelbase, 1.8, 0.31, 0.03, 0.02);
-  gained.configure(kRadius, kTrack, kWheelbase, 1.8, 0.31, 0.03, 0.02, 0.5, 0.6, 1.2);
+  plain.configure(kRadius, kTrack, kWheelbase, 1.8, {0.0}, {0.31}, 0.03, 0.02);
+  gained.configure(kRadius, kTrack, kWheelbase, 1.8, {0.0}, {0.31}, 0.03, 0.02, 0.5, 0.6, 1.2);
   plain.set_odom(odom());
   gained.set_odom(odom());
   plain.set_target(path({{0.0, 0.0}, {1.0, 0.1}, {2.0, 0.4}}));
@@ -866,4 +866,299 @@ TEST(WheelOdometry, InPlaceTurnReportsNoTravel)
   EXPECT_NEAR(odom.linear(), kRadius * 0.8, 1e-9);
   odom.update(0.5, 1.5, 1.0);  // same direction: never in place
   EXPECT_NEAR(odom.linear(), kRadius, 1e-9);
+}
+
+// Stop on contact, fed like control_master at the board's ~25 Hz with a 2 s put-down: the shoulder current
+// and joints of bags sis_1107_1343 (far, puck meets the box at ~1.6 s) and sis_1107_1246 (far, no contact; near row,
+// baseline too small for the current rule).
+namespace
+{
+using Contact = craft_control::ContactDetector<4>;
+struct Line {double t, current; std::array<double, 4> joints; bool arrived;};
+// Joints descend linearly until `stop_at` (then stay), current holds `base` until `drop_at` (then ~0).
+std::vector<Line> putdown(double base, double drop_at, double stop_at, double arrive_at)
+{
+  std::vector<Line> out;
+  for (double t = 0.0; t <= 3.0; t += 0.04) {
+    const double s = std::min(t, stop_at) / 2.0;
+    out.push_back({t, t < drop_at ? -base : -0.01, {0.8 - 0.3 * s, 1.2 + 0.1 * s, 2.3 - 0.2 * s, -1.59},
+      t >= arrive_at});
+  }
+  return out;
+}
+double first_hit(Contact & c, const std::vector<Line> & lines)
+{
+  for (const auto & l : lines) if (c.update(l.t, l.current, l.joints, l.arrived)) return l.t;
+  return -1.0;
+}
+}  // namespace
+
+TEST(ContactDetector, CurrentDropEndsTheMoveAtTheContact)
+{
+  Contact c; c.start(0.4, 2.0);
+  const double t = first_hit(c, putdown(0.30, 1.60, 2.40, 99.0));
+  EXPECT_NEAR(t, 1.64, 0.05);  // second low line after the drop
+  EXPECT_EQ(c.cause(), Contact::Current);
+  EXPECT_NEAR(c.baseline_a(), 0.30, 1e-9);
+  EXPECT_FALSE(c.active());
+}
+
+TEST(ContactDetector, NoContactWhenTheMoveArrives)
+{
+  Contact c; c.start(0.4, 2.0);
+  EXPECT_LT(first_hit(c, putdown(0.30, 99.0, 2.0, 2.0)), 0.0);  // current held, arrived at the end
+}
+
+TEST(ContactDetector, SmallBaselineUsesTheStallRule)
+{
+  Contact c; c.start(0.4, 2.0);
+  // near row: 0.04 A wobbling to 0 means nothing; the arm stops 0.3 s early and never arrives
+  const double t = first_hit(c, putdown(0.04, 1.30, 1.70, 99.0));
+  EXPECT_GE(t, 1.95);
+  EXPECT_LE(t, 2.05);
+  EXPECT_EQ(c.cause(), Contact::Stall);
+}
+
+TEST(ContactDetector, OffWithoutRatioOrTime)
+{
+  Contact c;
+  c.start(0.0, 2.0); EXPECT_FALSE(c.active());
+  c.start(0.4, 0.0); EXPECT_FALSE(c.active());
+  c.start(1.5, 2.0); EXPECT_FALSE(c.active());
+  EXPECT_LT(first_hit(c, putdown(0.30, 1.60, 2.40, 99.0)), 0.0);
+}
+
+TEST(LateralController, LookaheadFollowsTheSpeedTable)
+{
+  craft_control::LateralController controller;
+  controller.configure(kRadius, kTrack, kWheelbase, 0.0, {0.12, 0.26}, {0.18, 0.25}, 0.03, 0.02);
+  controller.set_speed(0.0);
+  EXPECT_DOUBLE_EQ(controller.lookahead(), 0.18);
+  controller.set_speed(0.19);
+  EXPECT_NEAR(controller.lookahead(), 0.215, 1e-12);
+  controller.set_speed(-0.26);  // reverse: same table on |v|
+  EXPECT_NEAR(controller.lookahead(), 0.25, 1e-12);
+  controller.set_speed(0.5);
+  EXPECT_DOUBLE_EQ(controller.lookahead(), 0.25);
+}
+
+TEST(LateralController, SpeedLimitIsInterpolatedOntoTheSubdivisionAtMyNode)
+{
+  auto controller = lateral();
+  EXPECT_TRUE(std::isinf(controller.speed_limit()));
+  controller.set_target(path({{0.0, 0.0}, {0.1, 0.0}, {0.2, 0.0}}), false, {0.03, 0.13, 0.23});
+  EXPECT_DOUBLE_EQ(controller.speed_limit(), 0.03);
+  controller.set_odom(odom(0.04, 0.0));  // two 2 cm samples in
+  EXPECT_NEAR(controller.speed_limit(), 0.07, 1e-12);
+  controller.set_odom(odom(0.10, 0.0));  // my node moves at most kNodeWindow samples per update
+  EXPECT_NEAR(controller.speed_limit(), 0.13, 1e-12);
+  controller.set_odom(odom(0.16, 0.0));
+  EXPECT_NEAR(controller.speed_limit(), 0.19, 1e-12);
+  // A profile of the wrong length is ignored, not misaligned.
+  controller.set_target(path({{0.0, 0.0}, {0.2, 0.0}}), false, {0.1});
+  EXPECT_TRUE(std::isinf(controller.speed_limit()));
+}
+
+TEST(LateralController, FineTaskAlignmentAtTheStartAndTheGoalOnly)
+{
+  auto controller = lateral();  // configured heading tolerance 0.5 rad
+  auto east = path({{0.0, 0.0}, {0.5, 0.0}, {1.0, 0.0}});
+  for (auto & pose : east.poses) pose.pose.orientation.w = 1.0;  // goal heading east
+  controller.set_target(east, true);
+  controller.set_odom(odom(0.0, 0.0, 3.0 * kPi / 180.0));
+  EXPECT_TRUE(controller.can_track(0.05));   // 3 deg: Pure Pursuit steers it out
+  controller.set_task_tolerances(0.0, 1.0 * kPi / 180.0);
+  EXPECT_FALSE(controller.can_track(0.05));  // a 1 deg task alignment turns first
+  for (double x = 0.04; x < 0.305; x += 0.04) controller.set_odom(odom(x, 0.0, 3.0 * kPi / 180.0));  // my node moves 3 samples per update
+  EXPECT_TRUE(controller.can_track(0.05));   // under way: the configured tolerance
+  // At the goal the heading must be within the task tolerance to arrive.
+  for (double x = 0.34; x < 0.985; x += 0.04) controller.set_odom(odom(x, 0.0, 3.0 * kPi / 180.0));
+  controller.set_odom(odom(0.98, 0.0, 3.0 * kPi / 180.0));
+  EXPECT_FALSE(controller.is_target_reached());
+  controller.set_odom(odom(0.98, 0.0, 0.3 * kPi / 180.0));
+  EXPECT_TRUE(controller.is_target_reached());
+}
+
+TEST(LateralController, AFineArrivalToleranceOvershotStillArrives)
+{
+  auto controller = lateral();  // configured arrival 0.03 m
+  controller.set_target(path({{0.0, 0.0}, {0.5, 0.0}, {1.0, 0.0}}));
+  controller.set_task_tolerances(0.01, 0.0);
+  for (double x = 0.04; x < 0.975; x += 0.04) controller.set_odom(odom(x, 0.0));
+  controller.set_odom(odom(0.975, 0.0));
+  EXPECT_FALSE(controller.is_target_reached());  // 2.5 cm short of a 1 cm tolerance
+  controller.set_odom(odom(0.995, 0.0));
+  EXPECT_TRUE(controller.is_target_reached());
+  controller.set_odom(odom(1.02, 0.0));
+  EXPECT_TRUE(controller.is_target_reached());   // 2 cm past the end: arrived, no turn back
+}
+
+TEST(LateralController, InPlaceTurnKeepsItsDirectionAndSlowsNearTheTarget)
+{
+  auto controller = lateral();
+  controller.set_target(path({{0.0, 0.0}, {0.0, 1.0}}));  // north
+  controller.set_odom(odom(0.0, 0.0, 0.0));               // facing east: +90 deg to turn
+  ASSERT_FALSE(controller.can_track(0.1));
+  auto w = controller.compute_command(0.0, 0.1);
+  EXPECT_GT(w[1], 0.0);
+  EXPECT_NEAR(w[1], 0.6 * kSeparation / (2.0 * kRadius), 1e-9);
+  // The target heading jumps to the other side (-89 deg): the turn keeps its direction.
+  controller.set_odom(odom(0.0, 0.0, 179.0 * kPi / 180.0));
+  w = controller.compute_command(0.0, 0.1);
+  EXPECT_GT(w[1], 0.0);
+  // Overshot by 5 deg: within 0.3 rad it turns back, slowly.
+  controller.set_odom(odom(0.0, 0.0, 95.0 * kPi / 180.0));
+  controller.set_task_tolerances(0.0, 1.0 * kPi / 180.0);
+  w = controller.compute_command(0.0, 0.1);
+  EXPECT_LT(w[1], 0.0);
+  EXPECT_NEAR(-w[1], 0.6 * (5.0 * kPi / 180.0) / 0.3 * kSeparation / (2.0 * kRadius), 1e-6);
+}
+
+TEST(LateralController, NearTheEndTheTargetStaysLookaheadAheadOnTheLastSegment)
+{
+  auto controller = lateral();  // lookahead 0.31 m
+  controller.set_target(path({{0.0, 0.0}, {0.5, 0.0}, {1.0, 0.0}}));
+  for (double x = 0.04; x < 0.905; x += 0.04) controller.set_odom(odom(x, 0.0));
+  controller.set_odom(odom(0.9, 0.05));  // 5 cm left of the line, 10 cm from the end
+  // The target is (1.21, 0) on the extended line, not the end point (1.0, 0) a few cm away.
+  const double x = 0.31, y = -0.05, kappa = 2.0 * y / (x * x + y * y);
+  const auto w = controller.compute_command(0.1);
+  EXPECT_NEAR(w[1], 0.1 * kappa * kSeparation / (2.0 * kRadius), 1e-6);
+}
+
+TEST(LateralController, AFineArrivalCountsAlongTheLastSegment)
+{
+  auto controller = lateral();  // configured arrival 0.03 m
+  controller.set_target(path({{0.0, 0.0}, {0.5, 0.0}, {1.0, 0.0}}));
+  controller.set_task_tolerances(0.01, 0.0);
+  for (double x = 0.04; x < 0.985; x += 0.04) controller.set_odom(odom(x, 0.018));
+  controller.set_odom(odom(0.985, 0.018));
+  EXPECT_FALSE(controller.is_target_reached());  // 1.5 cm short along the line
+  controller.set_odom(odom(0.995, 0.018));
+  EXPECT_TRUE(controller.is_target_reached());   // 1.8 cm to the side: arrived (the side is the caller's)
+}
+
+TEST(LateralController, LookaheadTargetInterpolatesContinuouslyAlongProjectedPath)
+{
+  auto controller = lateral();  // lookahead 0.31 m, path_spacing 0.02 m
+  EXPECT_FALSE(controller.lookahead_point().has_value());
+  controller.set_target(path({{0.0, 0.0}, {1.0, 0.0}}));
+  for (double x : {0.0, 0.005, 0.010, 0.015, 0.025}) {
+    controller.set_odom(odom(x, 0.03));
+    const auto point = controller.lookahead_point();
+    ASSERT_TRUE(point.has_value());
+    EXPECT_NEAR(point->x, x + 0.31, 1e-12);
+    EXPECT_NEAR(point->y, 0.0, 1e-12);
+  }
+  // Before the start of the path, projection clamps to arc 0.
+  controller.set_odom(odom(-0.04, 0.01));
+  const auto clamped = controller.lookahead_point();
+  ASSERT_TRUE(clamped.has_value());
+  EXPECT_NEAR(clamped->x, 0.31, 1e-12);
+  EXPECT_NEAR(clamped->y, 0.0, 1e-12);
+  // Across a corner, remaining lookahead arc is interpolated along the next segment.
+  controller.set_target(path({{0.0, 0.0}, {0.2, 0.0}, {0.2, 0.5}}));
+  controller.set_odom(odom(0.055, -0.02));
+  const auto corner = controller.lookahead_point();
+  ASSERT_TRUE(corner.has_value());
+  EXPECT_NEAR(corner->x, 0.2, 1e-12);
+  EXPECT_NEAR(corner->y, 0.165, 1e-12);
+}
+
+TEST(LateralController, MillimetreMotionHasNoSampleGridSteps)
+{
+  for (const double la : {0.08, 0.18, 0.21, 0.31}) {
+    auto controller = lateral();
+    controller.configure(kRadius, kTrack, kWheelbase, 0.0, {0.0}, {la}, 0.03, 0.02);
+    controller.set_target(path({{0.0, 0.0}, {1.0, 0.0}}));
+    double previous = la;
+    for (int i = 0; i <= 970; ++i) {
+      const double x = i * 0.001;
+      controller.set_odom(odom(x, 0.039));
+      const auto point = controller.lookahead_point();
+      ASSERT_TRUE(point.has_value());
+      EXPECT_NEAR(point->x, x + la, 1e-10);
+      EXPECT_NEAR(point->y, 0.0, 1e-12);
+      if (i > 0) {EXPECT_NEAR(point->x - previous, 0.001, 1e-10);}
+      previous = point->x;
+    }
+  }
+}
+
+TEST(LateralController, InterpolationGuardsAndReversedPath)
+{
+  auto controller = lateral();
+  controller.set_target(path({{0.0, 0.0}, {0.0, 0.0}}));
+  const auto one = controller.lookahead_point();
+  ASSERT_TRUE(one.has_value());
+  EXPECT_TRUE(std::isfinite(one->x));
+  controller.set_target(path({{0.0, 0.0}, {-1.0, 0.0}}));
+  controller.set_odom(odom(-0.005, 0.02));
+  ASSERT_TRUE(controller.lookahead_point().has_value());
+  EXPECT_NEAR(controller.lookahead_point()->x, -0.315, 1e-12);
+  auto wrong = odom(); wrong.header.frame_id = "other";
+  controller.set_odom(wrong);
+  EXPECT_FALSE(controller.lookahead_point().has_value());
+  EXPECT_FALSE(controller.can_track(-0.1));
+  controller.clear_odom();
+  EXPECT_FALSE(controller.lookahead_point().has_value());
+  controller.clear_target();
+  EXPECT_FALSE(controller.lookahead_point().has_value());
+}
+
+TEST(LateralController, TaskFrontReferenceTracksProjectedPointAndResets)
+{
+  auto c = lateral();
+  c.set_target(path({{0, 0}, {1, 0}}));
+  c.set_task_tracking_reference(0.2097, 0.02);
+  ASSERT_TRUE(c.lookahead_point());
+  EXPECT_NEAR(c.lookahead_point()->x, 0.2297, 1e-10);
+  c.set_task_tracking_reference(0.165, 0.02);
+  EXPECT_NEAR(c.lookahead_point()->x, 0.185, 1e-10);
+  c.set_task_tracking_reference(0.0, 0.0);
+  EXPECT_NEAR(c.lookahead_point()->x, 0.31, 1e-10);
+}
+
+TEST(LateralController, TaskFrontReferenceRotatedCurvedAndEndpoint)
+{
+  auto c = lateral();
+  c.set_target(path({{0, 0}, {0, 0.2}, {0.2, 0.2}, {0.2, 0.2}}));
+  c.set_task_tracking_reference(0.19, 0.02);
+  c.set_odom(odom(0, 0, kPi / 2));
+  ASSERT_TRUE(c.lookahead_point());
+  EXPECT_NEAR(c.lookahead_point()->x, 0.01, 1e-10);
+  EXPECT_NEAR(c.lookahead_point()->y, 0.2, 1e-10);
+  c.set_target(path({{0, 0}, {0.1, 0}, {0.1, 0}}));
+  c.set_odom(odom());
+  ASSERT_TRUE(c.lookahead_point());
+  EXPECT_NEAR(c.lookahead_point()->x, 0.21, 1e-10);
+  EXPECT_NEAR(c.lookahead_point()->y, 0.0, 1e-10);
+}
+
+TEST(LateralController, TaskFrontReferenceCurvatureUsesPublishedTargetFromBase)
+{
+  auto c = lateral();
+  c.set_odom(odom(0, 0.02));
+  c.set_target(path({{0, 0}, {1, 0}}));
+  c.set_task_tracking_reference(0.2097, 0.02);
+  const auto p = c.lookahead_point();
+  ASSERT_TRUE(p);
+  EXPECT_NEAR(p->x, 0.2297, 1e-10);
+  const double curvature = -0.04 / (p->x * p->x + 0.02 * 0.02);
+  EXPECT_NEAR(c.compute_command(0.1)[1], 0.1 * curvature * kSeparation / (2.0 * kRadius), 1e-8);
+}
+
+TEST(LateralController, CameraDistanceKeepsTrackingPastMapEndpoint)
+{
+  auto c = lateral();
+  c.set_target(path({{0, 0}, {0.1, 0}}));
+  c.set_task_tracking_reference(.165, .02);
+  c.set_camera_distance_mode(true);
+  c.set_odom(odom(.11, 0));
+  EXPECT_FALSE(c.is_target_reached());
+  EXPECT_TRUE(c.can_track(.005));
+  ASSERT_TRUE(c.lookahead_point());
+  EXPECT_NEAR(c.lookahead_point()->x, .295, 1e-10);
+  c.set_camera_distance_mode(false);
+  EXPECT_TRUE(c.is_target_reached());
 }

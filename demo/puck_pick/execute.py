@@ -129,9 +129,9 @@ PLACE_RELEASE_ROLL_RAW_DEG = 0.0
 # 227.68, -98.61], 75 [100.79, 222.06, -103.07]; near 0 [88.53, 282.59, -65.8], 40 [90.13, 256.58, -90.21], 75 [84.41,
 # 239.76, -103.75]. Far 0 then 2 mm up (2026-11-07 run sis_1107_1343: the far put-down was held 2.0 mm over its
 # target before the release (it touched ~1.5 mm earlier than in sis_1107_1237/1246, middle and near as before) and
-# dropped 9.6 mm under it after; was [127.88, 216.12, -92.92]).
+# dropped 9.6 mm under it after; was [127.88, 216.12, -92.92]), then 1 mm more (user; was [128.37, 213.68, -94.87]).
 DICE_ROWS = {
-    'far': {0: [128.37, 213.68, -94.87], 40: [119.75, 210.33, -98.83], 75: [110.2, 212.18, -97.54]},
+    'far': {0: [128.65, 212.37, -95.9], 40: [119.75, 210.33, -98.83], 75: [110.2, 212.18, -97.54]},
     'middle': {0: [103.7, 263.61, -69.61], 40: [106.61, 234.35, -95.95], 75: [97.07, 227.14, -101.71]},
     'near': {0: [88.22, 282.87, -65.83], 40: [89.83, 256.87, -90.22], 75: [84.13, 239.95, -103.84]},
 }
@@ -604,7 +604,7 @@ class Runner(Node):
         self.create_timer(0.1, lambda: self.hold.publish(Bool(data=self.hold_value)))  # 10 Hz heartbeat
         self.task_id = int(time.time())  # monotonic across runs; control rejects retired (smaller) IDs
 
-    def send(self, kind, arg, seconds=0.0, tolerance=0.0, i_gains=None):
+    def send(self, kind, arg, seconds=0.0, tolerance=0.0, i_gains=None, contact=0.0):
         self.task_id += 1
         c = TaskCommand()
         c.header.stamp = self.get_clock().now().to_msg()
@@ -613,6 +613,7 @@ class Runner(Node):
             c.duration_s = float(seconds)  # travel time (time-based profile); 0 = the speed caps
             c.tolerance_rad = float(tolerance)  # arrival tolerance [motor rad]; 0 = control.yaml (0.5 deg)
             c.position_i_gains = [int(g) for g in (i_gains or [])]  # shoulder..tool_roll; empty = power-up gains
+            c.speed = float(contact)  # unused by the arm: > 0 = stop this move on contact (control ContactDetector)
         if kind == TaskCommand.MANIPULATOR:  # a sixth value: open the gripper to that motor angle [rad] meanwhile
             c.joints.name, c.joints.position = list(ARM) + ['gripper'] * (len(arg) - 5), [float(v) for v in arg]
         elif kind == TaskCommand.GRIPPER:  # True close, False full open, a float: open to that motor angle [rad]
@@ -704,6 +705,21 @@ def step_i_gains(name):
     return list(next((g for key, g in STEP_I_GAINS.items() if key in name), I_GAINS_BASE))
 
 
+# Stop on contact (2026-11-07, user): the put-down ends where the puck meets the box instead of pressing on to its
+# taught height (sis_1107_1343/1451: the far puck met the box 10-18 mm over the target and the jaws hit the box).
+# control_master (ContactDetector): shoulder current under this ratio of its mid-move level, or the joints stalled
+# late in the move; the arm's target becomes where it is and the step succeeds with reason "contact (...)".
+# Ratio 0.7 (was 0.4; sis_1107_1513: at 0.4 the far put-down went 7-10 mm on after the current began to fall, it
+# falls over ~0.2 s). Replayed on 0455/1237/1246/1343/1451/1513: 0.7 x2 no false hit, far hits 0.08-0.16 s sooner
+# (1513: 1.72 -> 1.64 s, 1.66 -> 1.50 s); 0.8 and 0.7 x1 hit good runs.
+STEP_CONTACT = {'put down on the': 0.7}
+
+
+def step_contact(name):
+    """Stop-on-contact ratio of a MANIPULATOR step (STEP_CONTACT), 0 = off; sent as TaskCommand.speed."""
+    return next((r for key, r in STEP_CONTACT.items() if key in name), 0.0)
+
+
 def step_seconds(name):
     """Travel time [s] of a MANIPULATOR step (the first STEP_SECONDS key in its label), 0 = as fast as the caps
     allow."""
@@ -728,7 +744,8 @@ def run_steps(node, steps):
                 gains = step_i_gains(name)
                 if gains != I_GAINS_BASE:
                     print(f'   I gains {"/".join(map(str, gains))} (STEP_I_GAINS)')
-            status, reason = node.wait(node.send(kind, target, step_seconds(name), step_tolerance(name), gains))
+            status, reason = node.wait(node.send(kind, target, step_seconds(name), step_tolerance(name), gains,
+                                                 step_contact(name) if kind == TaskCommand.MANIPULATOR else 0.0))
             if status != 'SUCCEEDED':
                 break
         extra = f'  grasped={node.grasped}' if kind == TaskCommand.GRIPPER and arg is True else ''

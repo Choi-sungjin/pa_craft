@@ -52,7 +52,7 @@ install(FILES v75_ws/src/v75_robot_description/urdf/v75_robot.urdf
 # Keep the original A*+arc (Python) implementation importable for reference and regression tests.
 set(reference_python_dir "${CMAKE_CURRENT_BINARY_DIR}/reference_python/${PROJECT_NAME}")
 file(MAKE_DIRECTORY "${reference_python_dir}")
-foreach(source __init__.py path_planner.py astar_arc.py)
+foreach(source __init__.py path_planner.py astar_arc.py box_detector.py astar8_spline.py)
   configure_file("src/${source}" "${reference_python_dir}/${source}" COPYONLY)
 endforeach()
 ament_python_install_package(${PROJECT_NAME} PACKAGE_DIR "${reference_python_dir}")
@@ -73,6 +73,8 @@ if(BUILD_TESTING)
   endforeach()
   target_link_libraries(test_path_planner_cpp PNG::PNG yaml-cpp)
   ament_add_pytest_test(test_path_planner test/test_path_planner.py
+    APPEND_ENV PYTHONPATH=${CMAKE_INSTALL_PREFIX}/${PYTHON_INSTALL_DIR})
+  ament_add_pytest_test(test_box_detector test/test_box_detector.py
     APPEND_ENV PYTHONPATH=${CMAKE_INSTALL_PREFIX}/${PYTHON_INSTALL_DIR})
   ament_add_pytest_test(test_planning_master_integration test/test_planning_master_integration.py
     TIMEOUT 90 ENV ROS_LOG_DIR=/tmp/craft-planning-test-ros-log)

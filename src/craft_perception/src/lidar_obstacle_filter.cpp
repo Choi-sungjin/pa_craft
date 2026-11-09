@@ -10,11 +10,12 @@ namespace craft_perception {
 bool LidarObstacleFilter::configure(const LidarObstacleFilterConfig &c) {
   if (!std::isfinite(c.wall_margin_m) || c.wall_margin_m < 0 || !std::isfinite(c.cell_m) || c.cell_m <= 0 ||
       c.persist_frames < 1 || c.neighbor_cells < 0 || c.min_cluster_points < 1 ||
-      c.occupied_threshold < 1 || c.occupied_threshold > 100) {
+      c.occupied_threshold < 1 || c.occupied_threshold > 100 || !std::isfinite(c.memory_s) || c.memory_s < 0) {
     return false;
   }
   config_ = c;
   history_.clear();
+  memory_.clear();
   return true;
 }
 
@@ -107,6 +108,49 @@ std::vector<bool> LidarObstacleFilter::filter(const std::vector<std::array<doubl
     if (keep[i] && size[label[key(cell[i][0], cell[i][1])]] < config_.min_cluster_points) keep[i] = false;
   }
   return keep;
+}
+
+std::vector<std::array<double, 2>> LidarObstacleFilter::remember(
+    double stamp, const std::array<double, 2> &origin, const std::vector<std::array<double, 2>> &ray_ends,
+    const std::vector<std::array<double, 2>> &points, const std::vector<bool> &keep) {
+  std::vector<std::array<double, 2>> out;
+  if (config_.memory_s <= 0) return out;
+  const auto cell_of = [this](double v) { return static_cast<int>(std::floor(v / config_.cell_m)); };
+  std::unordered_set<int64_t> now;
+  for (size_t i = 0; i < points.size() && i < keep.size(); ++i) {
+    if (!keep[i]) continue;
+    const int64_t k = key(cell_of(points[i][0]), cell_of(points[i][1]));
+    now.insert(k);
+    memory_[k] = {stamp, 0};
+  }
+  // Cells a ray crosses before its return (the last two cells, the return's and the one before, are not crossed:
+  // a beam grazing the obstacle edge must not clear it).
+  std::unordered_set<int64_t> crossed;
+  if (!memory_.empty()) {
+    for (const auto &end : ray_ends) {
+      const double dx = end[0] - origin[0], dy = end[1] - origin[1], length = std::hypot(dx, dy);
+      if (!std::isfinite(length)) continue;
+      const int steps = static_cast<int>(length / (config_.cell_m / 2)) - 3;
+      for (int s = 1; s <= steps; ++s) {
+        const double t = s * (config_.cell_m / 2) / length;
+        const int64_t k = key(cell_of(origin[0] + t * dx), cell_of(origin[1] + t * dy));
+        if (memory_.count(k)) crossed.insert(k);
+      }
+    }
+  }
+  for (auto it = memory_.begin(); it != memory_.end();) {
+    auto &cell = it->second;
+    if (!now.count(it->first)) cell.free_frames = crossed.count(it->first) ? cell.free_frames + 1 : 0;
+    if (stamp - cell.seen > config_.memory_s || cell.free_frames >= config_.persist_frames) {
+      it = memory_.erase(it);
+      continue;
+    }
+    if (!now.count(it->first)) {
+      out.push_back({(key_x(it->first) + 0.5) * config_.cell_m, (key_y(it->first) + 0.5) * config_.cell_m});
+    }
+    ++it;
+  }
+  return out;
 }
 
 }  // namespace craft_perception

@@ -1,0 +1,14 @@
+{
+  "source_weights": "perception-v2-puck-box-signal-barcode-20261108/models/signal-v4/best.pt",
+  "source_sha256": "6bc37392a7f89852a0279cac2ddcb28b745b317652ee5f9d15044520c0d5fbd3",
+  "ultralytics": "8.4.166",
+  "pnnx": "20260526",
+  "ncnn": "1.0.20261020",
+  "exported": "2026-11-09T09:40:40+09:00 on craft (Jetson)",
+  "input": [1, 3, 640, 640],
+  "output": [9, 8400],
+  "input_blob": "in0",
+  "output_blob": "out0",
+  "class_names": ["knob", "sign_red", "sign_yellow", "sign_green", "sign_off"],
+  "output_contract": "decoded cxcywh + probabilities; class-aware NMS (param identical to knob_sign v3)"
+}

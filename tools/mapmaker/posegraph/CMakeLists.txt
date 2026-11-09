@@ -9,9 +9,10 @@ find_package(Eigen3 REQUIRED)
 find_package(Boost REQUIRED COMPONENTS serialization thread system)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
+find_package(pluginlib REQUIRED)  # optimize: slam_toolbox Ceres solver plugin
 find_library(KARTO kartoSlamToolbox PATHS ${ROS}/lib REQUIRED)
 add_executable(posegraph_tool posegraph_tool.cpp)
 target_include_directories(posegraph_tool PRIVATE ${ROS}/include ${EIGEN3_INCLUDE_DIR})
-target_link_libraries(posegraph_tool ${KARTO} rclcpp_lifecycle::rclcpp_lifecycle rclcpp::rclcpp
+target_link_libraries(posegraph_tool ${KARTO} rclcpp_lifecycle::rclcpp_lifecycle rclcpp::rclcpp pluginlib::pluginlib
   Boost::serialization Boost::thread Boost::system tbb)
 set_target_properties(posegraph_tool PROPERTIES BUILD_RPATH ${ROS}/lib)

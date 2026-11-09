@@ -12,6 +12,7 @@
 #include "craft_perception/msg/detection_array.hpp"
 #include "craft_perception/msg/knob_observation_array.hpp"
 #include "craft_perception/msg/puck_observation_array.hpp"
+#include <craft_interfaces/msg/task_command.hpp>
 #include <diagnostic_msgs/msg/diagnostic_array.hpp>
 #include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 #include <nav_msgs/msg/occupancy_grid.hpp>
@@ -103,7 +104,7 @@ private:
   bool d435_puck_axis(Task &task);
   bool c310_knob_lever(Task &task);
   bool lidar_obstacle(Task &task);
-  void filter_obstacles(geometry_msgs::msg::PoseArray &obstacles);
+  void filter_obstacles(geometry_msgs::msg::PoseArray &obstacles, const sensor_msgs::msg::LaserScan &scan);
   std::optional<lidar_processing::Pose2D> lidar_pose(const std::string &frame);
   bool state_estimator(Task &task);
   // One raw OpenCR IMU sample (0 = wheel_clock, 1 = lm_arm) -> /perception/imu/data.
@@ -126,7 +127,14 @@ private:
   bool obstacle_filter_enabled_ = false;
   LidarObstacleFilter obstacle_filter_;
   std::mutex obstacle_filter_mutex_;
+  std::mutex obstacle_cycle_mutex_;  // Serialize reset with filtered publications.
+  int64_t obstacle_reset_stamp_ns_ = 0;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr planning_command_sub_;
   rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr obstacle_map_sub_;
+  // A new Navigate task (planning EXECUTE, new task_id) clears the obstacle memory; renewals (UPDATE_PATH) keep it.
+  rclcpp::Subscription<craft_interfaces::msg::TaskCommand>::SharedPtr task_command_sub_;
+  uint64_t navigate_task_id_ = 0;
+  std::string obstacle_odom_frame_;  // fixed frame for obstacles at the scan stamp (lidar_obstacle.odom_frame)
   lidar_processing::MergerConfig lidar_config_;
   std::string lidar_input_mode_;
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;  // LiDAR mounts and map->odom

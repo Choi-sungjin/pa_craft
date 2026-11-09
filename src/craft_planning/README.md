@@ -113,6 +113,101 @@ margin leaves straight to the nearest free cell within 0.10 m while `r_robot` is
 Requested start/goal XY is preserved. `max_cells`, `max_expansions` and sampling checks
 bound work.
 
+## Global / local paths (`path_planner.mode: global_local`)
+
+The default since 2026-11-07. A Navigate step plans a **global path** once: 8-connected A* on the same C-space
+(`r_robot + margin`, proximity cost) to the goal (or to the approach entry `approach_len` before it when
+`goal_heading_required`), then line-of-sight pruning to an any-angle polyline. It is planned again only when the
+driven path is blocked (pause, `block_wait_s`, replan) or a local path could not be renewed before its end.
+
+The global polyline is then smoothed once, as a whole, like `astar8_spline.smooth_curve` (clearance band pad +
+0.05 m, curvature above min(a_lat_max / v_ref^2, w_max / v_ref) pulled in, 600 steps, every point within
+`local_max_dev` (0.20 m) of the polyline) and natural-cubic-splined at 0.02 m: that is the global path (2026-11-08;
+before, each local window was smoothed on its own, so the local path left the global one).
+
+The robot drives a **local path**: the samples of the global path in `[ego - local_behind, ego + local_ahead]`
+(1 m behind, 4 m ahead = 5 m), cut from it unchanged, so a renewal never moves the path under the robot. After
+`local_update` (2 m) of progress along the global path, planning_master sends the next window as UPDATE_PATH of the
+same task; the last one ends exactly at the goal. A local path that ends short of the global end counts as a
+segment: driven to its end without a renewal, the rest is planned from there.
+
+Each window carries a **speed profile** (`TaskCommand.speed_limit`, per pose): min(v_ref, sqrt(a_lat_max / k),
+w_max / k, and both wheels within `max_wheel` once the turn is added, v (1 + |k| wheel_separation / 2) /
+wheel_radius <= max_wheel), then `a_lon_max` up from `v_min` at the window start and down to `v_min`, which it holds
+over the last `goal_tolerance` (where control stops), never below `v_min`. The wheel boards follow steps at once
+(Profile Acceleration at its maximum), so this profile is the driving ramp. The window starts `local_behind` behind
+the robot, so a renewal does not slow a moving robot down. Control drives min(cruise_speed, the profile at its
+nearest pose), speeding up at most `max_accel` from its last command (resume, end of an in-place turn).
+
+### Driving up to a box (`/planning/approach_box`, 2026-11-08)
+
+`/planning/approach_box` (std_msgs/String, a `box_approach.names` entry: L1, L2, L3) queues a Navigate step to that
+box (`demo/corner/run_corner.py --box L2`). `PathPlanner::plan_box` makes one goal per face: `box_approach.gap` from
+the LiDAR front face (`front_face_x` ahead of base_link) to the face, on the face normal through the box centre,
+heading into the box. A face is approachable only when that goal, the approach entry `approach_len` behind it and the
+line between are clear of the padding (inflated map + obstacles), the box's own padding aside: within padding of that
+approach line, cells blocked only by the target box's padding are free (`BoxApproach`; the box itself, walls and
+obstacles still block), so the goal may sit closer to the box than the padding (the upper cam gap, the final stop).
+Renewals and the blocked-path check while driving use the same rule. Each approachable face is planned as a normal
+global_local goal with the heading required, and the shortest global path wins. With the heading required the
+approach is the straight `approach_len` along the goal heading at any angle (it used to round to a quarter turn), so
+a box at any yaw works; the upper camera's gap only holds square to a face. The step drives at `box_approach.speed`
+with the goal heading required; planning logs the chosen face and publishes its goal on `/planning/approach_goal`.
+The planning.yaml box is the known position: the step plans to the stage points of its approachable faces at once,
+and the perceived box (`/perception/box/pose`) takes over at the stage point. Phases of a box step:
+
+1. Stage: `plan_box` with the known box and `stage_lead`: for every approachable face an ordinary path (no heading)
+   to its stage point, `approach_len + stage_lead` behind the face goal on its normal (moved toward the entry in
+   5 cm steps when in the padding); the shortest is driven at `speed`, arriving within `stage_goal_tolerance`.
+   Stage points sit 0.43-0.58 m from the face (LiDAR front). (One path straight into the face could hairpin at the
+   approach entry; Pure Pursuit cut it and turned back and forth for 40 s, 2026-11-08.)
+2. Perceive: at the stage point the robot stands still `settle_s`, then takes a `/perception/box/pose` received
+   after that (map frame, orientation = yaw of a face normal; `box_detection_timeout_s` in rates.yaml, at most
+   `max_offset` from the known position). None within the timeout fails the step.
+3. Dock: with the perceived box a new task drives the face normal itself, from
+   the point on it nearest the robot to the face goal, at `dock_speed`, `goal_tolerance` = `dock_goal_tolerance` and
+   `tolerance_rad` = `yaw_tolerance_deg`: control turns toward its lookahead point first, Pure Pursuit pulls the
+   robot onto the normal (near the end the target stays lookahead ahead on the extended line) and the arrival
+   counts along the line; it turns square at the goal. A dock or back-out that stays blocked `block_wait_s` fails
+   (no global replan off the normal).
+4. Settle: at the face goal the robot stands still `settle_s` (camera shake, the gap filter), then is checked against
+   the goal of the same face of the box as perceived after settling: lateral offset and heading error within
+   `lateral_tolerance` / `yaw_tolerance_deg` complete the step. `/planning/box_alignment` reports each check
+   ([lateral m, yaw rad, forward m, aligned 0/1, correction]).
+5. Reverse (correction parking): out of tolerance, the robot backs out `reverse_distance` straight along the normal
+   (a new task, speed `-reverse_speed`, still facing the box), perceives again (2.), docks again and settles
+   again; after `max_corrections` corrections the step fails. Blocked behind (padding, an obstacle), it backs
+   out the longest clear distance down to `reverse_min_distance` in 5 cm steps; a blocked back-out or dock line waits
+   and fails after `block_wait_s`.
+
+The box detection itself is not part of planning (any node publishing `/perception/box/pose` works);
+`demo/corner/run_corner.py --box L2 --fake-detect [--fake-offset DX DY DYAW]` stands in for it.
+
+Global and local outputs pass a repair step (samples in a blocked cell corner, where a line-of-sight path grazes
+the padding, are pushed out half a cell along the clearance gradient) so `collision_free` agrees with them.
+Jetson (Orin Nano Super, 초레지 0.02 m, pad 0.293 m): global + first local 11-13 ms, a local renewal 4-9 ms;
+figure `tools/path_compare/out/global_local.png`.
+
+`mode: arc` keeps the previous behaviour (A*+arc, whole path, STOP_TURN segments). Comparison on 초레지:
+`tools/path_compare` (8-connected + spline + curve: 7-10 % shorter, 7-15 % faster than A*+arc).
+
+## Arena boxes in the A* map
+
+`src/box_detector.py` (Python, installed as `craft_planning.box_detector`) finds the 205 x 205 mm boxes
+(start boxes S1-S6, destinations L1-L3 of the project2 brief) in a ROS YAML map, at that map's resolution,
+which is also the A* grid (YAML maps are not resampled). Hits on straight runs longer than 0.32 m are walls;
+the rest is clustered, fragments merge while they fit one footprint, and a fixed 205 mm square is fitted to the
+outline (yaw within +-15 degrees, 0.2 hit per degree). Box insides show as free in these maps, so with one face
+seen the nearest brief position decides the side. `--write <base>` copies the map with every box drawn as its
+full square outline, so A* and the global localizer see the unseen faces too.
+
+```bash
+/usr/bin/python3 src/box_detector.py ~/maps/arena5_legend_arena_raw.yaml --png boxes.png --write ~/maps/arena5_legend_arena
+```
+
+`~/maps/arena5_legend_arena` (corner_demo default) is the arena-frame map (`tools/mapmaker`, pipeline/make_arena_map.py)
+with the boxes completed; `_raw` is the plain render. On it the boxes sit 57-275 mm from the brief positions.
+
 ## Puck graspable check
 
 `grasp_region.hpp`, no IK. On every `/perception/vision/d435/puck_observations` message the nearest puck

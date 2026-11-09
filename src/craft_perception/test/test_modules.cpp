@@ -954,6 +954,43 @@ TEST(LidarObstacleFilter, MapWallsAndOffMapPointsAreDropped) {
   for (size_t i = 4; i < 8; ++i) EXPECT_TRUE(keep[i]);
 }
 
+TEST(LidarObstacleFilter, RememberedCellsStayUntilRaysSeeThemFreeOrTheyExpire) {
+  craft_perception::LidarObstacleFilter filter;
+  craft_perception::LidarObstacleFilterConfig c;
+  c.memory_s = 30.0;
+  ASSERT_TRUE(filter.configure(c));
+  const std::array<double, 2> robot{0.0, 0.0};
+  const auto frame = [&](double t, const P2 &points, const P2 &rays) {
+    return filter.remember(t, robot, rays, points, filter.filter(points));};
+  // Kept in the third frame (persistence), then out of view: no points, no rays through it.
+  for (int i = 0; i < 3; ++i) EXPECT_TRUE(frame(0.1 * i, blob(1.0, 0.0), blob(1.0, 0.0)).empty());
+  auto remembered = frame(0.3, {}, {});
+  ASSERT_FALSE(remembered.empty());
+  for (const auto &p : remembered) EXPECT_NEAR(std::hypot(p[0] - 1.01, p[1] - 0.01), 0.0, 0.05);
+  // Rays that end on it (the object seen again) do not clear it; a ray beside it does not either.
+  for (int i = 0; i < 5; ++i) EXPECT_FALSE(frame(0.4 + 0.1 * i, {}, {{1.0, 0.0}, {1.0, 0.5}}).empty());
+  // Rays through it to a wall behind: free in persist_frames frames in a row -> cleared.
+  const P2 through{{2.0, 0.0}, {2.0, 0.02}, {2.0, 0.04}};
+  EXPECT_FALSE(frame(1.0, {}, through).empty());
+  EXPECT_FALSE(frame(1.1, {}, through).empty());
+  EXPECT_TRUE(frame(1.2, {}, through).empty());
+  // Never seen free again: dropped memory_s after it was last kept.
+  filter.reset();
+  for (int i = 0; i < 3; ++i) frame(0.1 * i, blob(1.0, 0.0), {});
+  EXPECT_FALSE(frame(29.0, {}, {}).empty());
+  EXPECT_TRUE(frame(30.3, {}, {}).empty());
+  // A new drive clears it.
+  filter.reset();
+  for (int i = 0; i < 3; ++i) frame(0.1 * i, blob(1.0, 0.0), {});
+  ASSERT_FALSE(frame(0.3, {}, {}).empty());
+  filter.clear_memory();
+  EXPECT_TRUE(frame(0.4, {}, {}).empty());
+  // memory_s 0: nothing remembered.
+  c.memory_s = 0; ASSERT_TRUE(filter.configure(c));
+  for (int i = 0; i < 3; ++i) frame(0.1 * i, blob(1.0, 0.0), {});
+  EXPECT_TRUE(frame(0.3, {}, {}).empty());
+}
+
 TEST(LidarObstacleFilter, RejectsBadConfiguration) {
   craft_perception::LidarObstacleFilter filter;
   craft_perception::LidarObstacleFilterConfig c;
@@ -961,6 +998,7 @@ TEST(LidarObstacleFilter, RejectsBadConfiguration) {
   c = {}; c.persist_frames = 0; EXPECT_FALSE(filter.configure(c));
   c = {}; c.min_cluster_points = 0; EXPECT_FALSE(filter.configure(c));
   c = {}; c.wall_margin_m = -1; EXPECT_FALSE(filter.configure(c));
+  c = {}; c.memory_s = -1; EXPECT_FALSE(filter.configure(c));
 }
 
 #include "lidar_processor/scan_merger.hpp"
