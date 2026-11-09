@@ -1,0 +1,13 @@
+name: goal_blocked_replan
+description: 01 과 같은 목표로 주행하는 중, 경로 위 (1.97, 3.45) 에 반지름 0.12 m 장애물이 로봇 0.9 m 앞에서 나타남. 정지 → 2 초 막힘 대기 → 재계획 → 우회 도착을 확인.
+map: maps/arena5_legend_opt_arena1cm.yaml
+start: [0.527, 5.889, -4.5]
+timeout_s: 120
+obstacles:
+  - name: 상자A
+    shape: circle
+    center: [1.97, 3.45]
+    radius: 0.12
+    appear: {robot_within: [1.97, 3.45, 0.9]}
+actions:
+  - {type: goal, pose: [2.6, 2.9]}

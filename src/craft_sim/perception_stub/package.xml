@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>craft_perception</name>
+  <version>0.0.0</version>
+  <description>시뮬레이터 전용 대체 빌드: 메시지와 tag_registry만 (ncnn 없음)</description>
+  <maintainer email="noreply@example.com">craft</maintainer>
+  <license>none</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>rosidl_default_generators</buildtool_depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>yaml-cpp</depend>
+  <exec_depend>rosidl_default_runtime</exec_depend>
+  <member_of_group>rosidl_interface_packages</member_of_group>
+  <export><build_type>ament_cmake</build_type></export>
+</package>

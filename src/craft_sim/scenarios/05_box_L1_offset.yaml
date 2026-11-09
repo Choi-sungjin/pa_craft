@@ -1,0 +1,9 @@
+name: box_L1_offset
+description: 실제 L1 박스가 설정 위치보다 +30 mm(x), -20 mm(y), +2° 어긋나 있음. 설정 위치로 stage 까지 간 뒤 LiDAR 관측으로 실제 박스에 맞춰 도킹하는지 확인.
+map: maps/arena5_legend_opt_arena1cm.yaml
+start: [0.527, 5.889, -4.5]
+timeout_s: 240
+box_offsets:
+  L1: [0.030, -0.020, 2.0]   # dx [m], dy [m], dyaw [deg]
+actions:
+  - {type: box, name: L1}
