@@ -1,6 +1,6 @@
 name: goal_blocked_replan
 description: 01 과 같은 목표로 주행하는 중, 경로 위 (1.97, 3.45) 에 반지름 0.12 m 장애물이 로봇 0.9 m 앞에서 나타남. 정지 → 2 초 막힘 대기 → 재계획 → 우회 도착을 확인.
-map: maps/arena5_legend_opt_arena1cm.yaml
+map: maps/arena5_legend_opt_arena1cm_noboxes.yaml  # boxes erased like the robot's planning map (2026-11-10)
 start: [0.527, 5.889, -4.5]
 timeout_s: 120
 obstacles:

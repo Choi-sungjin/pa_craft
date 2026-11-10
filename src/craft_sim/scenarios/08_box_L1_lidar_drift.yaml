@@ -1,6 +1,6 @@
 name: box_L1_lidar_drift
 description: 22:00 실주행 재현. 가까워질수록 LiDAR 간격이 이동량보다 덜 줄어듦(0.43 m 이동에 +10 mm). 현재 코드는 'lidar dock ended before handoff'로 실패해야 함.
-map: maps/arena5_legend_opt_arena1cm.yaml
+map: maps/arena5_legend_opt_arena1cm_noboxes.yaml  # boxes erased like the robot's planning map (2026-11-10)
 start: [0.527, 5.889, -4.5]
 timeout_s: 240
 sim:

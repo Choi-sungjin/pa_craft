@@ -1,6 +1,6 @@
 name: box_L1_skew
 description: 실제 L1 박스가 설정보다 y -20 mm, +2° 어긋남(x 는 그대로). stage 까지는 설정 위치로 가고, LiDAR 관측으로 실제 면에 맞춰 도킹·최종 검사를 통과하는지 확인.
-map: maps/arena5_legend_opt_arena1cm.yaml
+map: maps/arena5_legend_opt_arena1cm_noboxes.yaml  # boxes erased like the robot's planning map (2026-11-10)
 start: [0.527, 5.889, -4.5]
 timeout_s: 240
 box_offsets:

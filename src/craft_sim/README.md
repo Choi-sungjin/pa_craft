@@ -44,7 +44,7 @@ src/craft_sim/sim.sh test                   # 단위 시험
 | `perception_stub/` | ncnn 없는 PC 용 craft_perception 대체 (`COLCON_IGNORE`: 저장소 빌드에는 안 들어감) |
 | `rviz/sim.rviz` | 맵·추종 경로·룩어헤드 점·장애물 점·차체·박스·궤적 |
 | `scenarios/` | 시나리오 yaml |
-| `maps/` | 경기장 맵 `arena5_legend_opt_arena1cm` (corner_demo 기본 계획 맵) |
+| `maps/` | 경기장 맵 `arena5_legend_opt_arena1cm` 과 박스를 지운 `arena5_legend_opt_arena1cm_noboxes` (로봇의 계획 맵, 시나리오 기본; 박스는 시뮬레이터가 따로 그림) |
 | `test/` | 단위 시험: 차동구동, 맵, 카메라·LiDAR 관측이 `demo/corner` 의 브리지 함수와 같은지 |
 
 ### 시뮬레이터가 대신 내는 것
@@ -67,7 +67,7 @@ src/craft_sim/sim.sh test                   # 단위 시험
 ```yaml
 name: box_L1_offset
 description: 설명 (보고서에 표시)
-map: maps/arena5_legend_opt_arena1cm.yaml   # 패키지 기준 상대 경로 또는 절대 경로
+map: maps/arena5_legend_opt_arena1cm_noboxes.yaml   # 패키지 기준 상대 경로 또는 절대 경로 (박스 지운 계획 맵)
 start: [0.527, 5.889, -4.5]                 # x, y [m], yaw [deg]
 timeout_s: 240                              # 요청별 기본 시간 제한
 settle_s: 2.0                               # 시작 후 대기
@@ -86,7 +86,7 @@ params:                      # 노드 파라미터 덮어쓰기 (로봇 yaml 뒤
   control:
     lookahead_distances: [0.21, 0.21, 0.25]
 sim:                         # 시뮬레이터 옵션 (모두 생략 가능)
-  footprint: [-0.20, 0.165, -0.165, 0.165]   # 충돌 검사용 차체 사각형 base_link (추정값)
+  footprint: [-0.141, 0.225, -0.177, 0.177]   # 충돌 검사용 차체 사각형 base_link (URDF base_link 메시 기준)
   boxes_as_obstacles: true
   camera_hz: 15
   # 실측 조건 재현 (2026-11-09 실주행·bag 기준)
@@ -145,5 +145,5 @@ actions:                     # 차례로 실행, 기대와 다르면 중단
 - 1배속(두 master 가 실제 시계 타이머 사용). 카메라 프레임 시점 같은 수 ms 차이로 허용 경계에 걸린 경우는 실행마다 판정이 바뀔 수 있다.
 - 차체 동역학·미끄럼·바퀴 지연·위치 점프 없음. 센서 잡음은 시나리오 옵션으로 넣는 것만 있다.
 - 장애물 필터·LiDAR 면 맞춤은 단계와 계약은 같지만 입력이 잡음 없는 참값이다(평행면 모호성·가림 없음).
-- 충돌 검사 차체 사각형은 추정값(`sim.footprint`).
+- 충돌 검사 차체 사각형은 URDF base_link 메시에서 잰 값(`sim.footprint`, x -0.141~0.225, y ±0.177 m).
 - 팔·주사위·퍽 미션은 범위 밖(arm:=false 구성).

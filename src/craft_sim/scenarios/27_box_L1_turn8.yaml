@@ -1,0 +1,9 @@
+name: box_L1_turn8
+description: L1 이 8° 돌아감. 다시 계획 기준(10°)보다 작아 첫 정렬 지점에서 그대로 비스듬히 접근하는지.
+map: maps/arena5_legend_opt_arena1cm_noboxes.yaml  # boxes erased like the robot's planning map (2026-11-10)
+start: [0.527, 5.889, -4.5]
+timeout_s: 300
+box_offsets:
+  L1: [0.0, 0.0, 8.0]   # dx [m], dy [m], dyaw [deg]
+actions:
+  - {type: box, name: L1}

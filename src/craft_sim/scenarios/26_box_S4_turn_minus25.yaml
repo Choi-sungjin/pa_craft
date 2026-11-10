@@ -1,0 +1,9 @@
+name: box_S4_turn_minus25
+description: S4 가 -25° 더 돌아감(원래 -5°). 벽 근처 박스(허용 면 북·서·남)에서 돌아간 경우.
+map: maps/arena5_legend_opt_arena1cm_noboxes.yaml  # boxes erased like the robot's planning map (2026-11-10)
+start: [0.527, 5.889, -4.5]
+timeout_s: 300
+box_offsets:
+  S4: [0.0, 0.0, -25.0]   # dx [m], dy [m], dyaw [deg]
+actions:
+  - {type: box, name: S4}

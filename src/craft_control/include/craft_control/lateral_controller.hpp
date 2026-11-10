@@ -47,6 +47,8 @@ public:
   // alignment tolerance [rad] at the start of the path and at the goal heading; 0 = the configured ones. A finer
   // alignment turns until within half of it.
   void set_task_tolerances(double goal_tolerance, double heading_tolerance);
+  void set_goal_rotate_angular_speed(double speed, double min_speed = 0.0)
+  {goal_rotate_angular_speed_ = speed; goal_rotate_min_speed_ = min_speed;}
   void set_task_tracking_reference(double reference_x, double distance)
   {tracking_reference_x_ = reference_x; task_lookahead_ = distance;}
   void set_camera_distance_mode(bool enabled) {camera_distance_mode_ = enabled;}
@@ -91,6 +93,8 @@ private:
   bool require_goal_heading_ = false;
   double heading_tolerance_ = 0.5;
   double rotate_angular_speed_ = 0.6;
+  double goal_rotate_angular_speed_ = 0.0;  // [rad/s] in-place turn at the goal (0 = rotate_angular_speed_)
+  double goal_rotate_min_speed_ = 0.0;      // [rad/s] its slowest, near the heading (0 = the general floor)
   double tracking_gain_ = 1.0;
   double wheel_radius_ = 0.0;
   double wheel_separation_ = 0.0;  // effective (skid steer) separation

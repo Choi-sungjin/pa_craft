@@ -1,6 +1,6 @@
 name: box_L1_offset
 description: 실제 L1 박스가 설정 위치보다 +30 mm(x), -20 mm(y), +2° 어긋나 있음. 설정 위치로 stage 까지 간 뒤 LiDAR 관측으로 실제 박스에 맞춰 도킹하는지 확인.
-map: maps/arena5_legend_opt_arena1cm.yaml
+map: maps/arena5_legend_opt_arena1cm_noboxes.yaml  # boxes erased like the robot's planning map (2026-11-10)
 start: [0.527, 5.889, -4.5]
 timeout_s: 240
 box_offsets:

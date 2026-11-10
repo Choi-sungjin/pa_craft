@@ -9,9 +9,15 @@ control_master:
     camera_distance_kp: 10.0
     wheel_heading_tolerance: 0.5
     wheel_rotate_angular_speed: 0.6  # [rad/s] in-place turn before tracking/final alignment
+    wheel_goal_rotate_angular_speed: 0.25  # [rad/s] in-place turn at the goal (final heading); user 2026-11-10: 0.57 overshot and slid off a stage point
+    wheel_goal_rotate_min_speed: 0.10      # [rad/s] slowest in-place turn at the goal, near the heading (user 2026-11-10: slow down into the heading; 0.15 overshot 0.87 deg, 0.06 too slow)
     settle_time_s: 0.1
     stop_position_tolerance_rad: 0.002
     wheel_stop_tolerance_rad_s: 0.02
+    # Clock (steering) angle settle: its feedback jitters past stop_position_tolerance_rad (0.002) at rest, which
+    # restarted the settle timer every sample (2026-11-10, noboxes runs: settled_for 0.00-0.04 s, stage stop
+    # "box stop acknowledgement timeout"). 0.01 rad provisional: the diagnostic line prints clock vs anchor to measure.
+    clock_stop_tolerance_rad: 0.01
     arm_lm_port: /dev/opencr_arm_lm    # LM + four rotational arm motors + gripper OpenCR
     clock_wheel_port: /dev/opencr_wheel_clock  # clock + wheel x2 OpenCR
 

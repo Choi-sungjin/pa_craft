@@ -1,0 +1,9 @@
+name: box_L1_turn30_shift
+description: 실주행 2026-11-10 재현. L1 이 설정보다 약 29.5° 돌아가고 (+47, +16) mm 밀려 있음. 다시 계획할 때 "No approachable box face (Approach goal in the padding)" 가 나는지.
+map: maps/arena5_legend_opt_arena1cm_noboxes.yaml  # boxes erased like the robot's planning map (2026-11-10)
+start: [0.527, 5.889, -4.5]
+timeout_s: 300
+box_offsets:
+  L1: [0.047, 0.016, 29.5]
+actions:
+  - {type: box, name: L1}

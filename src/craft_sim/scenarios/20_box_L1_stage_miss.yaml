@@ -1,0 +1,10 @@
+name: box_L1_stage_miss
+description: 실주행(2026-11-10 noboxes_1505/1559, 정렬 지점 옆에서 계속 회전) 대응 확인. 도착 허용 오차를 2 mm 로 좁히고 "막힘" 판정을 민감하게(30 cm 안에서 0.3 초 동안 1 cm 못 다가감) 해서, 정렬 지점 주행이 제자리 회전(UPDATE_PATH)으로 바뀐 뒤 끝까지 가는지 확인.
+map: maps/arena5_legend_opt_arena1cm_noboxes.yaml  # boxes erased like the robot's planning map (2026-11-10)
+start: [0.527, 5.889, -4.5]
+timeout_s: 240
+params:
+  planning:
+    box_approach: {stage_goal_tolerance: 0.002, stage_capture_m: 0.30, stage_capture_s: 0.3}
+actions:
+  - {type: box, name: L1}

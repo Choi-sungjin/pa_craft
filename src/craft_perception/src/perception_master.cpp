@@ -275,6 +275,10 @@ void PerceptionMaster::configure() {
     throw std::invalid_argument("invalid lidar / lidar_obstacle configuration");
   }
   obstacle_filter_enabled_ = param<bool>("lidar_obstacle.filter.enabled");
+  brake_decel_ = positive_param("lidar_obstacle.brake_decel");
+  brake_window_s_ = positive_param("lidar_obstacle.brake_window_s");
+  brake_before_s_ = positive_param("lidar_obstacle.brake_before_s");
+  brake_after_s_ = positive_param("lidar_obstacle.brake_after_s");
   LidarObstacleFilterConfig filter;
   filter.wall_margin_m = param<double>("lidar_obstacle.filter.wall_margin_m");
   filter.cell_m = param<double>("lidar_obstacle.filter.cell_m");
@@ -357,6 +361,19 @@ void PerceptionMaster::connect() {
   object_pub_ = create_publisher<geometry_msgs::msg::PoseArray>("/perception/vision/d435/object_detection", 10);
   obstacle_pub_ = create_publisher<geometry_msgs::msg::PoseArray>("/perception/vision/d435/obstacle", 10);
   lidar_obstacle_pub_ = create_publisher<geometry_msgs::msg::PoseArray>("/perception/lidar/obstacle", 10);
+  brake_odom_sub_ = create_subscription<nav_msgs::msg::Odometry>("/control/wheel/odom", rclcpp::SensorDataQoS(),
+    [this](nav_msgs::msg::Odometry::ConstSharedPtr input) {
+      const int64_t t = rclcpp::Time(input->header.stamp).nanoseconds();
+      const double v = std::fabs(input->twist.twist.linear.x);
+      if (!brake_speeds_.empty() && t <= brake_speeds_.back().first) brake_speeds_.clear();
+      brake_speeds_.emplace_back(t, v);
+      const int64_t window = static_cast<int64_t>(brake_window_s_ * 1e9);
+      while (brake_speeds_.size() > 1 && brake_speeds_.front().first < t - window) brake_speeds_.pop_front();
+      const auto &[t0, v0] = brake_speeds_.front();
+      if (t - t0 >= window / 2 && (v0 - v) / ((t - t0) * 1e-9) > brake_decel_) {
+        if (t - brake_at_ns_.load() > static_cast<int64_t>((brake_before_s_ + brake_after_s_) * 1e9)) brake_at_ns_ = t;
+      }
+    });
   odom_pub_ = create_publisher<nav_msgs::msg::Odometry>("/perception/state/odom", 10);
   diagnostics_pub_ = create_publisher<diagnostic_msgs::msg::DiagnosticArray>("/perception/diagnostics", 10);
 
@@ -747,10 +764,38 @@ bool PerceptionMaster::lidar_obstacle(Task &task) {
   }
   task.seen = id;
   const auto &scan = merged ? *merged : *input;
+  const int64_t stamp = rclcpp::Time(scan.header.stamp).nanoseconds(), brake = brake_at_ns_.load();
+  const int64_t before = static_cast<int64_t>(brake_before_s_ * 1e9), after = static_cast<int64_t>(brake_after_s_ * 1e9);
+  if (brake > 0 && brake != brake_handled_ns_) {
+    // A new hard stop: back to before its scans (brake_before_s before it), filter state and published obstacles.
+    brake_handled_ns_ = brake;
+    for (auto it = obstacle_snapshots_.rbegin(); it != obstacle_snapshots_.rend(); ++it) {
+      if (it->stamp > brake - before) continue;
+      {std::lock_guard<std::mutex> lock(obstacle_filter_mutex_); obstacle_filter_.restore(it->filter);}
+      last_lidar_obstacles_ = it->published;
+      break;
+    }
+    RCLCPP_INFO(get_logger(), "hard stop: LiDAR obstacles from %.1f s before to %.1f s after it left out",
+                brake_before_s_, brake_after_s_);
+  }
+  if (brake > 0 && stamp > brake - before && stamp <= brake + after) {
+    if (last_lidar_obstacles_) {
+      auto again = *last_lidar_obstacles_; again.header.stamp = scan.header.stamp;
+      lidar_obstacle_pub_->publish(again);
+    }
+    return true;
+  }
+  {
+    std::lock_guard<std::mutex> lock(obstacle_filter_mutex_);
+    obstacle_snapshots_.push_back({stamp, obstacle_filter_.state(), last_lidar_obstacles_});
+  }
+  while (!obstacle_snapshots_.empty() && obstacle_snapshots_.front().stamp < stamp - before - static_cast<int64_t>(1e9))
+    obstacle_snapshots_.pop_front();
   auto obstacles = lidar_.detect_obstacles(scan);
   if (!obstacles) return false;
   if (obstacle_filter_enabled_) filter_obstacles(*obstacles, scan);
   lidar_obstacle_pub_->publish(*obstacles);
+  last_lidar_obstacles_ = *obstacles;
   return true;
 }
 

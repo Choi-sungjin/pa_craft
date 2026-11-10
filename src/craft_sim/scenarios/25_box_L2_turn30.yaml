@@ -1,0 +1,9 @@
+name: box_L2_turn30
+description: L2 가 30° 돌아감. 사방이 트인 박스에서 측정한 면 중 가장 짧은 면으로 접근하는지.
+map: maps/arena5_legend_opt_arena1cm_noboxes.yaml  # boxes erased like the robot's planning map (2026-11-10)
+start: [0.527, 5.889, -4.5]
+timeout_s: 300
+box_offsets:
+  L2: [0.0, 0.0, 30.0]   # dx [m], dy [m], dyaw [deg]
+actions:
+  - {type: box, name: L2}

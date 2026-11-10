@@ -125,6 +125,19 @@ private:
   LidarPerception lidar_;
   // /perception/lidar/obstacle filter (map walls, persistence, clusters); its map arrives on another thread.
   bool obstacle_filter_enabled_ = false;
+  // A hard stop pitches the chassis and the LiDAR plane hits the floor (user, 2026-11-10): the scans from
+  // brake_before_s before to brake_after_s after a deceleration over brake_decel (wheel odometry over brake_window_s)
+  // are kept out of the obstacles (the filter goes back to before them) and the obstacles of then go out again.
+  double brake_decel_ = 0.6, brake_window_s_ = 0.1, brake_before_s_ = 0.3, brake_after_s_ = 0.3;
+  std::atomic<int64_t> brake_at_ns_{0};   // when the last hard stop was detected (wheel odometry stamp)
+  int64_t brake_handled_ns_ = 0;          // the hard stop already rolled back (lidar obstacle task only)
+  // Per processed scan (lidar obstacle task only, ~1 s): its stamp, the filter state before it and the obstacles
+  // published before it, so a hard stop's scans from brake_before_s_ back can be undone.
+  struct ObstacleSnapshot { int64_t stamp; LidarObstacleFilter::State filter; std::optional<geometry_msgs::msg::PoseArray> published; };
+  std::deque<ObstacleSnapshot> obstacle_snapshots_;
+  std::deque<std::pair<int64_t, double>> brake_speeds_;  // (stamp ns, |vx|) of /control/wheel/odom, brake_window_s_ long
+  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr brake_odom_sub_;
+  std::optional<geometry_msgs::msg::PoseArray> last_lidar_obstacles_;
   LidarObstacleFilter obstacle_filter_;
   std::mutex obstacle_filter_mutex_;
   std::mutex obstacle_cycle_mutex_;  // Serialize reset with filtered publications.

@@ -162,7 +162,7 @@ def fit_box_face(points_xy_map, expected_box, robot_pose, side=.205, front_face_
 
 
 def observe_face_endpoints(ranges, angles, rotation, origin, fit, prior, side=.205, sensor_min=None, sensor_max=None,
-                           face_tol=.010, width_tol=.006, window=.08):
+                           face_tol=.010, width_tol=.006, window=.08, straddle_m=.040):
     """Both ends of the fitted face from the raw beams, so the box centre along the face is measured, not the prior's.
 
     ranges / angles: the raw scan (every beam, zero and inf included); rotation (3x3) / origin (3): laser -> map.
@@ -170,10 +170,10 @@ def observe_face_endpoints(ranges, angles, rotation, origin, fit, prior, side=.2
     range is within face_tol of where its ray meets the face line, there within side/2 + window of the prior's face
     centre. The face beams must be one unbroken run (no gap, occluder or second cluster inside). Each end needs the
     next beam outside the run as evidence that the face really stops there: a return behind the face line (finite and,
-    with sensor_min/max given, inside the device's range; or +inf where the sensor would have seen the face). One zero
-    beam right at the edge is skipped (the LDS-03 drops the beam straddling it; 2026-11-10 docks: every edge had one)
-    and the beam past it is the evidence; two zeros, a return in front of the face (an occluder) or no beam (the scan
-    ends there) is no evidence. An end lies halfway between the last face beam and the evidence beam, on the face line
+    with sensor_min/max given, inside the device's range; or +inf where the sensor would have seen the face). Up to two
+    beams straddling the edge are skipped (the LDS-03 returns zero or a range up to straddle_m in front of the face
+    there; 2026-11-10 docks: every edge had one) and the beam past them is the evidence; more, a return farther in
+    front of the face (an occluder) or no beam (the scan ends there) is no evidence. An end lies halfway between the last face beam and the evidence beam, on the face line
     (uncertainty: half that distance). The width
     between the ends must be side within width_tol + both uncertainties.
     Returns {'ok', 'reason', 'edge_class'} and, when ok, 'box_center_map', 'face_centre_map', 'width_m', 'uncertainty_m'.
@@ -222,15 +222,21 @@ def observe_face_endpoints(ranges, angles, rotation, origin, fit, prior, side=.2
             outer %= n
         elif outer < 0 or outer >= n:
             return fail('scan ends at the face edge', 'UNKNOWN')
-        if ranges[outer] == 0 or np.isnan(ranges[outer]):
-            # The LDS-03 drops the beam that straddles an edge (zero): one such beam is skipped and the beam past it
-            # is the evidence (the edge is then within two spacings). Two in a row, or none past it: no evidence.
+        # Beams straddling the edge: the LDS-03 drops one (zero) or returns it a little in front of the face (up to
+        # straddle_m; 2026-11-10 docks, closer than ~0.4 m). Up to two are skipped and the beam past them is the
+        # evidence (the edge is then within that many spacings more). More, or none past them: no evidence.
+        def straddles(i):
+            r = ranges[i]
+            return r == 0 or np.isnan(r) or (meets[i] and np.isfinite(r) and predicted[i] - straddle_m <= r < predicted[i] - face_tol)
+        skipped = 0
+        while straddles(outer):
+            skipped += 1
             outer += step
             if full_turn:
                 outer %= n
             elif outer < 0 or outer >= n:
                 return fail('scan ends at the face edge', 'UNKNOWN')
-            if ranges[outer] == 0 or np.isnan(ranges[outer]):
+            if skipped > 2:
                 return fail('no return beside the face edge', 'UNKNOWN')
         r, expected = ranges[outer], predicted[outer]
         observable = meets[outer] and (sensor_min is None or expected >= sensor_min) and \

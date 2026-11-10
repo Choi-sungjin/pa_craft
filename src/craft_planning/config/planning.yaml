@@ -83,20 +83,24 @@ planning_master:
       observation_initial_timeout: 5.0  # held still while waiting for the first observation
       camera_confirm_count: 3
       speed: 0.20         # [m/s] (user, 2026-11-08)
-      gap: 0.08           # [m] LiDAR front face -> box face at the goal: the far end of the upper cam gap calibration
+      gap: 0.03           # [m] LiDAR front face -> box face at the planned face goal: places the stage point (approach_len +
+                          # stage_lead behind it; user 2026-11-10, was 0.08: the LiDAR stood ~0.45 m off, now ~0.36 m)
       front_face_x: 0.165   # [m] axle midpoint to LiDAR front face, user measurement 2026-11-09
       side: 0.205         # [m]
       # The box step (user, 2026-11-08): plan to the stage point of every approachable face of the known box below
       # (PathPlanner::plan_box), drive the shortest, stand still settle_s at the stage point and take the LiDAR box
       # pose (/perception/box/pose, box_detection_timeout_s in rates.yaml); the dock and the check go by it. Stage
       # points sit 0.43-0.58 m from the face (LiDAR front): ~20 points on a face at the LDS-03's 1 deg.
-      max_offset: 0.5     # [m] a perceived box farther than this from the known position is another box: ignored
+      max_offset: 0.30    # [m] a box perceived farther than this from its planning.yaml place is not the box: ignored (user 2026-11-10; was 0.5, and measured from the last perceived place)
       # The perceived box (2026-11-10): true = the map's yaw (square, below) to the nearest quarter turn of the LiDAR's,
       # the LiDAR's distance along the approached face's normal, and its position along the face only when both face
       # ends were seen (face_centre_observed; never so far). Four docks of L1 saw its yaw anywhere in 175.6-186.4 deg
       # and the dock line followed it: 4-6 deg and ~3 cm off at the face. false = the LiDAR pose as it is.
       yaw_from_map: false  # off (user 2026-11-10): the boxes may not be square to the map
       lidar_window_s: 1.0  # [s] after settle_s at the stage point: the median of the LiDAR scans in it makes the dock line
+      # The dock (CameraDock to the end) by the map pose at its start + wheel odometry since, not the localization:
+      # 2026-11-10 it moved the robot 30 mm sideways against its wheels on the last 0.3 m and control followed (5.4 deg off).
+      dock_wheel_odometry: true
       # At the face goal (correction parking): stand still settle_s (camera shake, the gap filter), perceive the box
       # again and check the robot against that face's goal. Within the tolerances the step is done; else back out
       # reverse_distance straight along the approach at reverse_speed and approach the same face again with the box
@@ -106,10 +110,32 @@ planning_master:
       # turned back and forth for 40 s): an ordinary path to the stage point stage_lead behind the approach entry,
       # stop; then the dock: turn square to the face in place (within yaw_tolerance_deg), straight to the goal at
       # dock_speed, arriving within dock_goal_tolerance (control TaskCommand goal_tolerance / tolerance_rad).
-      stage_lead: 0.20           # [m]
+      stage_lead: 0.03           # [m] (user 2026-11-10, was 0.20): LiDAR front ~0.35 m from the face at the stage point; both face ends seen in every dock scan down to ~0.30 m
       stage_goal_tolerance: 0.03 # [m] the stage drive's arrival (control's 0.10 left the dock 6 cm off the normal)
       dock_speed: 0.02           # [m/s]
-      dock_lookahead: 0.040      # [m] pursuit target from front reference during the dock (user 2026-11-10, was 0.020: 48 mm off swung it to -16 deg)
+      dock_reference_x: 0.0      # [m] base_link x of the point the dock tracks (user 2026-11-10, was 0.165 = LiDAR front: the
+                                 # body stayed 1.7-1.9 deg off at the face in the simulator; base_link + 0.15: 0.5-0.7 deg)
+      dock_lookahead: 0.15       # [m] pursuit target from the reference (0.10 converged closer but swung 11 deg; real dock wobbled)
+      final_yaw_tolerance_deg: 4.0  # [deg] the end check (user 2026-11-10; yaw_tolerance_deg stays for the stage heading)
+      # The box being approached is an obstacle until the dock path (after the stage point) is made; from then on (user
+      # 2026-11-10) LiDAR obstacle points within this of it
+      # as measured are dropped (not around the planning.yaml place: a box standing off it would be partly freed).
+      # Box half diagonal 0.145 m + room for a turned / smeared box.
+      ignore_radius: 0.25        # [m]
+      reorient_deg: 10.0         # [deg] the box measured at the stage point turned more than this from the face approached:
+                                 # plan again from the measured box to its nearest allowed face (once; 2026-11-10, a box turned 45 deg)
+      # The last stage_final_m of the stage drive (user, 2026-11-10): at most stage_final_speed, and from there a target
+      # stage_final_lookahead ahead of base_link instead of the speed table's 0.18 m (a point to stop at, not a line).
+      stage_final_m: 0.30          # [m]
+      stage_final_speed: 0.05      # [m/s]
+      stage_final_lookahead: 0.08  # [m]
+      # Within stage_capture_m of the stage point for stage_capture_s without arriving: turn in place to the stage
+      # heading there (2026-11-10: 4-14 cm off, control circled at full turn rate for 90 s); the dock takes the offset.
+      stage_capture_m: 0.15
+      stage_capture_s: 2.0
+      # Turned in place there, within yaw_tolerance_deg and standing still this long: on to the LiDAR without waiting for
+      # control's done (2026-11-10: it never came, 140 s).
+      stage_still_s: 2.0
       dock_goal_tolerance: 0.01  # [m]
       settle_s: 0.5
       lateral_tolerance: 0.020   # [m]
@@ -120,13 +146,29 @@ planning_master:
       # steps); none clear: wait, and fail after block_wait_s.
       reverse_min_distance: 0.10
       reverse_speed: 0.10        # [m/s]
-      names: [L1, L2, L3]
-      # Expected [x, y, yaw of a face normal deg], map frame: box_detector on arena5_legend_opt_arena (2026-11-08);
-      # axis-aligned. Only where to drive toward and what to look for (/planning/box_search); the approach uses the
-      # perceived box.
-      L1: [3.577, 1.076, 90.0]
-      L2: [2.352, 3.731, 90.0]
-      L3: [3.777, 5.331, 90.0]
+      names: [S1, S2, S3, S4, S5, S6, L1, L2, L3]
+      # Expected [x, y, yaw of a face normal deg], map frame: box_detector.py on arena5_legend_opt_arena1cm (2026-11-10);
+      # only where to drive toward and what to look for (/planning/box_search); the dock goes by the perceived box.
+      # <box>_faces: the sides of the map it can be approached from (user, 2026-11-10; the others are walled in).
+      # Quoted: a bare N is YAML 1.1's false to the ROS parameter parser.
+      S1: [1.476, 1.159, 90.0]
+      S1_faces: ["E", "S"]
+      S2: [3.616, 3.436, 90.0]
+      S2_faces: ["S"]
+      S3: [3.069, 5.336, 90.0]
+      S3_faces: ["N", "S"]
+      S4: [0.864, 5.389, 85.0]
+      S4_faces: ["N", "W", "S"]
+      S5: [2.272, 5.321, 90.0]
+      S5_faces: ["N", "W"]
+      S6: [3.611, 3.889, 90.0]
+      S6_faces: ["W"]
+      L1: [3.576, 1.066, 90.0]
+      L1_faces: ["W", "S", "E"]
+      L2: [2.349, 3.726, 90.0]
+      L2_faces: ["E", "W", "S", "N"]
+      L3: [3.754, 5.324, 90.0]
+      L3_faces: ["N", "S"]
     ik:
       urdf: urdf/v75_robot.urdf
       base_frame: base_link
@@ -151,7 +193,11 @@ planning_master:
       # Safety distance = half the chassis diagonal from the URDF + margin (user, 2026-11-07). base_link meshes of
       # v75_robot.urdf span 306.5 x 377.7 mm -> half diagonal 243.2 mm. The turning centre sits 12.75 mm behind the
       # body centre, so the farthest corner is ~253 mm from it: inside the margin.
-      r_robot: 0.243
+      r_robot: 0.23  # [m] (user 2026-11-10, was 0.243: L3 N/S, L1 E and S6 W face goals sat 0.234-0.242 m off a wall)
+      # Padding of the whole map for the box dock: the second path, made after reaching the stage point and turning
+      # there (and plan_box's face / dock line checks): half the chassis width (310 mm) + 5 mm, a straight drive
+      # sweeps only the width (user, 2026-11-10). Everything else, the drive to the stage point included: r_robot.
+      r_approach: 0.16  # [m]
       margin: 0.0   # 0.05 had no route through arena5_legend (2026-11-08)
       lam: 0.60
       w_prox: 1.0

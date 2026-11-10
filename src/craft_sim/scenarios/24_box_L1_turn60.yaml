@@ -1,0 +1,9 @@
+name: box_L1_turn60
+description: L1 이 60° 돌아감(= -30°, 90° 주기). 큰 각도에서 LiDAR ±40° 재시도로 찾고 가까운 면으로 다시 계획하는지.
+map: maps/arena5_legend_opt_arena1cm_noboxes.yaml  # boxes erased like the robot's planning map (2026-11-10)
+start: [0.527, 5.889, -4.5]
+timeout_s: 300
+box_offsets:
+  L1: [0.0, 0.0, 60.0]   # dx [m], dy [m], dyaw [deg]
+actions:
+  - {type: box, name: L1}

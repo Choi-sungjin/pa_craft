@@ -145,7 +145,8 @@ class Sim(Node):
         self.cam_queue = __import__('collections').deque()
         # 실측: 이동 중 100 mm 이상에서는 상면 검출이 대부분 실패(18:07 lidar_dock 208프레임 중 유효 21). 0 = 끔
         self.cam_valid_max_gap = float(opt.get('camera_valid_max_gap', 0.0))
-        self.footprint = opt.get('footprint', [-0.20, 0.165, -0.165, 0.165])
+        # base_link box of the chassis from the URDF base_link mesh (2026-11-10): x -0.141..0.225, y +-0.177
+        self.footprint = opt.get('footprint', [-0.141, 0.225, -0.177, 0.177])
         # 실제 LiDAR 장애물 필터(perception.yaml lidar_obstacle)와 같은 기준
         self.obst_range = float(opt.get('obstacle_max_range', 3.0))
         self.wall_margin = float(opt.get('wall_margin', 0.06))
@@ -417,8 +418,12 @@ class Sim(Node):
         box = self.target_box(req)
         q = req.expected_box.orientation
         eyaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
-        fit, why = lidar_box_fit(pose, box, (req.expected_box.position.x, req.expected_box.position.y, eyaw),
-                                 req.box_side, req.front_face_x, self.front_lidar_x, *self.box_lidar_range)
+        # As the bridge: the expected yaw, then turned 40 deg either way (a box turned past the 20 deg slope limit).
+        for turn in (0.0, math.radians(40), -math.radians(40)):
+            fit, why = lidar_box_fit(pose, box, (req.expected_box.position.x, req.expected_box.position.y, eyaw + turn),
+                                     req.box_side, req.front_face_x, self.front_lidar_x, *self.box_lidar_range)
+            if fit is not None:
+                break
         m = BoxObservation()
         m.header.stamp, m.header.frame_id = stamp, 'map'
         m.request_id, m.source = req.request_id, 'lidar'
@@ -546,6 +551,26 @@ class Sim(Node):
         arrow.pose.orientation = quat(th)
         arrow.scale.x, arrow.scale.y, arrow.scale.z = 0.25, 0.03, 0.03
         ma.markers.append(arrow)
+        # The scenario's name and description above the arena (2026-11-10: which test is this?).
+        title = mk('scenario', 0, Marker.TEXT_VIEW_FACING, (1.0, 1.0, 0.3), 1.0)
+        title.pose.position.x, title.pose.position.y, title.pose.position.z = 2.2, 6.75, 0.5
+        title.scale.z = 0.22
+        title.text = str(self.sc.get('name', ''))
+        ma.markers.append(title)
+        desc = str(self.sc.get('description', '')).strip()
+        if desc:
+            words, lines, line = desc.split(), [], ''
+            for w in words:
+                if len(line) + len(w) + 1 > 46:
+                    lines.append(line); line = w
+                else:
+                    line = (line + ' ' + w).strip()
+            lines.append(line)
+            text = mk('scenario', 1, Marker.TEXT_VIEW_FACING, (1.0, 1.0, 1.0), 1.0)
+            text.pose.position.x, text.pose.position.y, text.pose.position.z = 2.2, 6.75 - 0.18 - 0.06 * len(lines), 0.5
+            text.scale.z = 0.1
+            text.text = '\n'.join(lines[:6])
+            ma.markers.append(text)
         self.pub_markers.publish(ma)
 
     def publish_trail(self):

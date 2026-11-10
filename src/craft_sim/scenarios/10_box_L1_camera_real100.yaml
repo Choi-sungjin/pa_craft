@@ -1,6 +1,6 @@
 name: box_L1_camera_real100
 description: 실측 카메라 조건 재현(2026-11-09 bag) + 22:00 LiDAR 어긋남. 카메라 유효 7.7 Hz, 촬영→도착 190 ms, 2프레임 무효 묶음 초당 0.36회.
-map: maps/arena5_legend_opt_arena1cm.yaml
+map: maps/arena5_legend_opt_arena1cm_noboxes.yaml  # boxes erased like the robot's planning map (2026-11-10)
 start: [0.527, 5.889, -4.5]
 timeout_s: 240
 sim:

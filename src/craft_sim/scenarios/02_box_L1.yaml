@@ -1,6 +1,6 @@
 name: box_L1
 description: 실제 시험과 같은 출발 위치에서 박스 L1 접근. stage → LiDAR 도킹 → 100 mm 에서 카메라로 전환 → 카메라 도킹 → 최종 검사(10±3 mm, 횡 20 mm, 1°).
-map: maps/arena5_legend_opt_arena1cm.yaml
+map: maps/arena5_legend_opt_arena1cm_noboxes.yaml  # boxes erased like the robot's planning map (2026-11-10)
 start: [0.527, 5.889, -4.5]
 timeout_s: 240
 actions:

@@ -276,7 +276,9 @@ bool LateralController::needs_rotation(double target_v) const
   const bool fine = task_heading_tolerance_ > 0.0 && !path_.poses.empty() &&
     (arc_[node_] <= kNodeWindow * path_spacing_ || (!camera_distance_mode_ && at_goal()));
   const double tolerance = fine ? task_heading_tolerance_ : heading_tolerance_;
-  rotating_ = error && std::abs(*error) > (rotating_ ? 0.5 * tolerance : tolerance);
+  // One threshold to start and to stop (user, 2026-11-10: 0.5 x tolerance to stop beside tolerance to start was
+  // two numbers to think about); the slow approach near the heading (compute_command) keeps the overshoot small.
+  rotating_ = error && std::abs(*error) > tolerance;
   if (!rotating_) rotate_sign_ = 0;
   return rotating_;
 }
@@ -390,7 +392,14 @@ std::array<double, 2> LateralController::compute_command(double linear_speed, do
     constexpr double kTurnSlow = 0.3, kTurnMin = 0.15;  // [rad], [rad/s]
     const double error = *heading_error(direction);
     if (rotate_sign_ == 0 || std::abs(error) < kTurnSlow) rotate_sign_ = error >= 0.0 ? 1 : -1;
-    const double speed = std::clamp(rotate_angular_speed_ * std::abs(error) / kTurnSlow, kTurnMin, rotate_angular_speed_);
+    // At the goal (the final heading alignment) at most goal_rotate_angular_speed_: a fast turn there overshoots and
+    // slips off the goal (2026-11-10: 0.57 rad/s at a stage point, past the heading, 10 cm off, circling).
+    const bool goal = !camera_distance_mode_ && goal_rotate_angular_speed_ > 0.0 && at_goal();
+    const double top = goal ? std::min(goal_rotate_angular_speed_, rotate_angular_speed_) : rotate_angular_speed_;
+    // Slowing down toward the heading as toward a goal point: proportional to the error within kTurnSlow, down to
+    // goal_rotate_min_speed_ at the goal (2026-11-10: the 0.15 rad/s floor ran 0.87 deg past a stage heading).
+    const double floor = goal && goal_rotate_min_speed_ > 0.0 ? goal_rotate_min_speed_ : kTurnMin;
+    const double speed = std::clamp(top * std::abs(error) / kTurnSlow, std::min(floor, top), top);
     return wheel_delta(rotate_sign_ * speed);
   }
   const auto curvature = get_curvature(direction);

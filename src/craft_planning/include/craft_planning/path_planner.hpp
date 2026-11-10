@@ -2,6 +2,7 @@
 
 #include <geometry_msgs/msg/pose_array.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <nav_msgs/msg/occupancy_grid.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
 
@@ -17,7 +18,9 @@ struct PathPlannerConfig
 {
   std::string map_file;
   std::string map_frame = "map";
-  double res = 0.05, block_size = 0.05, r_robot = 0.21, margin = 0.03;
+  // r_robot: padding while driving (half diagonal). r_approach: the padding of the whole map for the box dock, the
+  // straight second path after the turn at the stage point (plan_box's face/dock line checks, dock = true). 0 = r_robot.
+  double res = 0.05, block_size = 0.05, r_robot = 0.21, margin = 0.03, r_approach = 0.0;
   double lam = 0.6, w_prox = 1.0, prox_band = 0.15, arc_sample = 0.02;
   // A*+arc corner fillets: PASS needs R >= r_min (else STOP_TURN); R <= r_hi_global; bisection to r_tol.
   double r_min = 0.08, r_hi_global = 0.40, r_tol = 0.01;
@@ -68,6 +71,7 @@ struct PathPlan
   // plan_box: the goal of the chosen face (heading into the box) and that face's outward normal [rad, map].
   geometry_msgs::msg::PoseStamped goal;
   double face_normal = 0;
+  std::string faces;  // plan_box: every face tried, its path length or why not (for the log)
 };
 
 // A box to drive up to (map frame): centre, yaw of one face normal [rad], side [m], and the goal standoff = base_link
@@ -114,7 +118,8 @@ public:
   PathPlan plan_box(
     const nav_msgs::msg::Odometry & odom, const BoxTarget & box,
     const geometry_msgs::msg::PoseArray & map_obstacles = geometry_msgs::msg::PoseArray(),
-    const double * face_normal = nullptr, double stage_lead = 0.0) const;
+    const double * face_normal = nullptr, double stage_lead = 0.0,
+    const std::vector<double> * allowed_normals = nullptr) const;
   // An ordinary path toward a point that is itself blocked (a box): to the free cell nearest to it, the one nearest
   // the robot among equals. No heading, no approach (plan_box takes over close by).
   PathPlan plan_toward(
@@ -126,14 +131,37 @@ public:
     const nav_msgs::msg::Path & global, const nav_msgs::msg::Odometry & odom,
     const geometry_msgs::msg::PoseArray & map_obstacles = geometry_msgs::msg::PoseArray(),
     const BoxApproach * approach = nullptr) const;
+  // The grid every plan checks against, for display: 100 = occupied (map or obstacle point), 99 = within the padding
+  // (r_robot + margin) of one, 0 = free. Obstacles as given (the box being approached already left out by planning).
+  // approach: the box's padding open on the approach. dock: the map padded with r_approach (the dock after the stage
+  // point), the cells only r_robot pads as 50.
+  nav_msgs::msg::OccupancyGrid padding(
+    const geometry_msgs::msg::PoseArray & map_obstacles, const BoxApproach * approach = nullptr, bool dock = false) const;
   // Every sample (and between samples) outside the inflated map plus obstacles, as A*+arc checks it.
   bool collision_free(
     const nav_msgs::msg::Path & path,
     const geometry_msgs::msg::PoseArray & map_obstacles = geometry_msgs::msg::PoseArray(),
-    const BoxApproach * approach = nullptr) const;
+    const BoxApproach * approach = nullptr, bool dock = false) const;
+  // Arc length [m] from the path's first pose to its first blocked sample (as collision_free checks it); infinity
+  // when the whole path is clear, 0 for an invalid path.
+  double clear_length(
+    const nav_msgs::msg::Path & path,
+    const geometry_msgs::msg::PoseArray & map_obstacles = geometry_msgs::msg::PoseArray(),
+    const BoxApproach * approach = nullptr, bool dock = false) const;
+
+  struct Data;
 
 private:
-  struct Data;
+  PathPlan plan_on(
+    const std::shared_ptr<const Data> & data, const nav_msgs::msg::Odometry & odom,
+    const geometry_msgs::msg::PoseStamped & goal, const geometry_msgs::msg::PoseArray & map_obstacles,
+    bool heading_required = false, const BoxTarget * box = nullptr) const;
+  double clear_length_on(
+    const std::shared_ptr<const Data> & data, const nav_msgs::msg::Path & path,
+    const geometry_msgs::msg::PoseArray & map_obstacles, const BoxApproach * approach) const;
+  bool collision_free_on(
+    const std::shared_ptr<const Data> & data, const nav_msgs::msg::Path & path,
+    const geometry_msgs::msg::PoseArray & map_obstacles, const BoxApproach * approach) const;
   std::shared_ptr<const Data> data_;
 };
 }  // namespace craft_planning

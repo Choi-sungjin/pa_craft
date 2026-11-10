@@ -1,6 +1,6 @@
 name: goal_basic
 description: 실제 L1 시험 출발 위치에서 맵 가운데 (2.6, 2.9)까지 전역 경로(global_local) 주행. 방향 요구 없음.
-map: maps/arena5_legend_opt_arena1cm.yaml   # 패키지(share/craft_sim) 기준 상대 경로
+map: maps/arena5_legend_opt_arena1cm_noboxes.yaml  # boxes erased like the robot's planning map (2026-11-10)   # 패키지(share/craft_sim) 기준 상대 경로
 start: [0.527, 5.889, -4.5]                 # x, y [m], yaw [deg]
 timeout_s: 120
 actions:

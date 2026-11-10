@@ -153,14 +153,25 @@ class SensorBridge(Node):
     pts=np.column_stack((ranges[keep]*np.cos(a[keep]),ranges[keep]*np.sin(a[keep]),np.zeros(keep.sum())))
     pts=pts@quaternion_rotation(tf.rotation).T+np.array([tf.translation.x,tf.translation.y,tf.translation.z])
     p=req.expected_box.position;q=req.expected_box.orientation
-    fit=fit_box_face(pts[:,:2],(p.x,p.y,yaw(q)),planar_pose(base),side=req.box_side,front_face_x=req.front_face_x,laser_pose=planar_pose(tf))
+    # The face is looked for within 20 deg of the expected yaw; a box turned further (45 deg, 2026-11-10) is found
+    # with the yaw turned 40 deg either way (faces repeat every 90 deg, so these three cover every turn).
+    prior=(p.x,p.y,yaw(q))
+    for turn in (0.,math.radians(40),-math.radians(40)):
+     prior=(p.x,p.y,yaw(q)+turn)
+     fit=fit_box_face(pts[:,:2],prior,planar_pose(base),side=req.box_side,front_face_x=req.front_face_x,laser_pose=planar_pose(tf))
+     if fit is not None:break
     if fit is None:raise ValueError('no unambiguous LiDAR box face')
     centre=fit['box_center_map'];result=dict(valid=True,reason='lidar face fit',box_map=(*centre,fit['box_yaw']),
        gap_m=fit['gap_m'],lateral_m=fit['lateral_m'],yaw_rad=fit['yaw_relative'],uncertainty_m=max(.010,fit['uncertainty_m']),
        face_centre_observed=False)
     # Both face ends in the raw beams: the box centre along the face measured, not the request's prior (2026-11-10).
     ends=observe_face_endpoints(ranges,a,quaternion_rotation(tf.rotation),np.array([tf.translation.x,tf.translation.y,tf.translation.z]),
-       fit,(p.x,p.y,yaw(q)),side=req.box_side,sensor_min=scan.range_min,sensor_max=scan.range_max)
+       fit,prior,side=req.box_side,sensor_min=scan.range_min,sensor_max=scan.range_max)
+    # Seen obliquely (a turned box), the side face's start passes for a face end and the centre comes out cm off
+    # (2026-11-10: 29 deg, 6 cm): the ends count only with the face within 20 deg of facing the laser.
+    if ends['ok']:
+     n=np.array(fit['face_normal_map']);v=np.array([tf.translation.x,tf.translation.y])-np.array(ends['face_centre_map'])
+     if n@v<np.cos(np.radians(20.))*np.linalg.norm(v):ends=dict(ok=False,reason='face seen obliquely, ends not used')
     if ends['ok']:
      bx,by,heading=planar_pose(base);face=np.array(ends['face_centre_map'])
      result.update(box_map=(*ends['box_center_map'],fit['box_yaw']),face_centre_observed=True,

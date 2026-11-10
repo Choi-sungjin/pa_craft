@@ -277,11 +277,12 @@ def main():
     run_dir = Path(a.out) / f'{name}_{time.strftime("%Y%m%d_%H%M%S")}'
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / 'scenario.yaml').write_text(sc_path.read_text())
-    map_yaml = resolve(sc.get('map', 'maps/arena5_legend_opt_arena1cm.yaml'), sc_path.parent.parent, share, Path.cwd())
+    map_yaml = resolve(sc.get('map', 'maps/arena5_legend_opt_arena1cm_noboxes.yaml'), sc_path.parent.parent, share, Path.cwd())
 
     # 노드 파라미터: 로봇과 같은 yaml 두 개 + 시뮬레이터 덮어쓰기 (launch 에서 주는 값과 같은 것)
     pty_file = run_dir / 'pty.txt'
     procs = []
+    print(f"[sim] 시나리오: {sc.get('name', sc_path.stem)} | {str(sc.get('description', '')).strip()}")
     print(f'[sim] 실행 폴더: {run_dir}')
     sim = start([sys.executable, '-u', str(HERE / 'sim_node.py'), '--scenario', str(sc_path), '--craft-src',
                  str(craft_src), '--map', str(map_yaml), '--pty-out', str(pty_file)], run_dir / 'sim.log')

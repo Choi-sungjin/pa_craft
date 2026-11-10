@@ -267,6 +267,8 @@ public:
       path_spacing,
       positive_param("wheel_heading_tolerance"), positive_param("wheel_rotate_angular_speed"),
       positive_param("wheel_tracking_gain"));
+    lateral_.set_goal_rotate_angular_speed(positive_param("wheel_goal_rotate_angular_speed"),
+                                           positive_param("wheel_goal_rotate_min_speed"));
     if (!clock_controller_.configure(
       clock_slot_count_, clock_slot_angle, clock_zero_angle, clock_direction, clock_angle_tolerance))
     {
@@ -382,6 +384,7 @@ public:
     settle_s_ = positive_param("settle_time_s");
     stop_tolerance_ = positive_param("stop_position_tolerance_rad");
     wheel_stop_tolerance_ = positive_param("wheel_stop_tolerance_rad_s");
+    clock_stop_tolerance_ = positive_param("clock_stop_tolerance_rad");
     task_timeout_s_ = positive_param("task_timeout_s");
     odom_timeout_s_ = positive_param("odom_timeout_s");
     camera_timeout_s_ = declare_parameter("camera_distance_timeout_s", 0.5);
@@ -848,10 +851,11 @@ private:
     return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
   }
   void update_settle(std::vector<double> &anchor, const std::vector<double> &sample,
-                     double &since, double at) {
+                     double &since, double at, double tolerance = -1) {
+    if (tolerance < 0) tolerance = stop_tolerance_;
     bool moved = anchor.size() != sample.size();
     if (!moved) for (size_t i = 0; i < sample.size(); ++i)
-      moved = moved || std::abs(sample[i] - anchor[i]) > stop_tolerance_;
+      moved = moved || std::abs(sample[i] - anchor[i]) > tolerance;
     if (moved) {anchor = sample; since = at;}
   }
   void reject(const TaskCommand &msg, const std::string &reason) {
@@ -906,8 +910,8 @@ private:
           (update || c.speed != 0) && std::isfinite(c.goal_tolerance) && c.goal_tolerance >= 0.0 &&
           std::isfinite(c.tracking_reference_x) && c.tracking_reference_x >= 0.0 &&
           std::isfinite(c.lookahead_distance) && c.lookahead_distance >= 0.0 &&
-          ((c.lookahead_distance > 0.0 && c.tracking_reference_x > 0.0) ||
-          (c.lookahead_distance == 0.0 && c.tracking_reference_x == 0.0)) &&
+          // A task lookahead with any reference point (0 = base_link itself; 2026-11-10 dock), none without one.
+          (c.lookahead_distance > 0.0 || c.tracking_reference_x == 0.0) &&
           std::isfinite(c.tolerance_rad) && c.tolerance_rad >= 0.0 && c.tolerance_rad <= M_PI &&
           (c.speed_limit.empty() || (c.speed_limit.size() == c.path.poses.size() &&
           std::all_of(c.speed_limit.begin(), c.speed_limit.end(), [](double v) {return std::isfinite(v) && v >= 0.0;})));
@@ -1068,7 +1072,7 @@ private:
     if (clock_wheel_feedback_updated) {
       publish_wheel_odometry(now_s, serial_timeout_s_);
       drive_received_at_ = now_s;
-      update_settle(clock_anchor_, {clock_angle_}, clock_stable_at_, now_s);
+      update_settle(clock_anchor_, {clock_angle_}, clock_stable_at_, now_s, clock_stop_tolerance_);
     }
     if (clock_wheel_feedback_updated &&
         (std::abs(wheel_left_feedback_) > wheel_stop_tolerance_ ||
@@ -1251,6 +1255,19 @@ private:
       if ((!arm_tx_ok_ && arm_feedback_fresh) || (!drive_tx_ok_ && clock_wheel_feedback_fresh)) {
         task_.fail("serial command write failed"); task_hold_ = true;
       } else if (now_s - task_at_ >= settle_s_) {
+        // A drive not done after 2 s standing still: say which condition holds it, every 2 s (2026-11-10: a stage turn
+        // ended within its heading tolerance and the task stayed RUNNING for 140 s with nothing in the log).
+        if (task_.kind == TaskCommand::NAVIGATE && std::abs(wheel_left_feedback_) <= wheel_stop_tolerance_ &&
+            std::abs(wheel_right_feedback_) <= wheel_stop_tolerance_ && now_s - task_at_ >= 2.0) {
+          RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
+            "drive task %lu not done: target_reached=%d feedback_fresh=%d tx_ok=%d wheel_state=%d clock_state=%d "
+            "settled_for=%.2f s (need %.2f) wheel_fb=(%.3f, %.3f) clock=%.4f (anchor %.4f, tol %.4f) camera_mode=%d",
+            static_cast<unsigned long>(last_task_id_), lateral_.is_target_reached() ? 1 : 0,
+            clock_wheel_feedback_fresh ? 1 : 0, drive_tx_ok_ ? 1 : 0, wheel_state_, clock_state_,
+            drive_received_at_ - clock_stable_at_, settle_s_, wheel_left_feedback_, wheel_right_feedback_,
+            clock_angle_, clock_anchor_.empty() ? 0.0 : clock_anchor_[0], clock_stop_tolerance_,
+            camera_distance_mode_ ? 1 : 0);
+        }
         task_.observe({arm_settled && arm_controller_.is_target_reached(arm_joints_),
                        arm_settled && lm_controller_.is_target_reached(lm_angle_),
                        drive_settled && (camera_distance_mode_ ? camera_gap_ <= camera_target_gap_ + camera_tolerance_ : lateral_.is_target_reached()),
@@ -1281,7 +1298,7 @@ private:
   craft_control::TaskTracker task_;
   uint64_t last_task_id_ = 0;
   double task_at_ = 0, wait_duration_ = 0, settle_s_ = 0, stop_tolerance_ = 0;
-  double wheel_stop_tolerance_ = 0, task_timeout_s_ = 0, odom_timeout_s_ = 0;
+  double wheel_stop_tolerance_ = 0, clock_stop_tolerance_ = 0, task_timeout_s_ = 0, odom_timeout_s_ = 0;
   double arm_stable_at_ = 0, clock_stable_at_ = 0, arm_received_at_ = 0, drive_received_at_ = 0;
   bool task_hold_ = false, arm_tx_ok_ = false, drive_tx_ok_ = false;
   std::vector<double> arm_anchor_, clock_anchor_;

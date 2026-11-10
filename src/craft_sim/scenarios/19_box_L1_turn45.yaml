@@ -1,0 +1,9 @@
+name: box_L1_turn45
+description: 실제 L1 박스가 설정보다 45° 돌아가 있음. 정렬 지점에서 LiDAR 로 돌아간 것을 재고(브리지 ±40° 재시도), 측정한 박스의 허용 면(W, S, E ±45°) 중 가장 짧은 면으로 다시 계획해 도킹하는지 확인.
+map: maps/arena5_legend_opt_arena1cm_noboxes.yaml  # boxes erased like the robot's planning map (2026-11-10)
+start: [0.527, 5.889, -4.5]
+timeout_s: 300
+box_offsets:
+  L1: [0.0, 0.0, 45.0]   # dx [m], dy [m], dyaw [deg]
+actions:
+  - {type: box, name: L1}

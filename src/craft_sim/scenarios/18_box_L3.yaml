@@ -1,0 +1,7 @@
+name: box_L3
+description: 박스 L3 접근 (planning.yaml L3_faces 중 가장 짧은 경로의 면). 출발은 02_box_L1 과 같은 곳.
+map: maps/arena5_legend_opt_arena1cm_noboxes.yaml  # boxes erased like the robot's planning map (2026-11-10)
+start: [0.527, 5.889, -4.5]
+timeout_s: 240
+actions:
+  - {type: box, name: L3}

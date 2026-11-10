@@ -20,6 +20,17 @@ Visualization Manager:
         Depth: 1
       Alpha: 0.8
       Color Scheme: map
+    - Class: rviz_default_plugins/Map
+      Name: planning padding (purple = wall/obstacle, cyan = padding)
+      Enabled: true
+      Topic:
+        Value: /planning/padding
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+        Depth: 1
+      Color Scheme: costmap
+      Alpha: 0.45
+      Draw Behind: false
     - Class: rviz_default_plugins/MarkerArray
       Name: sim 박스·장애물·차체
       Enabled: true
@@ -50,6 +61,17 @@ Visualization Manager:
       Color: 0; 220; 220
       Alpha: 1
       Arrow Length: 0.05
+    - Class: rviz_default_plugins/PoseArray
+      Name: obstacles ignored for the box (green)
+      Enabled: true
+      Topic:
+        Value: /planning/ignored_obstacles
+        Reliability Policy: Reliable
+        Depth: 5
+      Shape: Arrow (Flat)
+      Color: 0; 230; 0
+      Alpha: 1
+      Arrow Length: 0.06
     - Class: rviz_default_plugins/Path
       Name: control tracking path
       Enabled: true

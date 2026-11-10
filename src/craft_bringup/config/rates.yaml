@@ -34,6 +34,10 @@ planning_master:
     replan_period_s: 0.2
     # [s] blocked: pause at once, replan only if still blocked after this (a passer-by clears and the same path resumes)
     block_wait_s: 2.0
+    # [m] An obstacle on the path further ahead than this (along the path, to the first sample in its padding): keep
+    # driving up to it; within it: pause, wait block_wait_s, replan (user, 2026-11-10: was a pause wherever it was).
+    # The check runs every replan_period_s (4 cm at 0.2 m/s) and braking takes ~4 cm.
+    block_stop_distance: 0.15
     # [s] acquisition age and steady-clock receive watchdogs are checked independently
     joint_timeout_s: 0.5
     observation_timeout_s: 0.5

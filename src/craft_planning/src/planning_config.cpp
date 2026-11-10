@@ -218,6 +218,7 @@ PlanningConfig load_planning_config(rclcpp::Node &node, const std::string &share
   config.path.res = p.positive_param("path_planner.res");
   config.path.block_size = p.positive_param("path_planner.block_size");
   config.path.r_robot = p.positive_param("path_planner.r_robot");
+  config.path.r_approach = p.positive_param("path_planner.r_approach");
   config.path.margin = p.nonnegative("path_planner.margin");
   config.path.lam = p.nonnegative("path_planner.lam");
   config.path.w_prox = p.nonnegative("path_planner.w_prox");
@@ -279,6 +280,7 @@ PlanningConfig load_planning_config(rclcpp::Node &node, const std::string &share
   config.loop_hz = p.positive_param("loop_hz");
   config.replan_period_s = p.positive_param("replan_period_s");
   config.block_wait_s = p.nonnegative("block_wait_s");
+  config.block_stop_distance = p.nonnegative("block_stop_distance");
   config.min_segment_m = p.nonnegative("min_segment_m");
   config.odom_timeout_s = p.positive_param("odom_timeout_s");
   config.localization_observation_timeout_s = p.positive_param("localization_observation_timeout_s");
@@ -299,6 +301,7 @@ PlanningConfig load_planning_config(rclcpp::Node &node, const std::string &share
   config.box.camera_enabled = p.param<bool>("box_approach.camera_enabled");
   config.box.camera_only_longitudinal = p.param<bool>("box_approach.camera_only_longitudinal");
   config.box.yaw_from_map = p.param<bool>("box_approach.yaw_from_map");
+  config.box.dock_wheel_odometry = p.param<bool>("box_approach.dock_wheel_odometry");
   config.box.lidar_window_s = p.positive_param("box_approach.lidar_window_s");
   config.box.camera_slow_gap = p.positive_param("box_approach.camera_slow_gap");
   config.box.camera_fast_speed = p.positive_param("box_approach.camera_fast_speed");
@@ -349,6 +352,16 @@ PlanningConfig load_planning_config(rclcpp::Node &node, const std::string &share
   config.box.stage_goal_tolerance = p.positive_param("box_approach.stage_goal_tolerance");
   config.box.dock_speed = p.positive_param("box_approach.dock_speed");
   config.box.dock_lookahead = p.positive_param("box_approach.dock_lookahead");
+  config.box.dock_reference_x = p.nonnegative("box_approach.dock_reference_x");
+  config.box.reorient_deg = p.positive_param("box_approach.reorient_deg");
+  config.box.ignore_radius = p.positive_param("box_approach.ignore_radius");
+  config.box.stage_final_m = p.positive_param("box_approach.stage_final_m");
+  config.box.stage_final_speed = p.positive_param("box_approach.stage_final_speed");
+  config.box.stage_final_lookahead = p.positive_param("box_approach.stage_final_lookahead");
+  config.box.stage_capture_m = p.positive_param("box_approach.stage_capture_m");
+  config.box.stage_capture_s = p.positive_param("box_approach.stage_capture_s");
+  config.box.stage_still_s = p.positive_param("box_approach.stage_still_s");
+  config.box.final_yaw_tolerance = p.positive_param("box_approach.final_yaw_tolerance_deg") * M_PI / 180.0;
   config.box.dock_goal_tolerance = p.positive_param("box_approach.dock_goal_tolerance");
   require(config.box.reverse_min_distance <= config.box.reverse_distance,
           "box_approach.reverse_min_distance must not exceed reverse_distance");
@@ -359,6 +372,14 @@ PlanningConfig load_planning_config(rclcpp::Node &node, const std::string &share
     require(!name.empty() && v.size() == 3 && std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]),
             "box_approach." + name + " must be [x, y, yaw_deg]");
     config.box.boxes[name] = {v[0], v[1], v[2] * M_PI / 180.0};
+    // <name>_faces: the sides of the map (E, N, W, S) the box can be approached from.
+    const auto faces = p.param<std::vector<std::string>>("box_approach." + name + "_faces");
+    require(!faces.empty(), "box_approach." + name + "_faces must not be empty");
+    for (const auto &f : faces) {
+      static const std::map<std::string, double> compass{{"E", 0.0}, {"N", 90.0}, {"W", 180.0}, {"S", 270.0}};
+      require(compass.count(f) != 0, "box_approach." + name + "_faces: E, N, W or S, not " + f);
+      config.box.box_faces[name].push_back(compass.at(f) * M_PI / 180.0);
+    }
   }
   auto tag_file = std::filesystem::path(p.nonempty("tag_registry_file"));
   if (!tag_file.is_absolute()) {

@@ -199,17 +199,19 @@ perception_master:
       # clear = that angle - 5 deg, bins = 1st percentile floor range - 0.15 m. Cross-validated between the bags:
       # removes ~75-90 % of floor points on an unseen bag, keeps 80-97 % of map-wall points (53-91 % at 55-90 deg).
       # Flat-floor fit (floor_cal_0034): beams dip (cone 0.6 deg), mounts 1.65 deg outward up, 0.1-0.2 deg roll.
+      # 2026-11-10: every max_range_m cut to 80 % of the 11-01 table (noboxes_1110_2105: inside the stepped bins 74 %
+      # of floor hits removed vs 35 %, ~90 % of the newly cut points are floor; below 70 % walls go faster than floor).
       floor_roi:
         enabled: true
         step_deg: 5.0
         front_left_clear_deg: 70.0
-        front_left_max_range_m: [0.48, 0.83, 0.88, 0.62]
+        front_left_max_range_m: [0.38, 0.66, 0.70, 0.50]  # 80 % of [0.48, 0.83, 0.88, 0.62]
         front_right_clear_deg: 60.0
-        front_right_max_range_m: [1.32, 1.32, 1.35, 0.76, 0.68, 0.48]
+        front_right_max_range_m: [1.06, 1.06, 1.08, 0.61, 0.54, 0.38]  # 80 % of [1.32, 1.32, 1.35, 0.76, 0.68, 0.48]
         rear_left_clear_deg: 65.0
-        rear_left_max_range_m: [0.70, 0.71, 0.56, 0.48, 0.45]
+        rear_left_max_range_m: [0.56, 0.57, 0.45, 0.38, 0.36]  # 80 % of [0.70, 0.71, 0.56, 0.48, 0.45]
         rear_right_clear_deg: 50.0
-        rear_right_max_range_m: [0.73, 0.60, 0.55, 0.58, 0.57, 0.50, 0.52, 0.46]
+        rear_right_max_range_m: [0.58, 0.48, 0.44, 0.46, 0.46, 0.40, 0.42, 0.37]  # 80 % of [0.73, 0.60, 0.55, 0.58, 0.57, 0.50, 0.52, 0.46]
 
     # LidarPerception -> /lidar/merged + /perception/lidar/obstacle (PoseArray; map frame once the filter has map TF,
     # else the scan frame).
@@ -218,6 +220,13 @@ perception_master:
       max_range_m: 3.0
       stride: 1
       odom_frame: odom  # obstacles at the scan stamp: odom->base_link then, map->odom latest (filter_obstacles)
+      # A hard stop pitches the chassis and the LiDAR plane sweeps the floor (user, 2026-11-10): around a deceleration over
+      # brake_decel [m/s^2] (wheel odometry over brake_window_s), the scans from brake_before_s before to brake_after_s
+      # after it make no obstacles: the filter goes back to before them and the obstacles of then go out again.
+      brake_decel: 0.6      # [m/s^2]
+      brake_window_s: 0.1   # [s]
+      brake_before_s: 0.3   # [s]
+      brake_after_s: 0.3    # [s]
       # Raw points (one per beam) -> points worth avoiding, judged in the map frame (2026-11-01: one noise point
       # or a map wall seen 4 cm off made planning replan). Without map TF the raw points go out.
       filter:
@@ -226,7 +235,7 @@ perception_master:
         cell_m: 0.05
         persist_frames: 3        # the cell (or neighbor_cells around it) seen in this many frames in a row
         neighbor_cells: 2        # 2 x 5 cm per frame at 10 Hz: movers up to ~1 m/s still persist
-        min_cluster_points: 3    # 8-connected kept cells with fewer points this frame are dropped
+        min_cluster_points: 4    # 8-connected kept cells with fewer points this frame are dropped (3 -> 4, 2026-11-10)
         # A kept cell stays an obstacle out of view (past the FOV, or in the floor cut beside the chassis) until the
         # scan's rays pass through it in persist_frames frames in a row, this long after it was last kept, or a new
         # drive starts (planning EXECUTE of a new Navigate task; 2026-11-08: the robot drove into a box it had stopped

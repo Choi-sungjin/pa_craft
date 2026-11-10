@@ -1,6 +1,6 @@
 name: box_near_L1
 description: L1 서쪽 면 앞 80 mm 에 법선과 정확히 맞춰 정지한 상태에서 근거리 도킹(approach_box_near). LiDAR 관측 → 100 mm 이하라 바로 카메라로 전환 → 카메라 도킹 → 최종 검사. 정렬된 기준 경우.
-map: maps/arena5_legend_opt_arena1cm.yaml
+map: maps/arena5_legend_opt_arena1cm_noboxes.yaml  # boxes erased like the robot's planning map (2026-11-10)
 # L1 서쪽 면 x = 3.577 - 0.1025 = 3.4745, LiDAR 앞면 0.165 + 간격 0.080 → base x = 3.2295
 start: [3.2295, 1.076, 0.0]
 timeout_s: 90

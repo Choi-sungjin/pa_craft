@@ -51,9 +51,18 @@ def test_one_zero_at_the_edge_is_skipped():
     assert abs(out['box_center_map'][1]-.034)<.003
 
 
-def test_two_zeros_are_not_background_evidence():
+def test_edge_return_just_in_front_is_skipped():
+    # Closer than ~0.4 m the beam at an edge can come back a little in front of the face, then zero (2026-11-10).
     def change(r,a,h):
-        e=edge_after(h);r[e]=0;r[e+1]=0
+        e=edge_after(h);r[e]=r[e-1]-.023;r[e+1]=0
+    out,_=run(offset=.034,alter=change)
+    assert out['ok'],out
+    assert abs(out['box_center_map'][1]-.034)<.004
+
+
+def test_three_zeros_are_not_background_evidence():
+    def change(r,a,h):
+        e=edge_after(h);r[e]=0;r[e+1]=0;r[e+2]=0
     out,_=run(offset=.034,alter=change)
     assert not out['ok']
 

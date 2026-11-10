@@ -1,6 +1,6 @@
 name: box_near_L1_offset
 description: 03 과 같은 근거리 도킹이지만 출발이 횡 +6 mm, 방향 +0.5° 어긋남. 현재 로직은 도킹 시작 회전이 면 목표점 쪽(약 -1.6°)으로 맞춰지고 저속 직진 중 방향이 회복되지 않아 최종 방향 허용 1° 를 넘는다(2026-11-09 시뮬레이션). 개선되면 통과해야 하는 시나리오.
-map: maps/arena5_legend_opt_arena1cm.yaml
+map: maps/arena5_legend_opt_arena1cm_noboxes.yaml  # boxes erased like the robot's planning map (2026-11-10)
 start: [3.2295, 1.082, 0.5]
 timeout_s: 90
 actions:

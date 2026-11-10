@@ -1,0 +1,9 @@
+name: box_L1_turn_minus20
+description: L1 이 -20° 돌아감(반대 방향). 같은 서쪽 접근 면이 반대로 기울었을 때.
+map: maps/arena5_legend_opt_arena1cm_noboxes.yaml  # boxes erased like the robot's planning map (2026-11-10)
+start: [0.527, 5.889, -4.5]
+timeout_s: 300
+box_offsets:
+  L1: [0.0, 0.0, -20.0]   # dx [m], dy [m], dyaw [deg]
+actions:
+  - {type: box, name: L1}

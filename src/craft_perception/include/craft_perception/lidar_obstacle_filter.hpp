@@ -45,6 +45,20 @@ public:
                                               const std::vector<std::array<double, 2>> &points,
                                               const std::vector<bool> &keep);
   void reset() { history_.clear(); memory_.clear(); }
+  // The accumulated state (persistence history and memory, not the map), to go back to it (a hard stop's scans).
+  struct State {
+    std::deque<std::unordered_set<int64_t>> history;
+    std::unordered_map<int64_t, std::pair<double, int>> memory;
+  };
+  State state() const {
+    State s{history_, {}};
+    for (const auto &[k, r] : memory_) s.memory.emplace(k, std::make_pair(r.seen, r.free_frames));
+    return s;
+  }
+  void restore(const State &s) {
+    history_ = s.history; memory_.clear();
+    for (const auto &[k, v] : s.memory) memory_.emplace(k, Remembered{v.first, v.second});
+  }
   void clear_memory() { memory_.clear(); }  // a new drive starts without the previous one's obstacles
   double wall_distance(double x, double y) const;  // [m]; 0 off the map
 
