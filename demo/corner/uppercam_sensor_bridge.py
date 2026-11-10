@@ -19,8 +19,8 @@ from std_msgs.msg import String
 import tf2_ros
 from uppercam_fast5_robust_estimator import Fast5RobustUppercamEstimator
 from uppercam_square_far20_estimator import SquareFar20Estimator
-from uppercam_geometry_pool import OrderedGeometryQueue,new_geometry_pool,warm_worker
-from uppercam_lidar_geometry import fit_box_face
+from uppercam_geometry_pool import OrderedGeometryQueue,new_geometry_pool,WORKERS,warm_worker
+from uppercam_lidar_geometry import fit_box_face,observe_face_endpoints
 from uppercam_bridge_utils import (camera_box_in_map,acquisition_valid,planar_pose,
                                    load_validated_square_manifest,square_observation_policy)
 
@@ -96,6 +96,7 @@ class SensorBridge(Node):
   m.header.stamp=(stamp_msg if stamp_msg is not None else Time(nanoseconds=max(0,int(stamp_s*1e9))).to_msg())
   m.request_id=req.request_id;m.source=req.source;m.valid=bool(result.get('valid',False))
   m.reason=str(result.get('reason',''));m.extrapolated=bool(result.get('extrapolated',False))
+  m.face_centre_observed=bool(result.get('face_centre_observed',False))
   m.gap_uncertainty_m=float(result.get('uncertainty_m',1.0))
   timeout=self.camera_timeout if req.source=='uppercam' else .20
   if not acquisition_valid(stamp_s,self.get_clock().now().nanoseconds*1e-9,sec(req.header.stamp),timeout):
@@ -155,7 +156,17 @@ class SensorBridge(Node):
     fit=fit_box_face(pts[:,:2],(p.x,p.y,yaw(q)),planar_pose(base),side=req.box_side,front_face_x=req.front_face_x,laser_pose=planar_pose(tf))
     if fit is None:raise ValueError('no unambiguous LiDAR box face')
     centre=fit['box_center_map'];result=dict(valid=True,reason='lidar face fit',box_map=(*centre,fit['box_yaw']),
-       gap_m=fit['gap_m'],lateral_m=fit['lateral_m'],yaw_rad=fit['yaw_relative'],uncertainty_m=max(.010,fit['uncertainty_m']))
+       gap_m=fit['gap_m'],lateral_m=fit['lateral_m'],yaw_rad=fit['yaw_relative'],uncertainty_m=max(.010,fit['uncertainty_m']),
+       face_centre_observed=False)
+    # Both face ends in the raw beams: the box centre along the face measured, not the request's prior (2026-11-10).
+    ends=observe_face_endpoints(ranges,a,quaternion_rotation(tf.rotation),np.array([tf.translation.x,tf.translation.y,tf.translation.z]),
+       fit,(p.x,p.y,yaw(q)),side=req.box_side,sensor_min=scan.range_min,sensor_max=scan.range_max)
+    if ends['ok']:
+     bx,by,heading=planar_pose(base);face=np.array(ends['face_centre_map'])
+     result.update(box_map=(*ends['box_center_map'],fit['box_yaw']),face_centre_observed=True,
+       lateral_m=float((face-np.array([bx,by]))@np.array([-math.sin(heading),math.cos(heading)])),
+       reason='lidar face fit, both face ends seen (width %.1f mm)'%(ends['width_m']*1000))
+    else:result['reason']='lidar face fit; centre: prior ('+ends['reason']+')'
     self.publish(req,stamp,result,stamp_msg=scan.header.stamp)
    except ValueError as e:self.publish(req,stamp,{'valid':False,'reason':str(e)},stamp_msg=scan.header.stamp)
  def offer_preview(self,colour,rs):
@@ -223,8 +234,8 @@ class SensorBridge(Node):
        estimator=(SquareFar20Estimator(self.args.urdf,self.args.calibration) if self.estimator_kind=='square_far20'
                   else Fast5RobustUppercamEstimator(self.args.urdf,self.args.calibration))
       if self.estimator_kind=='square_far20' and pool is None:
-       pool=new_geometry_pool(self.args.urdf,self.args.calibration);ordered=OrderedGeometryQueue(pool,limit=2)
-       warm=[pool.submit(warm_worker) for _ in range(2)]
+       pool=new_geometry_pool(self.args.urdf,self.args.calibration);ordered=OrderedGeometryQueue(pool,limit=WORKERS)
+       warm=[pool.submit(warm_worker) for _ in range(WORKERS)]
        while not all(f.done() for f in warm) and not self.quit.is_set():self.quit.wait(.01)
        if self.quit.is_set():break
        if not all(f.result() for f in warm):raise RuntimeError('geometry worker initialization failed')
@@ -237,8 +248,8 @@ class SensorBridge(Node):
         global_options.append((sensor,sensor.get_option(rs.option.global_time_enabled)))
         sensor.set_option(rs.option.global_time_enabled,1.)
       pipe=rs.pipeline(ctx);cfg=rs.config();cfg.enable_device(self.args.serial)
-      cfg.enable_stream(rs.stream.depth,424,240,rs.format.z16,15)
-      cfg.enable_stream(rs.stream.color,640,360,rs.format.bgr8,15)
+      cfg.enable_stream(rs.stream.depth,424,240,rs.format.z16,30)  # 30 fps (2026-11-10, was 15)
+      cfg.enable_stream(rs.stream.color,640,360,rs.format.bgr8,30)
       profile=pipe.start(cfg);scale=profile.get_device().first_depth_sensor().get_depth_scale();align=rs.align(rs.stream.color)
      try:collect()
      except Exception as e:

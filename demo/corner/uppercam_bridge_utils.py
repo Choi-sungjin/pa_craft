@@ -21,10 +21,10 @@ def planar_pose(transform):
     return (t.x,t.y,math.atan2(2*(q.w*q.z+q.x*q.y),1-2*(q.y*q.y+q.z*q.z)))
 
 SQUARE_METHOD = 'square_far20_spec_reimplementation_v1'
-SQUARE_MANIFEST_SHA256 = '8f52d66450ca0066fbe8442d0ca3e56db0f62099cd10ae3fd1056f0d9dc3a854'
+SQUARE_MANIFEST_SHA256 = 'f518844c6156b26b0406682bf50fb11fc0d4adbad4b74eeedab30ff48646bd12'
 SQUARE_FILES = ('uppercam_square_far20_estimator.py', 'uppercam_geometry_pool.py', 'uppercam_fast5_box_range.py',
                 'uppercam_box_range.py', 'uppercam_estimator.py', 'uppercam_selected_adapter.py',
-                'uppercam_gap_calibration.py', 'uppercam_causal_median.py',
+                'uppercam_gap_calibration.py', 'uppercam_causal_median.py', 'uppercam_trigger_filter.py',
                 'uppercam_selected_calibration.json', '@urdf')
 
 def load_validated_square_manifest(manifest_path, module_dir, calibration_path, urdf_path):

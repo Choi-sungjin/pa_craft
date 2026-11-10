@@ -1229,7 +1229,12 @@ PathPlan PathPlanner::plan_box(
           line.poses = {stage, goal};
           const BoxApproach dock{box, goal.pose};
           if (!collision_free(line, map_obstacles, &dock)) {stage_why = "dock line in the padding"; continue;}
-          auto q = plan(odom, stage, map_obstacles);
+          // Into the stage point straight along the face normal (approach_len), so the tracking error is steered
+          // out before it stops there: control's arrival takes any side offset up to wheel_goal_tolerance and the
+          // dock starts from it (2026-11-10: arriving from the side left 48 mm, the dock swung to -16 deg and
+          // touched the box). No room for that straight: any arrival direction, as before.
+          auto q = plan(odom, stage, map_obstacles, true);
+          if (!q.ok) {q = plan(odom, stage, map_obstacles);}
           if (!q.ok) {stage_why = "stage: " + q.error; retryable = retryable || q.retryable; continue;}
           p = std::move(q); staged = true;
         }

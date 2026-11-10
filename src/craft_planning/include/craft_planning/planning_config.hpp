@@ -39,6 +39,11 @@ struct BoxApproachConfig {
   bool camera_only_longitudinal = false;
   double camera_slow_gap = 0.100;   // camera_only_longitudinal: camera_speed from this gap (LiDAR line) to the end
   double camera_fast_speed = 0.10;  // [m/s] camera_only_longitudinal: the dock before camera_slow_gap
+  double lidar_window_s = 1.0;     // [s] LiDAR scans standing at the stage point whose median makes the dock line
+  bool yaw_from_map = false;       // perceived box: map yaw (quarter turns), LiDAR normal distance, face position only when its ends were seen
+  double dock_straight = 0.25;     // [m] camera_only_longitudinal: the dock path is on the face normal this far before the goal
+  double dock_extend = 0.15;       // [m] camera_only_longitudinal: the dock path goes on this far past the goal (into the box)
+  double dock_overrun = 0.005;     // [m] camera_only_longitudinal: stop this far past the goal by odometry if the camera has not
   double camera_final_gap = 0.010, camera_gap_tolerance = 0.003, handoff_gap = 0.100;
   double source_gap_diff = 0.020, camera_timeout = 0.300, lidar_observation_timeout = 0.200, camera_speed = 0.005;
   double camera_uncertainty_max = 0.005, camera_far_uncertainty_max = 0.010,

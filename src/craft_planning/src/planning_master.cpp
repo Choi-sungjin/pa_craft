@@ -17,6 +17,7 @@
 #include <tf2_ros/transform_listener.hpp>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <deque>
@@ -115,6 +116,10 @@ struct PlanningMaster::Impl
     std::shared_ptr<tf2_ros::Buffer> tf;
     std::shared_ptr<tf2_ros::TransformListener> listener;
     Sample<Odom> odom, lidar_odom;
+    // [stamp s, x, y] of /perception/state/odom over the last odom_trail_s: how far the robot moved since a camera
+    // frame was taken (travel_since).
+    std::deque<std::array<double, 3>> odom_trail;
+    static constexpr double odom_trail_s = 2.0;
     Sample<sensor_msgs::msg::Imu> imu;
     int64_t lidar_stamp = 0, imu_stamp = 0;
     Sample<Joints> joints;
@@ -146,6 +151,9 @@ struct PlanningMaster::Impl
       CameraStageStop, LidarPerceive, LidarRelease, LidarDock, HandoffStop, CameraPerceive, CameraRelease, CameraDock, FinalStop, CameraVerify};
     BoxPhase box_phase = BoxPhase::Stage;
     Sample<BoxObservation> box_observation;
+    // LiDAR observations taken standing still at the stage point (LidarPerceive, after settle_s): their median
+    // makes the dock line (lidar_window_s).
+    std::vector<BoxObservation> lidar_samples;
     BoxObservationRequest box_request;
     rclcpp::Publisher<BoxObservationRequest>::SharedPtr box_request_pub;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr box_phase_pub;
@@ -380,7 +388,7 @@ struct PlanningMaster::Impl
       box_reported = true;
       const auto b = box_seen ? *box_seen : box_target(step->box);
       const auto &o = odom.value.pose.pose.position;
-      char t[300];
+      char t[480];
       if (box_face) {
         const double n = face_normal(b), reach = b.side / 2 + b.standoff;
         const bool camera_target = config.box.camera_enabled &&
@@ -388,11 +396,24 @@ struct PlanningMaster::Impl
            box_phase == BoxPhase::CameraDock || box_phase == BoxPhase::FinalStop || box_phase == BoxPhase::CameraVerify);
         const double gx = b.x + reach * std::cos(n), gy = b.y + reach * std::sin(n);
         const double face = (o.x - b.x) * std::cos(n) + (o.y - b.y) * std::sin(n) - b.side / 2;  // centre -> face
+        // The box centre in base_link (x ahead, y left) and the yaw to the face, by odometry; the upper cam's last
+        // gap when it has one (2026-11-10: the distance after the dock, for the operator).
+        const auto &q = odom.value.pose.pose.orientation;
+        const double yaw = std::atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z));
+        const double cx = std::cos(yaw) * (b.x - o.x) + std::sin(yaw) * (b.y - o.y);
+        const double cy = -std::sin(yaw) * (b.x - o.x) + std::cos(yaw) * (b.y - o.y);
+        const double yaw_err = std::remainder(yaw - (n + M_PI), 2 * M_PI);
+        char cam[80] = "";
+        const auto &c = box_observation.value;
+        if (box_observation.valid && c.source == "uppercam" && c.valid)
+          std::snprintf(cam, sizeof(cam), " | upper cam gap %.1f mm", c.gap_m * 1000);
         std::snprintf(t, sizeof(t), "[box %s] END %s | %.1f mm from the face goal %s | box face %.1f mm from the "
-                      "robot centre, %.1f mm from the front (target gap %.0f mm)", step->box.c_str(), how.c_str(),
+                      "robot centre, %.1f mm from the front (target gap %.0f mm)%s | box centre in base_link "
+                      "x %.1f y %+.1f mm, yaw %+.2f deg", step->box.c_str(), how.c_str(),
                       std::hypot(o.x - gx, o.y - gy) * 1000, xy(gx, gy).c_str(), face * 1000,
                       (face - config.box.front_face_x) * 1000,
-                      (camera_target ? config.box.camera_final_gap : config.box.gap) * 1000);
+                      (camera_target ? config.box.camera_final_gap : config.box.gap) * 1000, cam,
+                      cx * 1000, cy * 1000, yaw_err * 180 / M_PI);
       } else {
         std::snprintf(t, sizeof(t), "[box %s] END %s | box centre %s %.3f m from the robot", step->box.c_str(),
                       how.c_str(), xy(b.x, b.y).c_str(), std::hypot(o.x - b.x, o.y - b.y));
@@ -804,6 +825,7 @@ struct PlanningMaster::Impl
     }
     void request_box_observation(const std::string &source, double now) {
       box_request = BoxObservationRequest{};
+      lidar_samples.clear();
       box_request.header.frame_id = config.path.map_frame; box_request.header.stamp = node.now();
       box_request.request_id = ++next_id; box_request.source = source; box_request.box_id = step->box;
       const auto b = box_seen.value_or(box_target(step->box));
@@ -847,11 +869,52 @@ struct PlanningMaster::Impl
         config.box.camera_timeout;
       return box_observation.fresh(now, timeout) && is_fresh_input(box_observation.value.header, timeout);
     }
+    // Median of LiDAR observations: gap, yaw (about the first) and the box position; the position from only the
+    // scans that saw both face ends when at least half did (face_centre_observed then), else from all.
+    static BoxObservation median_observation(const std::vector<BoxObservation> &all) {
+      const auto median = [](std::vector<double> v) {
+        std::sort(v.begin(), v.end()); const std::size_t k = v.size() / 2;
+        return v.size() % 2 ? v[k] : (v[k - 1] + v[k]) / 2;
+      };
+      const auto yaw_of = [](const BoxObservation &o) {
+        const auto &q = o.box_pose.orientation;
+        return std::atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z));
+      };
+      std::vector<const BoxObservation *> seen;
+      for (const auto &o : all) if (o.face_centre_observed) seen.push_back(&o);
+      const bool centre = 2 * seen.size() >= all.size();
+      if (!centre) {seen.clear(); for (const auto &o : all) seen.push_back(&o);}
+      std::vector<double> x, y, gap, yaw;
+      const double yaw0 = yaw_of(all.front());
+      for (const auto *o : seen) {x.push_back(o->box_pose.position.x); y.push_back(o->box_pose.position.y);}
+      for (const auto &o : all) {gap.push_back(o.gap_m); yaw.push_back(yaw0 + std::remainder(yaw_of(o) - yaw0, 2 * M_PI));}
+      BoxObservation m = all.back();
+      m.box_pose.position.x = median(x); m.box_pose.position.y = median(y); m.gap_m = median(gap);
+      const double w = median(yaw);
+      m.box_pose.orientation.x = m.box_pose.orientation.y = 0;
+      m.box_pose.orientation.z = std::sin(w / 2); m.box_pose.orientation.w = std::cos(w / 2);
+      m.face_centre_observed = centre;
+      return m;
+    }
     BoxTarget observed_box(const BoxObservation &o, double gap) const {
       auto b = box_target(step->box);
-      b.x = o.box_pose.position.x; b.y = o.box_pose.position.y;
       const auto &q = o.box_pose.orientation;
-      b.yaw = std::atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z));
+      const double seen_yaw = std::atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z));
+      if (!config.box.yaw_from_map) {
+        b.x = o.box_pose.position.x; b.y = o.box_pose.position.y; b.yaw = seen_yaw;
+      } else {
+        // The boxes sit square to the map (planning.yaml): its yaw, to the nearest quarter turn of the one seen
+        // (2026-11-10: the LiDAR yaw of one box still varied 175.6-186.4 deg over four docks, the dock line with
+        // it). From the LiDAR only the distance along the approached face's normal; along the face too only when
+        // both face ends were seen (face_centre_observed), else the map's (every dock so far: not seen).
+        const double known = b.yaw;
+        b.yaw = known + std::round(std::remainder(seen_yaw - known, 2 * M_PI) / (M_PI / 2)) * (M_PI / 2);
+        const double n = face_normal(b), nx = std::cos(n), ny = std::sin(n);
+        const double dx = o.box_pose.position.x - b.x, dy = o.box_pose.position.y - b.y;
+        const double along_normal = dx * nx + dy * ny, along_face = -dx * ny + dy * nx;
+        const double face = o.face_centre_observed ? along_face : 0.0;
+        b.x += along_normal * nx - face * ny; b.y += along_normal * ny + face * nx;
+      }
       b.standoff = config.box.front_face_x + gap;
       return b;
     }
@@ -871,6 +934,22 @@ struct PlanningMaster::Impl
             std::abs(std::atan2(lateral, forward)) > half_fov) return false;
       }
       return true;
+    }
+    // Odometry travel along heading [rad, map] from stamp t [s] to the newest odometry; the pose at t is interpolated
+    // between the odometry samples around it. Empty when t is older than odom_trail (or there is none).
+    std::optional<double> travel_since(double t, double heading) const {
+      if (odom_trail.empty() || !std::isfinite(t) || t < odom_trail.front()[0]) return std::nullopt;
+      const auto &last = odom_trail.back();
+      double x = last[1], y = last[2];
+      for (std::size_t i = 1; i < odom_trail.size(); ++i) {
+        const auto &a = odom_trail[i - 1], &b = odom_trail[i];
+        if (t <= b[0]) {
+          const double k = (t - a[0]) / (b[0] - a[0]);
+          x = a[1] + k * (b[1] - a[1]); y = a[2] + k * (b[2] - a[2]);
+          break;
+        }
+      }
+      return (last[1] - x) * std::cos(heading) + (last[2] - y) * std::sin(heading);
     }
     bool camera_path_alignment(double now, bool final = false) const {
       if (!box_seen || !box_face || !odom.fresh(now, config.odom_timeout_s) ||
@@ -995,11 +1074,28 @@ struct PlanningMaster::Impl
           const auto &o = box_observation.value;
           const double taken = o.header.stamp.sec + o.header.stamp.nanosec * 1e-9;
           const double age = std::max(0.0, node.now().seconds() - taken);
-          const double gap_now = o.gap_m - config.box.camera_speed * age;  // travel since the frame was taken
+          // Travel since the frame was taken, measured by the odometry (2026-11-10; was camera_speed x age, wrong
+          // whenever the dock was not at exactly camera_speed). No odometry that old: the old estimate.
+          const auto moved = travel_since(taken, face_normal(*box_seen) + M_PI);
+          const double travel = moved ? *moved : config.box.camera_speed * age;
+          const double gap_now = o.gap_m - travel;
           if (gap_now <= config.box.camera_final_gap + config.box.camera_gap_tolerance) {
+            char text[200];
+            std::snprintf(text, sizeof(text), "[box %s] 4/5 upper cam %.1f mm (frame %.0f ms old, moved %.1f mm %s, "
+                          "now ~%.1f mm): stop", step->box.c_str(), o.gap_m * 1000, age * 1000, travel * 1000,
+                          moved ? "by odom" : "assumed", gap_now * 1000);
+            say(text); camera_stop(BoxPhase::FinalStop, now); return;
+          }
+        }
+        if (approach && odom.fresh(now, config.odom_timeout_s)) {
+          // The dock path runs on into the box: dock_overrun past the face goal by odometry stops it anyway.
+          const double heading = face_normal(*box_seen) + M_PI;
+          const auto &p = odom.value.pose.pose.position, &g = approach->goal.position;
+          const double past = (p.x - g.x) * std::cos(heading) + (p.y - g.y) * std::sin(heading);
+          if (past >= config.box.dock_overrun) {
             char text[160];
-            std::snprintf(text, sizeof(text), "[box %s] 4/5 upper cam %.1f mm (frame %.0f ms old, now ~%.1f mm): stop",
-                          step->box.c_str(), o.gap_m * 1000, age * 1000, gap_now * 1000);
+            std::snprintf(text, sizeof(text), "[box %s] 4/5 %.1f mm past the face goal by odometry before the upper cam "
+                          "trigger: stop, the upper cam checks", step->box.c_str(), past * 1000);
             say(text); camera_stop(BoxPhase::FinalStop, now); return;
           }
         }
@@ -1039,7 +1135,22 @@ struct PlanningMaster::Impl
         }
         if (config.box.camera_only_longitudinal) {
           // The LiDAR box pose only makes the dock line, to camera_final_gap; its gap decides nothing (user, 2026-11-09).
-          box_seen = observed_box(o, config.box.camera_final_gap); box_phase = BoxPhase::LidarRelease; camera_stop_at = now;
+          // The median of the scans over lidar_window_s (2026-11-10: one scan's box centre varies ~4 mm, and the
+          // face ends are found in about three scans of four).
+          if (now - box_request_at < config.box.settle_s + config.box.lidar_window_s ||
+              lidar_samples.size() < 3) return;
+          const auto m = median_observation(lidar_samples);
+          {
+            const auto &q = m.box_pose.orientation;
+            char text[220];
+            std::snprintf(text, sizeof(text), "[box %s] 2/5 LiDAR, median of %zu scans: box %s, face normal %.1f deg, "
+                          "centre along the face %s", step->box.c_str(), lidar_samples.size(),
+                          xy(m.box_pose.position.x, m.box_pose.position.y).c_str(),
+                          std::atan2(2 * q.w * q.z, 1 - 2 * q.z * q.z) * 180 / M_PI,
+                          m.face_centre_observed ? "measured (both face ends seen)" : "from the expected box (ends not seen)");
+            say(text);
+          }
+          box_seen = observed_box(m, config.box.camera_final_gap); box_phase = BoxPhase::LidarRelease; camera_stop_at = now;
           return;
         }
         if (o.gap_m <= config.box.handoff_gap) {fail("lidar handoff gap already reached"); return;}
@@ -1097,7 +1208,8 @@ struct PlanningMaster::Impl
     // The dock: the face normal itself, from the point on it nearest the robot to the face goal of the box as
     // perceived, at dock_speed; control turns toward its lookahead point first (yaw_tolerance), pulls the robot onto
     // the line (the target stays lookahead ahead past the goal) and arrives within dock_goal_tolerance along it.
-    // A new task. False when the line is blocked.
+    // Trigger mode (camera_only_longitudinal): a curve onto the normal, through the goal into the box (the upper
+    // cam, or dock_overrun by odometry, stops it). A new task. False when the line is blocked.
     bool send_dock(double now) {
       const auto &b = *box_seen;
       const double normal = face_normal(b);
@@ -1105,38 +1217,80 @@ struct PlanningMaster::Impl
       const double gx = b.x + reach * std::cos(normal), gy = b.y + reach * std::sin(normal);
       const auto &o = odom.value.pose.pose.position;
       const double along = std::max((gx - o.x) * ux + (gy - o.y) * uy, 0.02);  // robot -> goal along the normal
-      std::vector<std::pair<double, double>> corners{{gx - along * ux, gy - along * uy}, {gx, gy}};
       Pose goal; goal.header.frame_id = config.path.map_frame; goal.header.stamp = node.now();
       goal.pose.position.x = gx; goal.pose.position.y = gy;
       goal.pose.orientation.z = std::sin(heading / 2); goal.pose.orientation.w = std::cos(heading / 2);
       Path path; path.header = goal.header;
-      for (std::size_t k = 1; k < corners.size(); ++k) {
-        const auto [ax, ay] = corners[k - 1]; const auto [bx, by] = corners[k];
-        const int n = std::max(1, static_cast<int>(std::ceil(std::hypot(bx - ax, by - ay) / 0.02)));
-        for (int i = (k == 1 ? 0 : 1); i <= n; ++i) {
-          Pose p = goal; p.pose.position.x = ax + (bx - ax) * i / n; p.pose.position.y = ay + (by - ay) * i / n;
-          path.poses.push_back(p);
+      const auto add = [&path, &goal](double x, double y, double yaw) {
+        Pose p = goal; p.pose.position.x = x; p.pose.position.y = y;
+        p.pose.orientation.z = std::sin(yaw / 2); p.pose.orientation.w = std::cos(yaw / 2);
+        path.poses.push_back(p);
+      };
+      const bool trigger = config.box.camera_only_longitudinal && box_in(BoxPhase::CameraDock);
+      std::size_t goal_index = 0;  // the sample at the face goal
+      if (trigger) {
+        // From the robot's pose a cubic Hermite curve onto the normal dock_straight before the goal (tangents along
+        // the robot's heading and the normal, chord long), the normal through the goal, dock_extend past it. Closer
+        // than dock_straight already: the normal from the robot's projection on it.
+        const auto &q = odom.value.pose.pose.orientation;
+        const double yaw = std::atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z));
+        const double straight = std::min(config.box.dock_straight, along);
+        const double mx = gx - straight * ux, my = gy - straight * uy;
+        const double chord = std::hypot(mx - o.x, my - o.y);
+        if (along > config.box.dock_straight + 0.02 && chord > 0.02) {
+          const int n = std::max(2, static_cast<int>(std::ceil(chord / 0.01)));
+          const double t0x = chord * std::cos(yaw), t0y = chord * std::sin(yaw), t1x = chord * ux, t1y = chord * uy;
+          for (int i = 0; i < n; ++i) {
+            const double t = static_cast<double>(i) / n, t2 = t * t, t3 = t2 * t;
+            const double h00 = 2 * t3 - 3 * t2 + 1, h10 = t3 - 2 * t2 + t, h01 = -2 * t3 + 3 * t2, h11 = t3 - t2;
+            const double d00 = 6 * t2 - 6 * t, d10 = 3 * t2 - 4 * t + 1, d01 = -6 * t2 + 6 * t, d11 = 3 * t2 - 2 * t;
+            add(h00 * o.x + h10 * t0x + h01 * mx + h11 * t1x, h00 * o.y + h10 * t0y + h01 * my + h11 * t1y,
+                std::atan2(d00 * o.y + d10 * t0y + d01 * my + d11 * t1y, d00 * o.x + d10 * t0x + d01 * mx + d11 * t1x));
+          }
         }
+        // Along the normal from -straight (or the robot's projection) through the goal (s = 0) to dock_extend.
+        const double from = path.poses.empty() ? -std::max(along, 0.02) : -straight;
+        const int before = std::max(1, static_cast<int>(std::ceil(-from / 0.01)));
+        const int after = std::max(1, static_cast<int>(std::ceil(config.box.dock_extend / 0.01)));
+        for (int i = 0; i < before; ++i) add(gx + from * (1.0 - static_cast<double>(i) / before) * ux,
+                                             gy + from * (1.0 - static_cast<double>(i) / before) * uy, heading);
+        goal_index = path.poses.size();
+        for (int i = 0; i <= after; ++i) {
+          const double s = config.box.dock_extend * i / after;
+          add(gx + s * ux, gy + s * uy, heading);
+        }
+      } else {
+        std::vector<std::pair<double, double>> corners{{gx - along * ux, gy - along * uy}, {gx, gy}};
+        for (std::size_t k = 1; k < corners.size(); ++k) {
+          const auto [ax, ay] = corners[k - 1]; const auto [bx, by] = corners[k];
+          const int n = std::max(1, static_cast<int>(std::ceil(std::hypot(bx - ax, by - ay) / 0.02)));
+          for (int i = (k == 1 ? 0 : 1); i <= n; ++i) add(ax + (bx - ax) * i / n, ay + (by - ay) * i / n, heading);
+        }
+        goal_index = path.poses.size() - 1;
       }
-      std::vector<double> speeds(path.poses.size());
-      double left = 0;
-      for (std::size_t i = path.poses.size(); i-- > 0;) {  // slow down at a_lon_max to v_min at the goal
-        if (i + 1 < path.poses.size()) {
-          const auto &a = path.poses[i].pose.position, &c = path.poses[i + 1].pose.position;
-          left += std::hypot(c.x - a.x, c.y - a.y);
-        }
+      // Arc length from each sample to the face goal (negative past it): the speed limits.
+      std::vector<double> arc(path.poses.size(), 0.0), speeds(path.poses.size());
+      for (std::size_t i = 1; i < path.poses.size(); ++i) {
+        const auto &a = path.poses[i - 1].pose.position, &c = path.poses[i].pose.position;
+        arc[i] = arc[i - 1] + std::hypot(c.x - a.x, c.y - a.y);
+      }
+      for (std::size_t i = 0; i < path.poses.size(); ++i) {
+        const double left = std::max(arc[goal_index] - arc[i], 0.0);
         const double limit = box_in(BoxPhase::CameraDock) ? config.box.camera_speed : config.box.dock_speed;
         speeds[i] = std::clamp(std::sqrt(2 * config.path.a_lon_max * left), std::min(config.path.v_min, limit), limit);
-        if (config.box.camera_only_longitudinal && box_in(BoxPhase::CameraDock)) {
-          // Fast until camera_slow_gap before the face (the line ends at camera_final_gap), camera_speed after it.
+        if (trigger) {
+          // Fast until camera_slow_gap before the face (the goal is at camera_final_gap), down to camera_speed at
+          // a_lon_max, camera_speed from there on and past the goal.
           const double slow_zone = config.box.camera_slow_gap - config.box.camera_final_gap;
           const double v = config.box.camera_speed;
           speeds[i] = left <= slow_zone ? v : std::min(config.box.camera_fast_speed,
             std::sqrt(v * v + 2 * config.path.a_lon_max * (left - slow_zone)));
         }
       }
+      // The collision check stops at the goal: the extension runs into the box on purpose.
+      Path checked = path; checked.poses.resize(goal_index + 1);
       const BoxApproach dock{b, goal.pose};
-      if (!path_planner.collision_free(path, obstacles(now), &dock)) {
+      if (!path_planner.collision_free(checked, obstacles(now), &dock)) {
         box_blocked_by = blocker(path, now);
         RCLCPP_ERROR(node.get_logger(), "[DOCK PATH BLOCKED] box=%s phase=%d goal=(%.3f,%.3f) box_seen=(%.3f,%.3f) blocked_by=%s",
                      step ? step->box.c_str() : "", static_cast<int>(box_phase), gx, gy, b.x, b.y, box_blocked_by.c_str());
@@ -1146,11 +1300,12 @@ struct PlanningMaster::Impl
       if (!config.box.camera_enabled) box_phase = BoxPhase::Dock;
       {
         const auto &a = path.poses.front().pose.position;
-        char t[160];
+        char t[240];
         if (config.box.camera_only_longitudinal && box_in(BoxPhase::CameraDock))
-          std::snprintf(t, sizeof(t), "[box %s] 3/5 dock: straight %.2f m to %s, %.2f m/s, %.2f m/s from %.0f mm",
-                        step->box.c_str(), std::hypot(gx - a.x, gy - a.y), xy(gx, gy).c_str(), config.box.camera_fast_speed,
-                        config.box.camera_speed, config.box.camera_slow_gap * 1000);
+          std::snprintf(t, sizeof(t), "[box %s] 3/5 dock: path %.2f m onto the face normal to %s (+%.2f m into the box), "
+                        "%.2f m/s, %.2f m/s from %.0f mm; the upper cam stops it", step->box.c_str(),
+                        std::hypot(gx - a.x, gy - a.y), xy(gx, gy).c_str(), config.box.dock_extend,
+                        config.box.camera_fast_speed, config.box.camera_speed, config.box.camera_slow_gap * 1000);
         else
         std::snprintf(t, sizeof(t), "[box %s] 3/5 dock: turn square, then straight %.2f m at %.2f m/s to %s",
                       step->box.c_str(), std::hypot(gx - a.x, gy - a.y), config.box.dock_speed, xy(gx, gy).c_str());
@@ -1280,6 +1435,16 @@ struct PlanningMaster::Impl
       }
       Path rest = active_path;
       rest.poses.erase(rest.poses.begin(), rest.poses.begin() + static_cast<std::ptrdiff_t>(nearest));
+      if (approach && rest.poses.size() > 1) {
+        // A trigger mode dock path runs on into the box past its face goal: only up to the goal is checked.
+        const auto &g = approach->goal;
+        const double heading = 2 * std::atan2(g.orientation.z, g.orientation.w);
+        while (rest.poses.size() > 1) {
+          const auto &q = rest.poses.back().pose.position;
+          if ((q.x - g.position.x) * std::cos(heading) + (q.y - g.position.y) * std::sin(heading) <= 1e-6) break;
+          rest.poses.pop_back();
+        }
+      }
       return path_planner.collision_free(rest, obstacles(now), approach ? &*approach : nullptr);
     }
     // Nearest puck (base_link) of one observation message -> graspable check and its debounce.
@@ -1506,6 +1671,9 @@ void PlanningMaster::connect()
       p.box_last_observation_stamp = stamp;
       p.box_had_observation = true;
       p.box_observation.observe(msg, seconds());
+      if (p.box_phase == PlanningMaster::Impl::BoxPhase::LidarPerceive &&
+          stamp >= requested + static_cast<int64_t>(std::llround(p.config.box.settle_s * 1e9)))
+        p.lidar_samples.push_back(msg);
     });
     // The continuous camera provides only a longitudinal gap in base_link.
     // Its acquisition stamp, never a transformed/request-response stamp, gates use.
@@ -1625,6 +1793,10 @@ void PlanningMaster::connect()
             p.is_fresh_input(msg.header, p.config.odom_timeout_s))
         {
             p.odom.observe(msg, seconds());
+            const double t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9;
+            if (!p.odom_trail.empty() && t <= p.odom_trail.back()[0]) p.odom_trail.clear();  // time went back
+            p.odom_trail.push_back({t, msg.pose.pose.position.x, msg.pose.pose.position.y});
+            while (p.odom_trail.front()[0] < t - p.odom_trail_s) p.odom_trail.pop_front();
         }
     });
     p.subscribe<Joints>(p.config.joint_state_topic, [&p](const Joints &msg) {

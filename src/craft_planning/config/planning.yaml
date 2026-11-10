@@ -57,7 +57,14 @@ planning_master:
       camera_only_longitudinal: true
       camera_slow_gap: 0.100   # [m] trigger mode: from here (LiDAR line) to the end at camera_speed (user, 2026-11-09)
       camera_fast_speed: 0.10  # [m/s] trigger mode: the dock before camera_slow_gap, slowing at a_lon_max
-      camera_final_gap: 0.010
+      # Trigger mode dock path (user, 2026-11-10; was the bare normal from the robot's projection on it): a curve from
+      # the robot's pose onto the face normal, on the normal dock_straight before the face goal, and on through the
+      # goal dock_extend into the box, so the pursuit target never runs off the path end; the upper cam stops it.
+      # dock_overrun past the goal by odometry stops it anyway (the camera never triggered).
+      dock_straight: 0.25   # [m]
+      dock_extend: 0.15     # [m]
+      dock_overrun: 0.005   # [m]
+      camera_final_gap: 0.020  # [m] (user 2026-11-10, was 0.010: touched the box with the upper cam at ~16 mm; measure the real gap at 20)
       camera_gap_tolerance: 0.003
       handoff_gap: 0.100  # [m] experimental stopped LiDAR-to-camera handoff
       source_gap_diff: 0.020
@@ -84,6 +91,12 @@ planning_master:
       # pose (/perception/box/pose, box_detection_timeout_s in rates.yaml); the dock and the check go by it. Stage
       # points sit 0.43-0.58 m from the face (LiDAR front): ~20 points on a face at the LDS-03's 1 deg.
       max_offset: 0.5     # [m] a perceived box farther than this from the known position is another box: ignored
+      # The perceived box (2026-11-10): true = the map's yaw (square, below) to the nearest quarter turn of the LiDAR's,
+      # the LiDAR's distance along the approached face's normal, and its position along the face only when both face
+      # ends were seen (face_centre_observed; never so far). Four docks of L1 saw its yaw anywhere in 175.6-186.4 deg
+      # and the dock line followed it: 4-6 deg and ~3 cm off at the face. false = the LiDAR pose as it is.
+      yaw_from_map: false  # off (user 2026-11-10): the boxes may not be square to the map
+      lidar_window_s: 1.0  # [s] after settle_s at the stage point: the median of the LiDAR scans in it makes the dock line
       # At the face goal (correction parking): stand still settle_s (camera shake, the gap filter), perceive the box
       # again and check the robot against that face's goal. Within the tolerances the step is done; else back out
       # reverse_distance straight along the approach at reverse_speed and approach the same face again with the box
@@ -96,7 +109,7 @@ planning_master:
       stage_lead: 0.20           # [m]
       stage_goal_tolerance: 0.03 # [m] the stage drive's arrival (control's 0.10 left the dock 6 cm off the normal)
       dock_speed: 0.02           # [m/s]
-      dock_lookahead: 0.020      # [m] pursuit target from front reference during the low-speed dock
+      dock_lookahead: 0.040      # [m] pursuit target from front reference during the dock (user 2026-11-10, was 0.020: 48 mm off swung it to -16 deg)
       dock_goal_tolerance: 0.01  # [m]
       settle_s: 0.5
       lateral_tolerance: 0.020   # [m]

@@ -36,10 +36,24 @@ def test_observe_known_face_and_unclipped_raw_beams(offset,roll):
     if offset==.06: assert abs(fit['box_center_map'][1]-offset)>.05
 
 
-def test_zero_return_is_not_background_evidence():
+def edge_after(h):
+    # The face is around beam 0, so its run wraps 399 -> 0: the beam just past its end is after the low block.
+    ids=np.flatnonzero(h)
+    return ids[ids<len(h)//2].max()+1
+
+
+def test_one_zero_at_the_edge_is_skipped():
+    # The LDS-03 drops the beam straddling an edge (2026-11-10 docks): the beam past it is the evidence.
     def change(r,a,h):
-        ends=np.flatnonzero(h)
-        r[(ends[-1]+1)%len(r)]=0
+        r[edge_after(h)]=0
+    out,_=run(offset=.034,alter=change)
+    assert out['ok'],out
+    assert abs(out['box_center_map'][1]-.034)<.003
+
+
+def test_two_zeros_are_not_background_evidence():
+    def change(r,a,h):
+        e=edge_after(h);r[e]=0;r[e+1]=0
     out,_=run(offset=.034,alter=change)
     assert not out['ok']
 
@@ -58,7 +72,7 @@ def test_occlusion_rejected():
 
 def test_front_obstacle_at_edge_rejected():
     def change(r,a,h):
-        ids=np.flatnonzero(h);r[(ids[-1]+1)%len(r)]=.1
+        r[edge_after(h)]=.1
     out,_=run(offset=.034,alter=change)
     assert not out['ok']
 

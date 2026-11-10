@@ -171,6 +171,126 @@ def box_top(d, K, up, cam_h, rng, roi_from=0.5, max_ahead=None, prm=None):
     return top, cen, n, best[2], np.abs((X - cen) @ n).std()
 
 
+def _window(rows, cols, margin, shape, row_min=0):
+    """Rows/cols slices of the bounding box of (rows, cols) grown by margin, clipped to [row_min, H) x [0, W)."""
+    return (slice(max(int(rows.min()) - margin, row_min), min(int(rows.max()) + margin + 1, shape[0])),
+            slice(max(int(cols.min()) - margin, 0), min(int(cols.max()) + margin + 1, shape[1])))
+
+
+def box_top_cropped(d, K, up, cam_h, rng, roi_from=0.5, max_ahead=None, prm=None):
+    """box_top with the morphology, labelling and refit done on windows around the box instead of whole images.
+
+    Same output as box_top, bit for bit (uppercam_profile.py --compare): every window keeps a margin wider than the
+    reach of its morphology, so a window border is either the image border box_top sees too or a ring of zeros
+    the operation never reaches. The blob steps run on the lower-half ROI as box_top does (its upper border is a
+    real border there); the refit and the refine run in full-image rows as box_top does after padding (rows above
+    the ROI are zero / invalid, not a border). (2026-11-10: box_top was 70 of the 89 ms per frame on the Jetson.)
+    """
+    prm = prm or RANSAC
+    H, w = d.shape
+    r0 = int(H * roi_from)
+    d = d[r0:]
+    K = K.copy(); K[1, 2] -= r0
+    h = d.shape[0]
+    fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
+    vv, uu = np.mgrid[0:h, 0:w]
+    P = np.dstack([(uu - cx) * d / fx, (vv - cy) * d / fy, d])
+    valid = d > 0
+    z = np.where(valid, cam_h + P @ up, np.nan)
+    cand = valid & (np.abs(z - BOX_H) < prm['band'])
+    if max_ahead is not None:
+        fwd = np.array([0, 0, 1.0]) - up[2] * up; fwd /= np.linalg.norm(fwd)
+        cand &= (P @ fwd) < max_ahead
+    area_px = np.where(valid, (d / fx) * (d / fy), 0.0)
+    idx = np.argwhere(cand)
+    if len(idx) < 300:
+        raise RuntimeError('no points near the box-top height (check --cam-height / --cam-pitch)')
+    pts = P[idx[:, 0], idx[:, 1]]
+    samp = pts[rng.choice(len(pts), min(4000, len(pts)), replace=False)]
+    cache_key = (len(samp), prm['iters'], repr(rng.bit_generator.state))
+    cached = _HYPOTHESIS_CACHE.get(cache_key)
+    if cached is None:
+        indices = np.array([rng.choice(len(samp), 3, replace=False) for _ in range(prm['iters'])])
+        if len(_HYPOTHESIS_CACHE) >= 128:
+            _HYPOTHESIS_CACHE.pop(next(iter(_HYPOTHESIS_CACHE)))
+        _HYPOTHESIS_CACHE[cache_key] = (indices, copy.deepcopy(rng.bit_generator.state))
+    else:
+        indices, state_after = cached
+        rng.bit_generator.state = copy.deepcopy(state_after)
+    a, b, c = (samp[indices[:, i]] for i in range(3))
+    normals = np.cross(b - a, c - a)
+    lengths = np.linalg.norm(normals, axis=1)
+    ok = lengths >= 1e-9
+    normals[ok] /= lengths[ok, None]
+    flipped = (normals @ up) < 0
+    normals[flipped] *= -1
+    ok &= np.degrees(np.arccos(np.clip(normals @ up, -1, 1))) <= prm['tilt_deg']
+    ok &= np.abs(cam_h + a @ up - BOX_H) <= prm['height_tol']
+    selected = np.flatnonzero(ok)
+    hyps = []
+    for start in range(0, len(selected), 64):
+        ix = selected[start:start + 64]
+        ns = normals[ix]
+        residuals = samp @ ns.T - np.einsum('ij,ij->i', a[ix], ns)
+        scores = np.sum(np.abs(residuals) < prm['inlier'], axis=0)
+        hyps.extend((int(score), a[i], normals[i]) for score, i in zip(scores, ix))
+    hyps.sort(key=lambda t: -t[0])
+    best = None
+    for _, a, n in hyps[:6]:
+        inl = np.abs((pts - a) @ n) < prm['inlier']
+        if not inl.any():
+            continue
+        rs, cs = _window(idx[inl, 0], idx[inl, 1], 4, (h, w))        # open (2 x cross) stays inside the inliers
+        on = np.zeros((rs.stop - rs.start, cs.stop - cs.start), bool)
+        on[idx[inl, 0] - rs.start, idx[inl, 1] - cs.start] = True
+        lab, k = _label(cv2.morphologyEx(on.astype(np.uint8), cv2.MORPH_OPEN, _CROSS, iterations=2, borderType=cv2.BORDER_CONSTANT, borderValue=0).astype(bool))
+        if not k:
+            continue
+        sizes = np.bincount(lab.ravel(), minlength=k + 1)[1:]
+        blob = lab == (int(np.argmax(sizes)) + 1)
+        Pb = P[rs, cs][blob]
+        cos = max(abs(n @ (Pb.mean(0) / np.linalg.norm(Pb.mean(0)))), 0.2)
+        area = area_px[rs, cs][blob].sum() / cos
+        if prm['area'][0] * SIDE ** 2 < area < prm['area'][1] * SIDE ** 2 and (best is None or blob.sum() > best[0]):
+            best = (blob.sum(), blob, area, rs, cs)
+    if best is None:
+        raise RuntimeError('no level blob of box-top size at box-top height')
+    br_, bc_ = np.nonzero(best[1])
+    rs, cs = _window(br_ + best[3].start, bc_ + best[4].start, 8, (h, w))  # close (3 x cross) + hole fill
+    blob = np.zeros((rs.stop - rs.start, cs.stop - cs.start), np.uint8)
+    blob[br_ + best[3].start - rs.start, bc_ + best[4].start - cs.start] = 1
+    top_w = _fill_holes(cv2.morphologyEx(blob, cv2.MORPH_CLOSE, _CROSS, iterations=3, borderType=cv2.BORDER_CONSTANT, borderValue=0).astype(bool))
+    tr, tc = np.nonzero(top_w); tr = tr + rs.start + r0; tc = tc + cs.start  # full-image rows from here on
+
+    def full_window(margin):
+        """Window in full-image rows; rows above the ROI come back zero / invalid, as in box_top's padding."""
+        rows, cols = _window(tr, tc, margin, (H, w))
+        lo = max(rows.start, r0)
+        Pw = np.zeros((rows.stop - rows.start, cols.stop - cols.start, 3)); Pw[lo - rows.start:] = P[lo - r0:rows.stop - r0, cols]
+        vw = np.zeros(Pw.shape[:2], bool); vw[lo - rows.start:] = valid[lo - r0:rows.stop - r0, cols]
+        tw = np.zeros(Pw.shape[:2], bool); tw[tr - rows.start, tc - cols.start] = True
+        return rows, cols, Pw, vw, tw
+
+    rows, cols, Pw, vw, tw = full_window(10)                         # erode 8 x cross
+    inner = cv2.erode(tw.astype(np.uint8), _CROSS, iterations=8, borderType=cv2.BORDER_CONSTANT, borderValue=0).astype(bool) & vw
+    X = Pw[inner]; cen = X.mean(0); n = np.linalg.svd(X - cen, full_matrices=False)[2][2]
+    for _ in range(3):
+        r = np.abs((X - cen) @ n); X = X[r < 3 * r.std() + 1e-4]; cen = X.mean(0); n = np.linalg.svd(X - cen, full_matrices=False)[2][2]
+    if n @ (-cen) < 0:
+        n = -n
+    if prm.get('refine'):
+        rows, cols, Pw, vw, tw = full_window(20)                     # dilate 15, then close 2 x cross + hole fill
+        hrel = np.where(vw, (Pw - cen) @ n, np.nan)
+        on = vw & (hrel > -prm.get('edge_drop', BOX_H / 2)) & (hrel < 0.02) & cv2.dilate(tw.astype(np.uint8), _CROSS, iterations=15, borderType=cv2.BORDER_CONSTANT, borderValue=0).astype(bool)
+        lab, k = _label(on)
+        ids = np.unique(lab[tw & (lab > 0)])
+        if len(ids):
+            sizes = np.bincount(lab.ravel())[ids]
+            tw = _fill_holes(cv2.morphologyEx((lab == ids[int(np.argmax(sizes))]).astype(np.uint8), cv2.MORPH_CLOSE, _CROSS, iterations=2, borderType=cv2.BORDER_CONSTANT, borderValue=0).astype(bool))
+    top = np.zeros((H, w), bool); top[rows, cols] = tw
+    return top, cen, n, best[2], np.abs((X - cen) @ n).std()
+
+
 def rectangle(top, K, cen, n):
     fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
     edge = top & ~ndimage.binary_erosion(top)

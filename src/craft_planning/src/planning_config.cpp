@@ -298,8 +298,13 @@ PlanningConfig load_planning_config(rclcpp::Node &node, const std::string &share
   config.missions = parse_missions(mission_file, config.path.map_frame, config.arm.base_frame);
   config.box.camera_enabled = p.param<bool>("box_approach.camera_enabled");
   config.box.camera_only_longitudinal = p.param<bool>("box_approach.camera_only_longitudinal");
+  config.box.yaw_from_map = p.param<bool>("box_approach.yaw_from_map");
+  config.box.lidar_window_s = p.positive_param("box_approach.lidar_window_s");
   config.box.camera_slow_gap = p.positive_param("box_approach.camera_slow_gap");
   config.box.camera_fast_speed = p.positive_param("box_approach.camera_fast_speed");
+  config.box.dock_straight = p.positive_param("box_approach.dock_straight");
+  config.box.dock_extend = p.positive_param("box_approach.dock_extend");
+  config.box.dock_overrun = p.positive_param("box_approach.dock_overrun");
   require(!config.box.camera_only_longitudinal || config.box.camera_enabled,
           "box_approach.camera_only_longitudinal needs camera_enabled");
   config.box.camera_final_gap = p.positive_param("box_approach.camera_final_gap");
