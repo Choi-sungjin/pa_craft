@@ -1,0 +1,129 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Cell Size: 0.5
+      Plane Cell Count: 20
+      Reference Frame: map
+    - Class: rviz_default_plugins/Map
+      Name: planning map
+      Enabled: true
+      Topic:
+        Value: /planning/map
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+        Depth: 1
+      Alpha: 0.8
+      Color Scheme: map
+    - Class: rviz_default_plugins/MarkerArray
+      Name: sim 박스·장애물·차체
+      Enabled: true
+      Topic:
+        Value: /sim/markers
+        Reliability Policy: Reliable
+        Depth: 5
+    - Class: rviz_default_plugins/LaserScan
+      Name: sim scan
+      Enabled: true
+      Topic:
+        Value: /lidar/merged
+        Reliability Policy: Best Effort
+        Depth: 5
+      Size (m): 0.02
+      Style: Flat Squares
+      Color Transformer: FlatColor
+      Color: 255; 60; 60
+      Decay Time: 0
+    - Class: rviz_default_plugins/PoseArray
+      Name: planning obstacles
+      Enabled: true
+      Topic:
+        Value: /perception/lidar/obstacle
+        Reliability Policy: Reliable
+        Depth: 5
+      Shape: Arrow (Flat)
+      Color: 0; 220; 220
+      Alpha: 1
+      Arrow Length: 0.05
+    - Class: rviz_default_plugins/Path
+      Name: control tracking path
+      Enabled: true
+      Topic:
+        Value: /control/tracking_path
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+        Depth: 10
+      Line Style: Billboards
+      Line Width: 0.015
+      Color: 255; 165; 0
+      Alpha: 1
+    - Class: rviz_default_plugins/Path
+      Name: driven trail
+      Enabled: true
+      Topic:
+        Value: /sim/trail
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+        Depth: 1
+      Line Style: Billboards
+      Line Width: 0.02
+      Color: 255; 210; 40
+      Alpha: 1
+    - Class: rviz_default_plugins/Pose
+      Name: approach goal
+      Enabled: true
+      Topic:
+        Value: /planning/approach_goal
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+        Depth: 1
+      Shape: Arrow
+      Color: 255; 75; 140
+      Shaft Length: 0.08
+      Shaft Radius: 0.008
+      Head Length: 0.03
+      Head Radius: 0.015
+    - Class: rviz_default_plugins/PointStamped
+      Name: lookahead point
+      Enabled: true
+      Topic:
+        Value: /control/lookahead_point
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+        Depth: 5
+      Color: 0; 255; 255
+      Alpha: 1
+      Radius: 0.015
+      History Length: 1
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: true
+      Show Names: false
+      Marker Scale: 0.3
+      Show Axes: true
+      Show Arrows: false
+      Frames:
+        All Enabled: true
+  Global Options:
+    Fixed Frame: map
+    Background Color: 48; 48; 48
+    Frame Rate: 30
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Measure
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Name: Current View
+      Scale: 110
+      X: 2.0
+      Y: 3.1
+    Saved: ~
+Window Geometry:
+  Width: 1200
+  Height: 950

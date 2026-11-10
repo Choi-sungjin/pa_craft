@@ -30,3 +30,6 @@ __pycache__/
 *.db3
 # nested CMake build trees
 tools/*/build/
+
+# craft_sim: ncnn 없는 PC 용 시뮬레이터 전용 작업공간
+/.sim_ws/
