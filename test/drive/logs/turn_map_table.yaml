@@ -1,0 +1,10 @@
+# turn_map.py fit: in-place yaw rate [rad/s] reached for D = wr - wl [rad/s], median of all
+# spots (seed 592441, spots 1, 2), made non-decreasing (PAVA). Invert with linear
+# interpolation: desired |yaw rate| -> D; below the first moving level the floor holds the robot.
+turn_map:
+  ccw:
+    delta: [0.5, 1, 1.5, 2, 3, 4, 5, 6, 8, 10, 12, 14]
+    omega: [0.0466, 0.0965, 0.1444, 0.1931, 0.3029, 0.3858, 0.4936, 0.5905, 0.7827, 0.9792, 1.1698, 1.3880]
+  cw:
+    delta: [0.5, 1, 1.5, 2, 3, 4, 5, 6, 8, 10, 12, 14]
+    omega: [0.0483, 0.0965, 0.1453, 0.1988, 0.2976, 0.3911, 0.4919, 0.5918, 0.7942, 0.9885, 1.1857, 1.3797]

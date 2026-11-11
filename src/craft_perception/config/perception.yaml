@@ -4,9 +4,90 @@ perception_master:
     # C++ keeps no duplicate defaults. Startup fails on a missing or mistyped key.
     executor_threads: 6
     max_input_age_s: 0.5
-    odometry_source_topic: /odometry/global  # robot_localization ekf_global (wheel + IMU + SLAM)
+    # ekf_local (wheel + IMU) in odom, moved to map via SLAM's map->odom. craft.launch.py overrides it:
+    # /odometry/local (localization:=slam) or ekf_global's /odometry/global in map (localization:=ekf).
+    odometry_source_topic: /odometry/local
     map_frame: map  # source already in map is relayed; other frames are moved here via TF
     tag_registry_file: config/tag_registry.yaml
+
+    # imu_processor: both chassis-fixed OpenCR IMUs (raw, /control/imu/{wheel_clock,lm_arm}) ->
+    # /perception/imu/data, the chassis yaw rate in base_link for robot_localization (ekf.yaml).
+    # Both boards are upright (board z = chassis up), so the yaw rate is gz minus its gyro offset,
+    # measured while the wheels stand still. Boards: 2018 OpenCR, MPU-9250.
+    imu:
+      enabled: true
+      output_frame: base_link
+      # Used whenever it is available; the other board is the backup while it is not (absent,
+      # imu_ok=0, not calibrated yet). The two are never mixed: a disagreement is only reported.
+      primary: wheel_clock         # wheel_clock | lm_arm
+      gyro_variance: 0.0001        # [(rad/s)^2] one board, ~0.01 rad/s std
+      calibration_samples: 100     # still samples before a board reports (~2 s at 50 Hz); spikes skipped
+      bias_tracking_gain: 0.002    # per still sample afterwards (~10 s time constant); 0 freezes
+      still_rate: 0.05             # [rad/s] above it a sample is never still; below it, wheels still -> 0
+      max_age_s: 0.1               # no accepted sample this recent: board unavailable (~5 samples at 50 Hz)
+      # Disagreement monitor (warning only): boards compared at the same time (each carried along its
+      # own last slope: they sample up to 20 ms apart) further apart than max_disagreement + ratio *
+      # |rate| for disagreement_samples outputs in a row. The ratio covers the chips' scale factor
+      # (+-3 % each, MPU-9250 datasheet: up to 6 % apart).
+      max_disagreement: 0.02       # [rad/s]
+      max_disagreement_ratio: 0.08
+      disagreement_samples: 3
+      # Frozen board (stuck chip or library): the raw gyro is a noisy 4-sample float mean, so a live
+      # sensor never repeats it exactly; this many identical samples in a row (0.2 s) make the board
+      # unavailable (backup takes over) until as many changing samples come back.
+      frozen_samples: 10
+      # Per-board spike filter, TurtleBot3 Waffle Pi limits (our driving profile is not set yet; raise
+      # these if control turns faster): max rotational velocity 1.82 rad/s (ROBOTIS e-manual) and
+      # acc_lim_theta 3.2 rad/s^2 (turtlebot3_navigation2 waffle_pi.yaml). A sample beyond max_yaw_rate,
+      # or one changing faster than max_yaw_accel * dt + jump_noise unless the next sample repeats it,
+      # is dropped. jump_noise: real 10/27 slip logs changed at most 0.084 rad/s between samples.
+      max_yaw_rate: 2.5            # [rad/s] 1.82 + margin
+      max_yaw_accel: 3.2           # [rad/s^2]
+      jump_noise: 0.1              # [rad/s]
+      # Wheels count as still below these /control/wheel/odom speeds: control's wheel_stop_tolerance
+      # 0.02 rad/s per wheel is 0.00066 m/s and 0.0046 rad/s for 0.033 m wheels 0.288 m apart.
+      wheel_still_linear: 0.001    # [m/s]
+      wheel_still_angular: 0.005   # [rad/s]
+
+    # Localization monitor, localization:=ekf only (craft.launch.py sets enabled). Publishes
+    # /perception/localization/state: ok | dead_reckoning | relocalize | lost; planning faults on lost.
+    localization:
+      enabled: false
+      rejection_sigma: 3.0         # SLAM pose vs ekf_global, Mahalanobis; same as ekf.yaml pose0
+      dead_reckoning_m: 0.3        # travel on IMU + wheels alone (SLAM rejected) before relocalizing
+      # SLAM and the EKF can be wrong together (slam_toolbox searches only near the odometry): every
+      # second the scan is scored against SLAM's map at the EKF pose; this many low scores (below
+      # relocalize.min_score) in a row count as SLAM rejected too.
+      misfit_checks: 2
+      # Wide scan-to-map match around ekf_global's pose on SLAM's own map (no external landmark).
+      # Success -> /perception/localization/relocalized into ekf_global (pose1); failure -> lost.
+      relocalize:
+        window_m: 0.3              # +-[m] in x and y
+        window_deg: 15.0           # +-[deg]
+        step_m: 0.02               # coarse grid, refined to a quarter
+        step_deg: 1.0
+        sigma_m: 0.05              # scan point score exp(-d^2 / 2 sigma^2), d = distance to the nearest wall
+        # Mean point score to accept a relocalization and below which a scan "misfits" the map. Sim
+        # (2026-10-29): normal driving 0.55-0.95 (median 0.85), pushed 20 cm 0.32-0.43, 60 cm 0.14-0.17.
+        # Thin margin: on the robot, read "scan-to-map score at the EKF pose" in the log and retune.
+        min_score: 0.5
+        max_points: 180            # scan points used
+        occupied_threshold: 65     # slam_toolbox map: 100 occupied, 0 free, -1 unknown
+        pose_variance: [0.0004, 0.0004, 0.0003]  # x, y [m^2], yaw [rad^2]: 2 cm, 2 cm, 1 deg
+      # While SLAM has been accepted for stable_s, map->odom yaw (what SLAM adds on top of the IMU) is
+      # the IMU's remaining error: its rate on straight segments corrects the bias, its share of a turn
+      # the scale, for the IMU board in use. Slow and capped so a SLAM error cannot steer the IMU far.
+      imu_learning:
+        stable_s: 3.0
+        bias_time_constant_s: 20.0
+        bias_limit: 0.005          # [rad/s] (~5 LSB; the startup calibration leaves far less)
+        scale_gain: 0.3            # share of one turn's scale error taken
+        scale_limit: 0.05          # MPU-9250 scale factor +-3 % (datasheet) + margin
+        min_turn: 0.5              # [rad] shorter turns do not update the scale
+        settle_s: 2.0              # after a turn, for SLAM to settle
+        straight_rate: 0.05        # [rad/s] below: straight (bias segments)
+        turn_rate: 0.2             # [rad/s] above: turning (scale segments)
+        min_bias_segment_s: 2.0
 
     d435:
       frame: camera_color_optical_frame
@@ -68,20 +149,83 @@ perception_master:
         lever_source: hsv
         lever_class_id: 5  # yolo_seg only: index of the lever class in c310.yolo.class_names
 
+    # LiDAR odometry (ScanOdometry, scan_relocalizer's matcher): each /lidar/merged scan is matched to a
+    # keyframe scan around the prediction (IMU turn + last LiDAR speed; never the wheels, which slip) ->
+    # /perception/lidar/odom, twist in base_link for ekf.yaml's lidar overlay. craft.launch.py lidar_odom
+    # sets enabled; give the same value to the infra and perception groups.
+    lidar_odometry:
+      enabled: false
+      # Scans at 10 Hz, max_v 0.26 m/s: 2.6 cm between scans, and the speed prediction is off by far less.
+      window_m: 0.08               # +-[m] around the prediction
+      window_deg: 3.0              # +-[deg]: the IMU predicts the turn (scale 0.999, test/gyro_scale)
+      step_m: 0.01                 # coarse grid, refined to a quarter (2.5 mm)
+      step_deg: 0.5                # refined to 0.125 deg
+      sigma_m: 0.03                # LDS-03 range noise ~1-2 cm plus the 2 cm keyframe cells
+      # Mean point score to accept a match (sim 2026-10-31: 0.6-1.0 on clean scans). Untested on the
+      # robot: read "LiDAR odometry score" in the log and retune. Below it the scan restarts the keyframe.
+      min_score: 0.4
+      max_points: 360              # of the 720 merged bins
+      grid_resolution_m: 0.02
+      grid_half_extent_m: 8.0      # merged ranges stop at 8 m
+      keyframe_m: 0.3              # new keyframe after this travel or turn: drift only grows per keyframe
+      keyframe_deg: 15.0
+      # vx, vy [(m/s)^2], vyaw [(rad/s)^2]. A match error of ~3 mm per scan at 10 Hz is 0.03 m/s; wheels
+      # (control.yaml wheel_vx_variance 0.0025) then weigh ~25 %. Initial values: check with
+      # test/drive/odom_trajectories.py. vyaw is published but the EKF takes yaw rate from the IMU.
+      twist_variance: [0.0009, 0.0009, 0.01]
+      odom_frame: odom
+      base_frame: base_link
+
     lidar:
       input_mode: raw  # raw: master calls merger; merged: external /lidar/merged input
       target_frame: base_link
       bins: 720
       range_max: 8.0
       max_age: 0.2  # maximum front/rear timestamp difference [s]
-      front_fov_deg: 200.0
-      rear_fov_deg: 200.0
-      fov_near_m: 0.30
+      # Each LiDAR keeps +-90 deg around its outward axis (front +x, rear -x); out of it nothing is kept
+      # (fov_near_m above range_max). Upside-down LiDARs low under the chassis see under it to the far
+      # end and hit the floor ~20 cm inward. Same as lidar_processor.launch.py (2026-10-31; was 200 / 0.30).
+      front_fov_deg: 180.0
+      rear_fov_deg: 180.0
+      fov_near_m: 10.0
       body_radius_m: 0.25
+      # base_link is the turning center (midway between the front and rear axles); the body filter
+      # stays on the body center (LiDAR midpoint), 12.75 mm ahead of it (2026-10-31, front LiDAR 155 mm
+      # ahead, LiDARs 284.5 mm apart; was 26 mm before the chassis change). Same as lidar_processor.launch.py.
+      body_center_x: 0.01275
+      # Floor ROI per LiDAR side (left/right in base_link), angles from the LiDAR's outward axis. Up to *_clear_deg
+      # everything is kept; beyond it up to 90 deg, step_deg bins keep points only within *_max_range_m of the
+      # LiDAR (the beams there dip to the floor). From the arena bags after the 2026-11-01 22:00 LiDAR rework
+      # (fov180_2359, pocket_2309, pocket_2248): floor starts where off-wall points exceed 3x the 0-45 deg level;
+      # clear = that angle - 5 deg, bins = 1st percentile floor range - 0.15 m. Cross-validated between the bags:
+      # removes ~75-90 % of floor points on an unseen bag, keeps 80-97 % of map-wall points (53-91 % at 55-90 deg).
+      # Flat-floor fit (floor_cal_0034): beams dip (cone 0.6 deg), mounts 1.65 deg outward up, 0.1-0.2 deg roll.
+      floor_roi:
+        enabled: true
+        step_deg: 5.0
+        front_left_clear_deg: 70.0
+        front_left_max_range_m: [0.48, 0.83, 0.88, 0.62]
+        front_right_clear_deg: 60.0
+        front_right_max_range_m: [1.32, 1.32, 1.35, 0.76, 0.68, 0.48]
+        rear_left_clear_deg: 65.0
+        rear_left_max_range_m: [0.70, 0.71, 0.56, 0.48, 0.45]
+        rear_right_clear_deg: 50.0
+        rear_right_max_range_m: [0.73, 0.60, 0.55, 0.58, 0.57, 0.50, 0.52, 0.46]
 
     # LidarPerception -> /lidar/merged + /perception/lidar/obstacle (PoseArray).
     # Preserve the scan timestamp/frame; skip NaN/Inf bins and points beyond 3 m.
-    lidar_obstacle: {max_range_m: 3.0, stride: 1}
+    lidar_obstacle:
+      max_range_m: 3.0
+      stride: 1
+      # Raw points (one per beam) -> points worth avoiding, judged in the map frame (2026-11-01: one noise point
+      # or a map wall seen 4 cm off made planning replan). Without map TF the raw points go out.
+      filter:
+        enabled: true
+        wall_margin_m: 0.06      # within this of an occupied/unknown map cell: a wall the map already has
+        cell_m: 0.05
+        persist_frames: 3        # the cell (or neighbor_cells around it) seen in this many frames in a row
+        neighbor_cells: 2        # 2 x 5 cm per frame at 10 Hz: movers up to ~1 m/s still persist
+        min_cluster_points: 3    # 8-connected kept cells with fewer points this frame are dropped
 
     # Master validates these and creates one timer per enabled task. Hz is an upper bound:
     # a task only runs on new input (consumers of d435_yolo are capped at its rate).

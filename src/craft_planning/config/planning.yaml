@@ -11,24 +11,52 @@ planning_master:
     tag_registry_file: config/tag_registry.yaml
     loop_hz: 20.0
     replan_period_s: 0.2
+    # While driving the rest of the segment is checked every replan_period_s. Blocked: pause at once, replan only
+    # if still blocked after block_wait_s (a passer-by clears and the same path resumes).
+    block_wait_s: 2.0
+    # STOP_TURN corners closer than this to the segment start do not end a segment (shorter than the arrival
+    # tolerance, it would "arrive" at once); 3 segments in a row ending where they started fault the run.
+    min_segment_m: 0.15
     # Acquisition age and steady-clock receive watchdogs are checked independently.
     odom_timeout_s: 0.5
     joint_timeout_s: 0.5
     observation_timeout_s: 0.5
     obstacle_timeout_s: 0.5
     require_lidar: true
+    require_arm_joints: true  # false = drive-only (launch arm:=false): Ready without /control/arm_joints
     joint_state_topic: /control/arm_joints  # Measured URDF joints; requires calibrated control mappings.
     observation_min_confidence: 0.5
-    cruise_speed: 0.12  # [m/s]; control also applies chassis/motor limits.
-    goal_tolerance: 0.03  # [m]
+    cruise_speed: 0.26  # [m/s] = control max_v (trial 2026-11-02, was 0.12); control also applies chassis/motor limits.
+    goal_tolerance: 0.10  # [m] matches control wheel_goal_tolerance (was 0.03: below SLAM pose noise, overshoot -> 180 deg turn back)
     fsm:
       initialization_timeout_s: 10.0
       ready_timeout_s: 5.0
       compute_timeout_s: 3.0
-      execution_timeout_s: 30.0
+      execution_timeout_s: 180.0  # [s] matches control task_timeout_s (was 60: corner demo stopped 1.4 m short on a ~7 m leg at 0.12 m/s)
       feedback_timeout_s: 0.5
       stop_timeout_s: 3.0
       max_compute_retries: 1  # Calculations only, never physical action retries.
+    # Puck graspable check (no IK): alignment first (lying: long axis within axis_tolerance_deg of chassis
+    # forward; standing: any direction), then the puck centre in base_link [m] inside the region measured by
+    # experiment for that puck type, shrunk by margin. [x_min, x_max, y_min, y_max, z_min, z_max];
+    # min >= max = not measured yet (never graspable). Fill in from the grasp experiments.
+    # TODO(grasp region): box shape and values are placeholders until the user's measurements (HANDOFF.md).
+    grasp_region:
+      lying: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      standing: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      margin: 0.005          # [m]
+      axis_tolerance_deg: 10.0
+      confirm_count: 3       # consecutive graspable observations
+      # Stop cost along the approach: J = w_box / (d_short - min_box_gap) + w_grasp * ((s - good_plane) / sigma)^2,
+      # d_short = front face <-> box shortest distance, s = front face -> puck centre, sigma = half the region
+      # length in x. The barrier is infinite at the safety gap. 0 = not measured (no stop plan).
+      # TODO(grasp region): measure front_face_x/width (LM guide plane) and good_plane.
+      front_face_x: 0.0      # [m] base_link x of the front face
+      front_face_width: 0.0  # [m]
+      good_plane: 0.0        # [m] s_good
+      min_box_gap: 0.03      # [m] safety gap (user, 2026-11-01): barrier 1 / (d_short - 0.03)
+      w_box: 0.003           # [m] 1/d weight, tune by experiment
+      w_grasp: 1.0           # tune by experiment
     ik:
       urdf: urdf/v75_robot.urdf
       base_frame: base_link
@@ -47,4 +75,13 @@ planning_master:
       prox_band: 0.15
       arc_sample: 0.02
       max_cells: 2000000
-      max_expansions: 500000
+      max_expansions: 500000  # per A* call; 4 headings per cell (arena3_clean 0.02 m: ~470k states)
+      # A*+arc corner fillets (astar_arc.py Params): PASS when R >= r_min, else STOP_TURN.
+      r_min: 0.08
+      r_hi_global: 0.40
+      r_tol: 0.01
+      v_ref: 0.26       # [m/s] per-pose speed limit on lines (control still caps at cruise_speed)
+      w_max: 1.82       # [rad/s]
+      a_lat_max: 0.50   # [m/s^2]
+      a_lon_max: 0.50   # [m/s^2]
+      approach_len: 0.30  # [m] straight ALIGN stretch when goal_heading_required

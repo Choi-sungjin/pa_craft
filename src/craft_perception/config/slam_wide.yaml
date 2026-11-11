@@ -1,0 +1,8 @@
+# Overlay on slam.yaml for craft.launch.py slam_search:=wide (2026-10-31, temporary while wheel slip still
+# pushes the odometry prediction past slam.yaml's +-5 cm: matches failed and SLAM kept the bad prediction).
+# Position search back to the slam_toolbox default +-25 cm. The angle stays +-5 deg at 0.5 deg: the IMU
+# leads yaw and measured 0.1 % scale error over 5 turns (test/gyro_scale), so heading is not the problem.
+# Cost: 50 x 50 positions x 21 angles, the same as slam_toolbox's stock 0.5 m / +-20 deg at 2 deg.
+slam_toolbox:
+  ros__parameters:
+    correlation_search_space_dimension: 0.5  # [m] full width (slam.yaml 0.1)

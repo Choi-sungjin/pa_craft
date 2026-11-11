@@ -1,6 +1,8 @@
 #include "craft_perception/perception_master.hpp"
 #include "craft_perception/tag_registry.hpp"
 #include <ament_index_cpp/get_package_share_directory.hpp>
+#include <algorithm>
+#include <utility>
 #include <filesystem>
 #include <cmath>
 #include <limits>
@@ -259,12 +261,85 @@ void PerceptionMaster::configure() {
   lidar_config_.rear_fov_deg = param<double>("lidar.rear_fov_deg");
   lidar_config_.fov_near_m = param<double>("lidar.fov_near_m");
   lidar_config_.body_radius_m = param<double>("lidar.body_radius_m");
+  lidar_config_.body_center_x = param<double>("lidar.body_center_x");
+  auto &roi = lidar_config_.floor_roi;
+  roi.enabled = param<bool>("lidar.floor_roi.enabled");
+  roi.step_deg = param<double>("lidar.floor_roi.step_deg");
+  for (auto [name, side] : {std::pair{"front_left", &roi.front_left}, std::pair{"front_right", &roi.front_right},
+                            std::pair{"rear_left", &roi.rear_left}, std::pair{"rear_right", &roi.rear_right}}) {
+    side->clear_deg = param<double>(std::string("lidar.floor_roi.") + name + "_clear_deg");
+    side->max_range_m = param<std::vector<double>>(std::string("lidar.floor_roi.") + name + "_max_range_m");
+  }
   if (!lidar_.configure(lidar_config_, positive_param("lidar_obstacle.max_range_m"),
                         param<int64_t>("lidar_obstacle.stride"))) {
     throw std::invalid_argument("invalid lidar / lidar_obstacle configuration");
   }
+  obstacle_filter_enabled_ = param<bool>("lidar_obstacle.filter.enabled");
+  LidarObstacleFilterConfig filter;
+  filter.wall_margin_m = param<double>("lidar_obstacle.filter.wall_margin_m");
+  filter.cell_m = param<double>("lidar_obstacle.filter.cell_m");
+  filter.persist_frames = static_cast<int>(param<int64_t>("lidar_obstacle.filter.persist_frames"));
+  filter.neighbor_cells = static_cast<int>(param<int64_t>("lidar_obstacle.filter.neighbor_cells"));
+  filter.min_cluster_points = static_cast<int>(param<int64_t>("lidar_obstacle.filter.min_cluster_points"));
+  if (!obstacle_filter_.configure(filter)) throw std::invalid_argument("invalid lidar_obstacle.filter configuration");
   odometry_topic_ = param<std::string>("odometry_source_topic");
   map_frame_ = param<std::string>("map_frame");
+
+  imu_enabled_ = param<bool>("imu.enabled");
+  imu_frame_ = param<std::string>("imu.output_frame");
+  wheel_still_linear_ = positive_param("imu.wheel_still_linear");
+  wheel_still_angular_ = positive_param("imu.wheel_still_angular");
+  const auto primary = param<std::string>("imu.primary");
+  if (primary != "wheel_clock" && primary != "lm_arm") {
+    throw std::invalid_argument("imu.primary must be wheel_clock or lm_arm");
+  }
+  const ImuProcessorConfig imu{primary == "wheel_clock" ? 0u : 1u,
+    static_cast<int>(param<int64_t>("imu.calibration_samples")), param<double>("imu.bias_tracking_gain"),
+    positive_param("imu.still_rate"), positive_param("imu.gyro_variance"), param<double>("imu.max_disagreement"),
+    param<double>("imu.max_disagreement_ratio"), positive_param("imu.max_age_s"),
+    positive_param("imu.max_yaw_rate"), positive_param("imu.max_yaw_accel"), param<double>("imu.jump_noise"),
+    static_cast<int>(param<int64_t>("imu.disagreement_samples")),
+    static_cast<int>(param<int64_t>("imu.frozen_samples"))};
+  if (!imu_.configure(imu)) throw std::invalid_argument("invalid imu configuration");
+
+  localization_enabled_ = param<bool>("localization.enabled");
+  const LocalizationMonitorConfig monitor{positive_param("localization.rejection_sigma"),
+    positive_param("localization.dead_reckoning_m"), param<double>("localization.imu_learning.stable_s"),
+    positive_param("localization.imu_learning.bias_time_constant_s"), param<double>("localization.imu_learning.bias_limit"),
+    param<double>("localization.imu_learning.scale_gain"), param<double>("localization.imu_learning.scale_limit"),
+    positive_param("localization.imu_learning.min_turn"), param<double>("localization.imu_learning.settle_s"),
+    positive_param("localization.imu_learning.straight_rate"), positive_param("localization.imu_learning.turn_rate"),
+    positive_param("localization.imu_learning.min_bias_segment_s"),
+    static_cast<int>(param<int64_t>("localization.misfit_checks"))};
+  if (!localization_.configure(monitor)) throw std::invalid_argument("invalid localization configuration");
+  const ScanRelocalizerConfig relocalizer{positive_param("localization.relocalize.window_m"),
+    positive_param("localization.relocalize.window_deg") * M_PI / 180.0, positive_param("localization.relocalize.step_m"),
+    positive_param("localization.relocalize.step_deg") * M_PI / 180.0, positive_param("localization.relocalize.sigma_m"),
+    positive_param("localization.relocalize.min_score"),
+    static_cast<int>(param<int64_t>("localization.relocalize.max_points")),
+    static_cast<int>(param<int64_t>("localization.relocalize.occupied_threshold"))};
+  if (!relocalizer_.configure(relocalizer)) throw std::invalid_argument("invalid localization.relocalize configuration");
+  lidar_odometry_enabled_ = param<bool>("lidar_odometry.enabled");
+  if (lidar_odometry_enabled_) {
+    const ScanOdometryConfig scan_odometry{{positive_param("lidar_odometry.window_m"),
+      positive_param("lidar_odometry.window_deg") * M_PI / 180.0, positive_param("lidar_odometry.step_m"),
+      positive_param("lidar_odometry.step_deg") * M_PI / 180.0, positive_param("lidar_odometry.sigma_m"),
+      positive_param("lidar_odometry.min_score"), static_cast<int>(param<int64_t>("lidar_odometry.max_points")), 50},
+      positive_param("lidar_odometry.grid_resolution_m"), positive_param("lidar_odometry.grid_half_extent_m"),
+      positive_param("lidar_odometry.keyframe_m"), positive_param("lidar_odometry.keyframe_deg") * M_PI / 180.0};
+    if (!scan_odometry_.configure(scan_odometry)) throw std::invalid_argument("invalid lidar_odometry configuration");
+    const auto twist = param<std::vector<double>>("lidar_odometry.twist_variance");
+    if (twist.size() != 3 || !(twist[0] > 0 && twist[1] > 0 && twist[2] > 0)) {
+      throw std::invalid_argument("lidar_odometry.twist_variance needs 3 positive values: vx, vy, vyaw");
+    }
+    std::copy(twist.begin(), twist.end(), lidar_twist_variance_.begin());
+    lidar_odom_frame_ = param<std::string>("lidar_odometry.odom_frame");
+    lidar_base_frame_ = param<std::string>("lidar_odometry.base_frame");
+    if (!imu_enabled_) RCLCPP_WARN(get_logger(), "lidar_odometry without imu: yaw predicted from the last scans only");
+  }
+  const auto variance = param<std::vector<double>>("localization.relocalize.pose_variance");
+  if (variance.size() != 3) throw std::invalid_argument("localization.relocalize.pose_variance needs x, y, yaw");
+  std::copy(variance.begin(), variance.end(), relocalized_variance_.begin());
 }
 
 void PerceptionMaster::connect() {
@@ -303,6 +378,12 @@ void PerceptionMaster::connect() {
     });
   // Raw mode calls LidarPerception directly, just like the camera modules.
   // Merged mode supports a merger already running on a separate sensor computer.
+  if (enabled("lidar_obstacle") && obstacle_filter_enabled_) {
+    obstacle_map_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>("/perception/lidar/map",
+      rclcpp::QoS(1).transient_local().reliable(), [this](nav_msgs::msg::OccupancyGrid::ConstSharedPtr map) {
+        std::lock_guard<std::mutex> lock(obstacle_filter_mutex_); obstacle_filter_.set_map(*map);
+      });
+  }
   if (lidar_input_mode_ == "raw" && enabled("lidar_obstacle")) {
     merged_scan_pub_ = create_publisher<sensor_msgs::msg::LaserScan>("/lidar/merged", 10);
     rear_scan_sub_ = create_subscription<sensor_msgs::msg::LaserScan>("/lidar/rear/scan",
@@ -316,6 +397,71 @@ void PerceptionMaster::connect() {
       std::lock_guard<std::mutex> lock(scan_mutex_); scan_ = std::move(input); ++scan_id_;
     });
 
+  if (imu_enabled_) {
+    rclcpp::SubscriptionOptions options;
+    options.callback_group = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+    imu_pub_ = create_publisher<sensor_msgs::msg::Imu>("/perception/imu/data", rclcpp::SensorDataQoS());
+    const char *const topics[] = {"/control/imu/wheel_clock", "/control/imu/lm_arm"};
+    for (std::size_t board = 0; board < ImuProcessor::kBoards; ++board) {
+      imu_subs_[board] = create_subscription<sensor_msgs::msg::Imu>(topics[board], rclcpp::SensorDataQoS(),
+        [this, board](sensor_msgs::msg::Imu::ConstSharedPtr input) { receive_imu(board, *input); }, options);
+    }
+    wheel_odom_sub_ = create_subscription<nav_msgs::msg::Odometry>("/control/wheel/odom",
+      rclcpp::SensorDataQoS(), [this](nav_msgs::msg::Odometry::ConstSharedPtr input) {
+        wheel_odom_ = std::move(input);
+      }, options);
+  }
+
+  if (localization_enabled_) {
+    rclcpp::SubscriptionOptions options;
+    options.callback_group = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+    localization_state_pub_ = create_publisher<std_msgs::msg::String>("/perception/localization/state",
+      rclcpp::QoS(1).transient_local());
+    relocalized_pub_ = create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>(
+      "/perception/localization/relocalized", 10);
+    slam_pose_sub_ = create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>("/perception/lidar/pose", 10,
+      [this](geometry_msgs::msg::PoseWithCovarianceStamped::ConstSharedPtr input) { receive_slam_pose(*input); },
+      options);
+    global_odom_sub_ = create_subscription<nav_msgs::msg::Odometry>("/odometry/global", rclcpp::SensorDataQoS(),
+      [this](nav_msgs::msg::Odometry::ConstSharedPtr input) { receive_global_odom(*input); }, options);
+    local_odom_sub_ = create_subscription<nav_msgs::msg::Odometry>("/odometry/local", rclcpp::SensorDataQoS(),
+      [this](nav_msgs::msg::Odometry::ConstSharedPtr input) {
+        const double t = rclcpp::Time(input->header.stamp).seconds();
+        if (local_odom_at_ && t > *local_odom_at_) {
+          localization_.moved(std::fabs(input->twist.twist.linear.x) * (t - *local_odom_at_));
+          if (localization_.state() == LocalizationState::kRelocalize) relocalize();
+        }
+        local_odom_at_ = t;
+        local_odom_ = std::move(input);
+      }, options);
+    map_sub_ = create_subscription<nav_msgs::msg::OccupancyGrid>("/perception/lidar/map",
+      rclcpp::QoS(1).transient_local().reliable(), [this](nav_msgs::msg::OccupancyGrid::ConstSharedPtr map) {
+        const auto &q = map->info.origin.orientation;
+        if (std::fabs(q.z) > 1e-6 || std::fabs(q.x) > 1e-6 || std::fabs(q.y) > 1e-6) {
+          RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 10000, "rotated SLAM map: relocalization off");
+          return;
+        }
+        relocalizer_.set_map(map->info.width, map->info.height, map->info.resolution,
+          map->info.origin.position.x, map->info.origin.position.y, map->data);
+      }, options);
+    relocalization_scan_sub_ = create_subscription<sensor_msgs::msg::LaserScan>("/lidar/merged",
+      rclcpp::SensorDataQoS(), [this](sensor_msgs::msg::LaserScan::ConstSharedPtr input) {
+        relocalization_scan_ = std::move(input);
+      }, options);
+    // 1 Hz: does the scan still fit SLAM's map at the EKF pose? Then publish the state.
+    localization_timer_ = create_wall_timer(std::chrono::seconds(1), [this] {
+      const auto scan = relocalization_scan_;
+      if (scan && !global_poses_.empty() && relocalizer_.has_map()) {
+        const auto score = relocalizer_.score(scan_points(*scan), global_poses_.back().pose);
+        if (score) {
+          localization_.scan_fits(*score >= relocalizer_.min_score());
+          RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 10000, "scan-to-map score at the EKF pose: %.2f", *score);
+        }
+      }
+      publish_localization_state();
+    }, options.callback_group);
+  }
+
   add_task("d435_yolo", [this](Task &task) { return d435_yolo(task); });
   add_task("apriltag", [this](Task &task) { return d435_apriltag(task); });
   add_task("knob_depth", [this](Task &task) { return d435_knob_depth(task); });
@@ -323,6 +469,14 @@ void PerceptionMaster::connect() {
   add_task("obstacle_detector", [this](Task &task) { return d435_obstacle_detector(task); });
   add_task("puck_axis", [this](Task &task) { return d435_puck_axis(task); });
   add_task("knob_lever", [this](Task &task) { return c310_knob_lever(task); });
+  if (lidar_odometry_enabled_) {
+    rclcpp::SubscriptionOptions options;
+    options.callback_group = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+    lidar_odom_pub_ = create_publisher<nav_msgs::msg::Odometry>("/perception/lidar/odom", 10);
+    lidar_odometry_scan_sub_ = create_subscription<sensor_msgs::msg::LaserScan>("/lidar/merged",
+      rclcpp::SensorDataQoS(), [this](sensor_msgs::msg::LaserScan::ConstSharedPtr input) { lidar_odometry(*input); },
+      options);
+  }
   add_task("lidar_obstacle", [this](Task &task) { return lidar_obstacle(task); });
   add_task("state_estimator", [this](Task &task) { return state_estimator(task); });
   diagnostics_at_ = Steady::now();
@@ -523,9 +677,9 @@ bool PerceptionMaster::c310_knob_lever(Task &task) {
 std::optional<lidar_processing::Pose2D> PerceptionMaster::lidar_pose(const std::string &frame) {
   try {
     const auto tf = tf_buffer_->lookupTransform(lidar_config_.target_frame, frame, tf2::TimePointZero);
-    const auto &q = tf.transform.rotation;
-    return lidar_processing::Pose2D{tf.transform.translation.x, tf.transform.translation.y,
-      std::atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))};
+    const auto &q = tf.transform.rotation;  // upside-down mounts (roll 180 deg) come back flipped
+    return lidar_processing::pose_from_transform(tf.transform.translation.x, tf.transform.translation.y,
+      q.x, q.y, q.z, q.w);
   } catch (const std::exception &e) {
     RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "LiDAR TF %s: %s", frame.c_str(), e.what());
     return std::nullopt;
@@ -557,10 +711,43 @@ bool PerceptionMaster::lidar_obstacle(Task &task) {
     merged_scan_pub_->publish(*merged);  // Preserve SLAM/RViz input without a merger node.
   }
   task.seen = id;
-  const auto obstacles = lidar_.detect_obstacles(merged ? *merged : *input);
+  auto obstacles = lidar_.detect_obstacles(merged ? *merged : *input);
   if (!obstacles) return false;
+  if (obstacle_filter_enabled_) filter_obstacles(*obstacles);
   lidar_obstacle_pub_->publish(*obstacles);
   return true;
+}
+
+// Keep only obstacle points worth avoiding (LidarObstacleFilter, judged in the map frame); without map TF the
+// raw points go out so planning still sees everything.
+void PerceptionMaster::filter_obstacles(geometry_msgs::msg::PoseArray &obstacles) {
+  geometry_msgs::msg::TransformStamped tf;
+  try {
+    tf = tf_buffer_->lookupTransform(map_frame_, obstacles.header.frame_id, tf2::TimePointZero);
+  } catch (const std::exception &e) {
+    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "obstacle filter off (no %s TF: %s), raw points",
+                         map_frame_.c_str(), e.what());
+    return;
+  }
+  const auto &q = tf.transform.rotation;
+  const double yaw = std::atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z));
+  const double c = std::cos(yaw), s = std::sin(yaw), tx = tf.transform.translation.x, ty = tf.transform.translation.y;
+  std::vector<std::array<double, 2>> points;
+  points.reserve(obstacles.poses.size());
+  for (const auto &p : obstacles.poses) {
+    points.push_back({tx + c * p.position.x - s * p.position.y, ty + s * p.position.x + c * p.position.y});
+  }
+  std::vector<bool> keep;
+  {
+    std::lock_guard<std::mutex> lock(obstacle_filter_mutex_);
+    if (!obstacle_filter_.has_map()) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000, "obstacle filter: no map yet, walls not removed");
+    }
+    keep = obstacle_filter_.filter(points);
+  }
+  std::vector<geometry_msgs::msg::Pose> kept;
+  for (size_t i = 0; i < keep.size(); ++i) {if (keep[i]) kept.push_back(obstacles.poses[i]);}
+  obstacles.poses.swap(kept);
 }
 
 bool PerceptionMaster::state_estimator(Task &task) {
@@ -582,6 +769,245 @@ bool PerceptionMaster::state_estimator(Task &task) {
       map_frame_.c_str(), input->header.frame_id.c_str(), e.what());
     return false;
   }
+}
+
+void PerceptionMaster::receive_imu(std::size_t board, const sensor_msgs::msg::Imu &input) {
+  static const char *const kNames[] = {"wheel_clock", "lm_arm"};
+  constexpr double kGravity = 9.80665;  // control sends m/s^2; BoardImu works in g
+  const double t = rclcpp::Time(input.header.stamp).seconds();
+  // The wheels say whether the chassis can turn at all (calibration, zero-velocity update) and
+  // break a tie when the two boards disagree. Stale wheel odometry: assume moving.
+  const bool wheels_fresh = wheel_odom_ && is_fresh_input(wheel_odom_->header.stamp);
+  const double wheel_yaw_rate = wheels_fresh ? wheel_odom_->twist.twist.angular.z : 0.0;
+  const bool wheels_still = wheels_fresh &&
+    std::fabs(wheel_odom_->twist.twist.linear.x) <= wheel_still_linear_ &&
+    std::fabs(wheel_yaw_rate) <= wheel_still_angular_;
+  const auto &w = input.angular_velocity;
+  const auto &a = input.linear_acceleration;
+  if (imu_.update(board, t, {w.x, w.y, w.z}, {a.x / kGravity, a.y / kGravity, a.z / kGravity}, wheels_still)) {
+    const auto &bias = imu_.board(board).bias();
+    RCLCPP_INFO(get_logger(), "%s IMU calibrated: gyro offset (%.5f, %.5f, %.5f) rad/s", kNames[board],
+      bias[0], bias[1], bias[2]);
+  }
+  // One output per primary sample; the backup drives it only while the primary is unavailable.
+  if (board != imu_.primary() && imu_.available(imu_.primary(), t)) return;
+  {
+    std::lock_guard<std::mutex> lock(correction_mutex_);
+    for (std::size_t i = 0; i < ImuProcessor::kBoards; ++i) {
+      imu_.set_correction(i, correction_bias_[i], correction_scale_[i]);
+    }
+  }
+  const auto rate = imu_.select(t, wheels_still);
+  if (rate) imu_board_ = rate->board;
+  if (!rate) {
+    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+      "OpenCR IMU calibrating, keep the robot still (wheels stopped): /perception/imu/data off");
+    return;
+  }
+  if (imu_.dropped(0) + imu_.dropped(1) > 0) {  // check against the real turning profile
+    RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 10000, "IMU samples dropped by the spike filter: "
+      "wheel_clock %zu, lm_arm %zu", imu_.dropped(0), imu_.dropped(1));
+  }
+  if (rate->board != imu_.primary()) {
+    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "primary IMU %s %s: using backup %s",
+      kNames[imu_.primary()], imu_.frozen(imu_.primary()) ? "frozen (raw gyro repeating)" : "unavailable",
+      kNames[rate->board]);
+  }
+  if (rate->disagree) {
+    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+      "OpenCR IMUs disagree: wheel_clock %.3f, lm_arm %.3f rad/s (wheels %.3f); still using %s - check the boards",
+      imu_.accepted(0).value_or(NAN), imu_.accepted(1).value_or(NAN), wheel_yaw_rate, kNames[rate->board]);
+  }
+  sensor_msgs::msg::Imu output;
+  output.header.stamp = input.header.stamp;
+  output.header.frame_id = imu_frame_;  // already projected on the vertical: no IMU TF needed
+  // Yaw rate only: orientation and acceleration are not provided (covariance[0] = -1).
+  output.orientation_covariance[0] = -1.0;
+  output.linear_acceleration_covariance[0] = -1.0;
+  output.angular_velocity.z = rate->value;
+  output.angular_velocity_covariance[0] = output.angular_velocity_covariance[4] = 1e6;  // unmeasured x/y
+  output.angular_velocity_covariance[8] = rate->variance;
+  imu_pub_->publish(output);
+  if (lidar_odometry_enabled_) {
+    std::lock_guard<std::mutex> lock(imu_yaw_mutex_);
+    if (!imu_yaw_.empty() && t > imu_yaw_.back().first) imu_yaw_sum_ += rate->value * (t - imu_yaw_.back().first);
+    if (imu_yaw_.empty() || t > imu_yaw_.back().first) imu_yaw_.emplace_back(t, imu_yaw_sum_);
+    while (imu_yaw_.size() > 2 && imu_yaw_.back().first - imu_yaw_.front().first > 2.0) imu_yaw_.pop_front();
+  }
+}
+
+namespace {
+double yaw_of(const geometry_msgs::msg::Quaternion &q) {
+  return std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+}
+}  // namespace
+
+std::vector<std::pair<double, double>> PerceptionMaster::scan_points(const sensor_msgs::msg::LaserScan &scan) {
+  std::vector<std::pair<double, double>> points;  // /lidar/merged is in base_link
+  for (std::size_t i = 0; i < scan.ranges.size(); ++i) {
+    const double r = scan.ranges[i];
+    if (!std::isfinite(r) || r < scan.range_min || r > scan.range_max) continue;
+    const double a = scan.angle_min + i * scan.angle_increment;
+    points.emplace_back(r * std::cos(a), r * std::sin(a));
+  }
+  return points;
+}
+
+void PerceptionMaster::lidar_odometry(const sensor_msgs::msg::LaserScan &scan) {
+  const double t = rclcpp::Time(scan.header.stamp).seconds();
+  if (lidar_scan_at_ && t <= *lidar_scan_at_) return;  // same scan again
+  const double dt = lidar_scan_at_ ? t - *lidar_scan_at_ : 0.0;
+  if (dt > 0.5) {  // gap: the last speed says nothing about this scan
+    scan_odometry_.reset();
+    lidar_velocity_ = {0.0, 0.0, 0.0};
+  }
+  // Prediction: the IMU turn between the two scans (yaw is not what slips), the last LiDAR speed for x/y.
+  std::optional<double> imu_turn;
+  if (lidar_scan_at_) {
+    std::lock_guard<std::mutex> lock(imu_yaw_mutex_);
+    auto yaw_at = [this](double at) -> std::optional<double> {
+      if (imu_yaw_.size() < 2 || at < imu_yaw_.front().first || at > imu_yaw_.back().first + 0.05) return std::nullopt;
+      auto b = std::lower_bound(imu_yaw_.begin(), imu_yaw_.end(), at,
+                                [](const auto &s, double v) { return s.first < v; });
+      if (b == imu_yaw_.end()) return imu_yaw_.back().second;
+      if (b == imu_yaw_.begin()) return b->second;
+      const auto a = std::prev(b);
+      return a->second + (b->second - a->second) * (at - a->first) / (b->first - a->first);
+    };
+    const auto y0 = yaw_at(*lidar_scan_at_), y1 = yaw_at(t);
+    if (y0 && y1) imu_turn = *y1 - *y0;
+  }
+  lidar_scan_at_ = t;
+  const auto step = scan_odometry_.update(scan_points(scan),
+    {lidar_velocity_.x * dt, lidar_velocity_.y * dt, imu_turn.value_or(lidar_velocity_.yaw * dt)});
+  if (!step || dt <= 0.0) {
+    if (dt > 0.0) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+        "LiDAR odometry: scan does not fit the keyframe, restarting from it (no /perception/lidar/odom)");
+    }
+    return;
+  }
+  lidar_velocity_ = {step->delta.x / dt, step->delta.y / dt, step->delta.yaw / dt};
+  lidar_pose_ = compose(lidar_pose_, step->delta);
+  RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 10000, "LiDAR odometry score %.2f (min %.2f)", step->score,
+    get_parameter("lidar_odometry.min_score").as_double());
+  nav_msgs::msg::Odometry odom;
+  odom.header.stamp = scan.header.stamp;
+  odom.header.frame_id = lidar_odom_frame_;
+  odom.child_frame_id = lidar_base_frame_;
+  odom.pose.pose.position.x = lidar_pose_.x;  // own dead reckoning, for plots; the EKF takes the twist
+  odom.pose.pose.position.y = lidar_pose_.y;
+  odom.pose.pose.orientation.z = std::sin(lidar_pose_.yaw / 2.0);
+  odom.pose.pose.orientation.w = std::cos(lidar_pose_.yaw / 2.0);
+  odom.pose.covariance[0] = odom.pose.covariance[7] = odom.pose.covariance[35] = 1e3;
+  odom.twist.twist.linear.x = lidar_velocity_.x;
+  odom.twist.twist.linear.y = lidar_velocity_.y;
+  odom.twist.twist.angular.z = lidar_velocity_.yaw;
+  odom.twist.covariance[0] = lidar_twist_variance_[0];
+  odom.twist.covariance[7] = lidar_twist_variance_[1];
+  odom.twist.covariance[35] = lidar_twist_variance_[2];
+  lidar_odom_pub_->publish(odom);
+}
+
+namespace {
+Covariance3 planar(const std::array<double, 36> &c) {  // x, y, yaw rows/cols of a 6x6 pose covariance
+  const int k[] = {0, 1, 5};
+  Covariance3 out;
+  for (int r = 0; r < 3; ++r) {
+    for (int col = 0; col < 3; ++col) out[r * 3 + col] = c[k[r] * 6 + k[col]];
+  }
+  return out;
+}
+}  // namespace
+
+void PerceptionMaster::receive_global_odom(const nav_msgs::msg::Odometry &input) {
+  const double t = rclcpp::Time(input.header.stamp).seconds();
+  const auto &p = input.pose.pose;
+  global_poses_.push_back({t, {p.position.x, p.position.y, yaw_of(p.orientation)}, planar(input.pose.covariance)});
+  while (global_poses_.size() > 2 && t - global_poses_.front().t > 2.0) global_poses_.pop_front();
+  if (!local_odom_) return;
+  // map->odom yaw = global yaw - local yaw: what SLAM has added on top of the IMU.
+  const double local_yaw = yaw_of(local_odom_->pose.pose.orientation);
+  localization_.yaw(t, global_poses_.back().pose.yaw - local_yaw, local_yaw, local_odom_->twist.twist.angular.z,
+                    imu_board_);
+  std::lock_guard<std::mutex> lock(correction_mutex_);
+  for (std::size_t i = 0; i < 2; ++i) {
+    if (correction_bias_[i] != localization_.bias(i) || correction_scale_[i] != localization_.scale(i)) {
+      correction_bias_[i] = localization_.bias(i);
+      correction_scale_[i] = localization_.scale(i);
+      RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 10000,
+        "IMU correction from SLAM yaw: wheel_clock bias %+.5f rad/s scale %.4f, lm_arm bias %+.5f scale %.4f",
+        localization_.bias(0), localization_.scale(0), localization_.bias(1), localization_.scale(1));
+    }
+  }
+}
+
+void PerceptionMaster::receive_slam_pose(const geometry_msgs::msg::PoseWithCovarianceStamped &input) {
+  if (global_poses_.empty()) return;
+  const double t = rclcpp::Time(input.header.stamp).seconds();
+  // ekf_global's pose at the SLAM stamp: interpolate its history (the SLAM pose arrives late).
+  auto after = std::find_if(global_poses_.begin(), global_poses_.end(), [t](const StampedPose &p) { return p.t >= t; });
+  StampedPose ekf = after == global_poses_.end() ? global_poses_.back() : *after;
+  if (after != global_poses_.begin() && after != global_poses_.end()) {
+    const auto &a = *std::prev(after);
+    const double k = (t - a.t) / (after->t - a.t);
+    ekf.pose = {a.pose.x + k * (after->pose.x - a.pose.x), a.pose.y + k * (after->pose.y - a.pose.y),
+                a.pose.yaw + k * std::remainder(after->pose.yaw - a.pose.yaw, 2.0 * M_PI)};
+  }
+  const auto &p = input.pose.pose;
+  localization_.slam(t, {p.position.x, p.position.y, yaw_of(p.orientation)}, planar(input.pose.covariance),
+                     ekf.pose, ekf.cov);
+  publish_localization_state();
+}
+
+void PerceptionMaster::relocalize() {
+  const auto scan = relocalization_scan_;
+  if (!scan || global_poses_.empty() || !relocalizer_.has_map()) {
+    RCLCPP_WARN(get_logger(), "relocalization impossible (no scan, pose or map yet)");
+    localization_.relocalized(false);
+    publish_localization_state();
+    return;
+  }
+  const auto points = scan_points(*scan);
+  const auto guess = global_poses_.back();
+  const auto started = Steady::now();
+  const auto result = relocalizer_.match(points, guess.pose);
+  const double ms = std::chrono::duration<double, std::milli>(Steady::now() - started).count();
+  localization_.relocalized(result.has_value());
+  if (!result) {
+    RCLCPP_ERROR(get_logger(), "relocalization failed after %.2f m of dead reckoning (%.1f ms): localization lost",
+      localization_.dead_reckoning(), ms);
+    publish_localization_state();
+    return;
+  }
+  geometry_msgs::msg::PoseWithCovarianceStamped output;
+  output.header.stamp = rclcpp::Time(static_cast<int64_t>(guess.t * 1e9));
+  output.header.frame_id = map_frame_;
+  output.pose.pose.position.x = result->pose.x;
+  output.pose.pose.position.y = result->pose.y;
+  output.pose.pose.orientation.z = std::sin(result->pose.yaw / 2.0);
+  output.pose.pose.orientation.w = std::cos(result->pose.yaw / 2.0);
+  output.pose.covariance[0] = relocalized_variance_[0];
+  output.pose.covariance[7] = relocalized_variance_[1];
+  output.pose.covariance[35] = relocalized_variance_[2];
+  for (const int k : {14, 21, 28}) output.pose.covariance[k] = 1e6;  // z, roll, pitch unused
+  relocalized_pub_->publish(output);
+  RCLCPP_WARN(get_logger(), "relocalized after dead reckoning: moved (%+.3f, %+.3f) m, %+.1f deg, score %.2f (%.1f ms)",
+    result->pose.x - guess.pose.x, result->pose.y - guess.pose.y,
+    std::remainder(result->pose.yaw - guess.pose.yaw, 2.0 * M_PI) * 180.0 / M_PI, result->score, ms);
+  publish_localization_state();
+}
+
+void PerceptionMaster::publish_localization_state() {
+  const std::string state = to_string(localization_.state());
+  if (state != localization_published_) {
+    RCLCPP_INFO(get_logger(), "localization: %s -> %s", localization_published_.empty() ? "start" :
+      localization_published_.c_str(), state.c_str());
+    localization_published_ = state;
+  }
+  std_msgs::msg::String output;
+  output.data = state;
+  localization_state_pub_->publish(output);
 }
 
 void PerceptionMaster::diagnostics() {

@@ -8,8 +8,13 @@
 #include "craft_perception/knob_lever.hpp"
 #include "craft_perception/shared_frame.hpp"
 #include "craft_perception/state_estimator.hpp"
+#include "craft_perception/imu_processor.hpp"
+#include "craft_perception/localization_monitor.hpp"
+#include "craft_perception/scan_relocalizer.hpp"
+#include "craft_perception/scan_odometry.hpp"
 #include "craft_perception/obstacle_detector.hpp"
 #include "craft_perception/lidar_obstacle_detector.hpp"
+#include "craft_perception/lidar_obstacle_filter.hpp"
 #include "craft_perception/lidar_perception.hpp"
 #include <fcntl.h>
 #include <sys/file.h>
@@ -108,8 +113,13 @@ TEST(Yolo, RejectsWrongLayoutAndNonFiniteBoxes) {
 TEST(AprilTag, SortsIdsByImagePosition) {
   cv::Mat image(220, 420, CV_8UC1, cv::Scalar(255)), left, right, bgr;
   auto dictionary = cv::aruco::getPredefinedDictionary(cv::aruco::DICT_APRILTAG_36h11);
+#if CV_VERSION_MAJOR > 4 || (CV_VERSION_MAJOR == 4 && CV_VERSION_MINOR >= 7)
+  cv::aruco::generateImageMarker(dictionary, 17, 120, left);
+  cv::aruco::generateImageMarker(dictionary, 3, 120, right);
+#else
   cv::aruco::drawMarker(dictionary, 17, 120, left);
   cv::aruco::drawMarker(dictionary, 3, 120, right);
+#endif
   left.copyTo(image(cv::Rect(30, 50, 120, 120)));
   right.copyTo(image(cv::Rect(260, 50, 120, 120)));
   cv::cvtColor(image, bgr, cv::COLOR_GRAY2BGR);
@@ -256,6 +266,37 @@ TEST(LidarPerception, MergesNearestBinsAndRejectsStaleRear) {
   EXPECT_FALSE(module.merge(front, fp, nullptr, nullptr));
 }
 
+TEST(LidarPerception, UpsideDownLidarMirrorsItsScanAngles) {
+  // Roll 180 deg (q = x 1): flipped, still facing forward. Flipped about the left-right axis instead
+  // (Ry 180, q = y 1): flipped and facing backward, i.e. roll 180 + yaw 180.
+  const auto rolled = lidar_processing::pose_from_transform(0.15, 0.0, 1.0, 0.0, 0.0, 0.0);
+  EXPECT_TRUE(rolled.flipped);
+  EXPECT_NEAR(rolled.yaw, 0.0, 1e-12);
+  const auto pitched = lidar_processing::pose_from_transform(0.15, 0.0, 0.0, 1.0, 0.0, 0.0);
+  EXPECT_TRUE(pitched.flipped);
+  EXPECT_NEAR(std::fabs(pitched.yaw), CV_PI, 1e-12);
+  EXPECT_FALSE(lidar_processing::pose_from_transform(0.15, 0.0, 0.0, 0.0, 1.0, 0.0).flipped);  // yaw 180 only
+  // A return at scan angle +60 deg, 1 m: left of an upright LiDAR, right of an upside-down one.
+  LidarPerception module;
+  ASSERT_TRUE(module.configure(lidar_processing::MergerConfig{}, 3.0, 1));
+  sensor_msgs::msg::LaserScan scan;
+  scan.header.frame_id = "laser_front";
+  scan.angle_min = CV_PI / 3;
+  scan.angle_increment = 1e-6;
+  scan.range_min = 0.1;
+  scan.range_max = 8;
+  scan.ranges = {1.0};
+  for (const bool flipped : {false, true}) {
+    const auto merged = module.merge(scan, {0.15, 0.0, 0.0, flipped}, nullptr, nullptr);
+    ASSERT_TRUE(merged);
+    const auto points = module.detect_obstacles(*merged);
+    ASSERT_TRUE(points);
+    ASSERT_EQ(points->poses.size(), 1u);
+    EXPECT_NEAR(points->poses[0].position.x, 0.65, 0.01);
+    EXPECT_NEAR(points->poses[0].position.y, flipped ? -0.866 : 0.866, 0.01);
+  }
+}
+
 TEST(LidarPerception, FiltersBodyAndNearPointsOutsideFovButKeepsFarPoints) {
   LidarPerception module;
   lidar_processing::MergerConfig config;
@@ -274,6 +315,29 @@ TEST(LidarPerception, FiltersBodyAndNearPointsOutsideFovButKeepsFarPoints) {
   ASSERT_TRUE(points);
   ASSERT_EQ(points->poses.size(), 1u);
   EXPECT_NEAR(points->poses[0].position.x, -0.85, 1e-4);
+}
+
+TEST(LidarPerception, BodyFilterFollowsTheBodyCenterNotBaseLink) {
+  // base_link on the turning center, body (LiDAR midpoint) 26 mm ahead: a point 0.26 m ahead of
+  // base_link is only 0.234 m from the body center, inside the 0.25 m body radius.
+  LidarPerception module;
+  lidar_processing::MergerConfig config;
+  config.body_center_x = 0.026;
+  ASSERT_TRUE(module.configure(config, 3.0, 1));
+  sensor_msgs::msg::LaserScan scan;
+  scan.header.frame_id = "laser_front";
+  scan.angle_increment = 1e-6;
+  scan.range_min = 0.05;
+  scan.range_max = 8;
+  const auto count = [&](float range) {
+    scan.ranges = {range};
+    const auto merged = module.merge(scan, {0.1697, 0, 0}, nullptr, nullptr);
+    return merged ? module.detect_obstacles(*merged)->poses.size() : 99u;
+  };
+  EXPECT_EQ(count(0.26f - 0.1697f), 0u);
+  EXPECT_EQ(count(0.28f - 0.1697f), 1u);
+  config.body_center_x = std::numeric_limits<double>::infinity();
+  EXPECT_FALSE(module.configure(config, 3.0, 1));
 }
 
 TEST(LidarPerception, RejectsInvalidMergerConfiguration) {
@@ -445,4 +509,489 @@ TEST(Lever, C310RejectsSegWithoutPrototypesOrLeverClass) {
   EXPECT_FALSE(C310Perception().configure(c310));
   c310.lever_source = "hsv";
   EXPECT_TRUE(C310Perception().configure(c310));
+}
+
+TEST(BoardImu, UprightBoardsReportGzMinusBiasWhateverTheirHeading) {
+  // Both boards upright; lm_arm turned ~180 deg about the vertical, which leaves gz unchanged.
+  for (double heading : {0.0, 3.05}) {
+    BoardImu imu;
+    ASSERT_TRUE(imu.configure(10, 0.0, 0.05));
+    const Vector3 bias{0.004, -0.003, 0.002};
+    const Vector3 gravity{0.0, 0.0, 1.0};  // a still accelerometer reads +1 g up
+    for (int i = 0; i < 10; ++i) {
+      EXPECT_FALSE(imu.yaw_rate());
+      imu.update(bias, gravity, true);
+    }
+    ASSERT_TRUE(imu.calibrated());
+    // Chassis turns left at 0.5 rad/s; x and y gyro (here from the heading) do not enter the yaw rate.
+    imu.update({bias[0] + 0.01 * std::cos(heading), bias[1] + 0.01 * std::sin(heading), bias[2] + 0.5},
+               gravity, false);
+    ASSERT_TRUE(imu.yaw_rate());
+    EXPECT_NEAR(*imu.yaw_rate(), 0.5, 1e-9);
+  }
+}
+
+TEST(BoardImu, CalibratesRawGyroWithLargeChipOffset) {
+  // The firmware sends the raw gyro: a 0.08 rad/s zero-rate offset is larger than still_rate.
+  BoardImu imu;
+  ASSERT_TRUE(imu.configure(4, 0.0, 0.05));
+  const Vector3 up{0.0, 0.0, 1.0};
+  for (double noise : {0.002, -0.001, 0.001, -0.002}) {
+    imu.update({0.01, -0.03, 0.08 + noise}, up, true);
+  }
+  ASSERT_TRUE(imu.calibrated());
+  EXPECT_NEAR(imu.bias()[2], 0.08, 1e-12);
+  imu.update({0.01, -0.03, 0.08 + 0.5}, up, false);
+  EXPECT_NEAR(*imu.yaw_rate(), 0.5, 1e-12);
+}
+
+TEST(BoardImu, CalibrationNeedsAnUnbrokenStillWindowAndRejectsMotion) {
+  BoardImu imu;
+  ASSERT_TRUE(imu.configure(3, 0.0, 0.05));
+  const Vector3 up{0.0, 0.0, 1.0};
+  imu.update({0, 0, 0}, up, true);
+  imu.update({0, 0, 0}, up, true);
+  imu.update({0, 0, 0}, up, false);   // wheels moved: window restarts
+  imu.update({0, 0, 0.2}, up, true);  // turning while the wheels report still (carried): not still
+  imu.update({0, 0, 0}, {0, 0, 1.3}, true);  // accelerating: not gravity alone
+  imu.update({0, 0, 0}, up, true);
+  imu.update({0, 0, 0}, up, true);
+  EXPECT_FALSE(imu.calibrated());
+  imu.update({0, 0, 0}, up, true);
+  EXPECT_TRUE(imu.calibrated());
+  imu.reset();
+  EXPECT_FALSE(imu.calibrated());
+  EXPECT_FALSE(imu.yaw_rate());
+}
+
+TEST(BoardImu, TracksBiasOnlyWhileStill) {
+  BoardImu imu;
+  ASSERT_TRUE(imu.configure(1, 0.1, 0.05));
+  const Vector3 up{0.0, 0.0, 1.0};
+  imu.update({0, 0, 0}, up, true);
+  for (int i = 0; i < 200; ++i) {
+    imu.update({0, 0, 0.01}, up, true);  // bias drifted to 0.01 rad/s
+  }
+  EXPECT_NEAR(imu.bias()[2], 0.01, 1e-6);
+  EXPECT_NEAR(*imu.yaw_rate(), 0.0, 1e-6);
+  for (int i = 0; i < 200; ++i) {
+    imu.update({0, 0, 0.3}, up, false);  // turning: bias must not follow
+  }
+  EXPECT_NEAR(imu.bias()[2], 0.01, 1e-6);
+  EXPECT_NEAR(*imu.yaw_rate(), 0.29, 1e-6);
+}
+
+TEST(BoardImu, RejectsInvalidConfigurationAndNonFiniteSamples) {
+  BoardImu imu;
+  EXPECT_FALSE(imu.configure(0, 0.0, 0.05));
+  EXPECT_FALSE(imu.configure(10, 1.0, 0.05));
+  EXPECT_FALSE(imu.configure(10, -0.1, 0.05));
+  EXPECT_FALSE(imu.configure(10, 0.0, 0.0));
+  ASSERT_TRUE(imu.configure(1, 0.0, 0.05));
+  imu.update({std::nan(""), 0, 0}, {0, 0, 1}, true);
+  EXPECT_FALSE(imu.calibrated());
+}
+
+// max_yaw_rate 2.5, max_yaw_accel 3.2, jump_noise 0.1: at 20 ms a sample may move 0.164 rad/s.
+static ImuProcessorConfig imu_config(int disagreement_samples) {
+  return {0, 1, 0.0, 0.05, 1e-4, 0.02, 0.08, 0.1, 2.5, 3.2, 0.1, disagreement_samples, 10};
+}
+
+TEST(ImuProcessor, PrimaryUnlessUnavailableAndZeroVelocityUpdate) {
+  ImuProcessor imu;
+  auto bad = imu_config(1);
+  bad.primary = 2;
+  EXPECT_FALSE(imu.configure(bad));
+  bad = imu_config(0);
+  EXPECT_FALSE(imu.configure(bad));
+  ASSERT_TRUE(imu.configure(imu_config(1)));
+  const Vector3 up{0.0, 0.0, 1.0};
+  EXPECT_FALSE(imu.select(0.0, true));                        // nothing calibrated yet
+  EXPECT_TRUE(imu.update(0, 0.0, {0, 0, 0.01}, up, true));    // calibrates on its first still sample
+  EXPECT_TRUE(imu.update(1, 0.0, {0, 0, -0.02}, up, true));
+  imu.update(0, 0.02, {0, 0, 0.03}, up, true);
+  imu.update(1, 0.02, {0, 0, -0.02}, up, true);
+  EXPECT_EQ(imu.select(0.02, true)->value, 0.0);              // wheels still: 0.02 residual -> 0
+  const auto moving = imu.select(0.02, false);
+  EXPECT_NEAR(moving->value, 0.02, 1e-12);                    // the primary alone, never a mean
+  EXPECT_EQ(moving->board, 0u);
+  EXPECT_NEAR(moving->variance, 1e-4, 1e-12);
+  imu.update(1, 0.5, {0, 0, 0.08}, up, false);                // primary silent for 0.48 s
+  const auto backup = imu.select(0.5, false);
+  EXPECT_EQ(backup->board, 1u);
+  EXPECT_NEAR(backup->value, 0.1, 1e-12);
+  imu.update(0, 0.52, {0, 0, 0.11}, up, false);               // primary back
+  EXPECT_EQ(imu.select(0.52, false)->board, 0u);
+  EXPECT_FALSE(imu.select(5.0, false));                       // both stale
+}
+
+TEST(ImuProcessor, DisagreementIsReportedButNeverSwitchesBoards) {
+  // Backup stuck at a constant 0.033 rad/s while the primary reads 0: reported after 3 outputs.
+  ImuProcessor imu;
+  ASSERT_TRUE(imu.configure(imu_config(3)));
+  const Vector3 up{0.0, 0.0, 1.0};
+  imu.update(0, 0.0, {0, 0, 0}, up, true);
+  imu.update(1, 0.0, {0, 0, 0}, up, true);
+  for (int i = 1; i <= 5; ++i) {
+    const double t = i * 0.02;
+    imu.update(0, t, {0, 0, 0}, up, false);
+    imu.update(1, t, {0, 0, 0.033}, up, false);
+    const auto rate = imu.select(t, false);
+    EXPECT_EQ(rate->board, 0u);
+    EXPECT_EQ(rate->value, 0.0);
+    EXPECT_EQ(rate->disagree, i >= 3);
+  }
+}
+
+TEST(ImuProcessor, DropsImpossibleRatesAndOneSampleSpikes) {
+  ImuProcessor imu;
+  ASSERT_TRUE(imu.configure(imu_config(3)));
+  const Vector3 up{0.0, 0.0, 1.0};
+  imu.update(0, 0.0, {0, 0, 0}, up, true);
+  imu.update(0, 0.02, {0, 0, 0.05}, up, false);
+  EXPECT_NEAR(*imu.accepted(0), 0.05, 1e-12);
+  imu.update(0, 0.04, {0, 0, 3.0}, up, false);      // beyond max_yaw_rate
+  imu.update(0, 0.06, {0, 0, 0.05}, up, false);
+  imu.update(0, 0.08, {0, 0, 1.5}, up, false);      // one-sample spike: +1.45 in 20 ms
+  EXPECT_NEAR(*imu.accepted(0), 0.05, 1e-12);
+  imu.update(0, 0.10, {0, 0, 0.06}, up, false);     // back: continuous with the last accepted
+  EXPECT_NEAR(*imu.accepted(0), 0.06, 1e-12);
+  EXPECT_EQ(imu.dropped(0), 2u);
+}
+
+TEST(ImuProcessor, AcceptsARealFastChangeOneSampleLate) {
+  ImuProcessor imu;
+  ASSERT_TRUE(imu.configure(imu_config(3)));
+  const Vector3 up{0.0, 0.0, 1.0};
+  imu.update(0, 0.0, {0, 0, 0}, up, true);
+  imu.update(0, 0.02, {0, 0, 0.6}, up, false);      // faster than the Waffle Pi limit: held once
+  EXPECT_NEAR(*imu.accepted(0), 0.0, 1e-12);
+  imu.update(0, 0.04, {0, 0, 0.6}, up, false);      // repeated: real, accepted
+  EXPECT_NEAR(*imu.accepted(0), 0.6, 1e-12);
+}
+
+TEST(BoardImu, CalibrationSkipsSpikesButRestartsOnMotion) {
+  BoardImu imu;
+  ASSERT_TRUE(imu.configure(4, 0.0, 0.05));
+  const Vector3 up{0.0, 0.0, 1.0};
+  imu.update({0, 0, 0.08}, up, true);
+  imu.update({0, 0, 2.0}, up, true);   // one spike: skipped
+  imu.update({0, 0, 0.08}, up, true);
+  imu.update({0, 0, 0.08}, up, true);
+  imu.update({0, 0, 0.08}, up, true);
+  ASSERT_TRUE(imu.calibrated());
+  EXPECT_NEAR(imu.bias()[2], 0.08, 1e-12);  // the spike never entered the mean
+  BoardImu turning;
+  ASSERT_TRUE(turning.configure(4, 0.0, 0.05));
+  turning.update({0, 0, 0.08}, up, true);
+  for (int i = 0; i < 3; ++i) turning.update({0, 0, 0.5}, up, true);  // keeps turning: restart
+  for (int i = 0; i < 3; ++i) turning.update({0, 0, 0.5}, up, true);
+  EXPECT_FALSE(turning.calibrated());
+}
+
+TEST(ImuProcessor, BoardsAreComparedAtTheSameTime) {
+  // Ramping at 3.2 rad/s^2, lm_arm's newest sample is 20 ms older (0.336 vs wheel_clock's 0.40).
+  // Carried along its slope it is 0.40 too: no disagreement, although 0.064 > 0.02 + 8 % of 0.37.
+  ImuProcessor imu;
+  ASSERT_TRUE(imu.configure(imu_config(1)));
+  const Vector3 up{0.0, 0.0, 1.0};
+  imu.update(0, 0.0, {0, 0, 0}, up, true);
+  imu.update(1, 0.0, {0, 0, 0}, up, true);
+  imu.update(1, 0.96, {0, 0, 0.272}, up, false);
+  imu.update(0, 0.98, {0, 0, 0.336}, up, false);
+  imu.update(1, 0.98, {0, 0, 0.336}, up, false);
+  imu.update(0, 1.0, {0, 0, 0.40}, up, false);
+  const auto aligned = imu.select(1.0, false);
+  EXPECT_FALSE(aligned->disagree);
+  EXPECT_NEAR(aligned->value, 0.40, 1e-9);
+}
+
+static LocalizationMonitorConfig monitor_config() {
+  return {3.0, 0.3, 3.0, 20.0, 0.005, 0.3, 0.05, 0.5, 2.0, 0.05, 0.2, 2.0, 2};
+}
+
+TEST(LocalizationMonitor, RejectionDeadReckoningRelocalizationAndLost) {
+  LocalizationMonitor m;
+  ASSERT_TRUE(m.configure(monitor_config()));
+  const Covariance3 cov{0.0001, 0, 0, 0, 0.0001, 0, 0, 0, 0.0001};  // 1 cm, 1 cm, 0.57 deg each
+  EXPECT_TRUE(m.slam(0.0, {1.0, 1.0, 0.0}, cov, {1.02, 1.0, 0.0}, cov));   // 2 cm: 1.4 sigma
+  EXPECT_FALSE(m.slam(0.2, {1.0, 1.0, 0.0}, cov, {1.10, 1.0, 0.0}, cov));  // 10 cm: 7 sigma
+  EXPECT_EQ(m.state(), LocalizationState::kDeadReckoning);
+  m.moved(0.2);
+  EXPECT_EQ(m.state(), LocalizationState::kDeadReckoning);
+  m.moved(0.15);  // 0.35 m > 0.3 m
+  EXPECT_EQ(m.state(), LocalizationState::kRelocalize);
+  m.relocalized(true);
+  EXPECT_EQ(m.state(), LocalizationState::kDeadReckoning);
+  EXPECT_EQ(m.dead_reckoning(), 0.0);
+  m.moved(0.31);
+  m.relocalized(false);
+  EXPECT_EQ(m.state(), LocalizationState::kLost);
+  EXPECT_TRUE(m.slam(9.0, {1.0, 1.0, 0.0}, cov, {1.0, 1.0, 0.0}, cov));    // SLAM and EKF agree again
+  EXPECT_EQ(m.state(), LocalizationState::kOk);
+  // Both wrong together: they agree, but the scan no longer fits the map twice in a row.
+  m.scan_fits(false);
+  EXPECT_EQ(m.state(), LocalizationState::kOk);
+  m.scan_fits(false);
+  EXPECT_EQ(m.state(), LocalizationState::kDeadReckoning);
+  EXPECT_FALSE(m.slam(10.0, {1.0, 1.0, 0.0}, cov, {1.0, 1.0, 0.0}, cov));  // agreeing is not enough now
+  m.scan_fits(true);
+  EXPECT_TRUE(m.slam(11.0, {1.0, 1.0, 0.0}, cov, {1.0, 1.0, 0.0}, cov));
+}
+
+TEST(LocalizationMonitor, LearnsImuBiasAndScaleFromSlamYawOnlyWhenStable) {
+  LocalizationMonitor m;
+  ASSERT_TRUE(m.configure(monitor_config()));
+  const Covariance3 cov{0.0001, 0, 0, 0, 0.0001, 0, 0, 0, 0.0001};
+  m.slam(0.0, {0, 0, 0}, cov, {0, 0, 0}, cov);
+  // Straight for 20 s while SLAM adds 0.002 rad/s on top of the IMU: learning starts after 3 s.
+  double t = 0.0, mo = 0.0;
+  for (; t < 20.0; t += 0.02) {
+    mo += 0.002 * 0.02;
+    m.yaw(t, mo, 0.0, 0.0, 0);
+  }
+  EXPECT_GT(m.bias(0), 0.0005);
+  EXPECT_LT(m.bias(0), 0.002);
+  EXPECT_EQ(m.bias(1), 0.0);  // only the board in use
+  // A 90 deg turn the IMU under-reports by 3 %: SLAM adds 0.047 rad; scale moves 30 % of the way.
+  double odom = 0.0;
+  for (int i = 0; i < 157; ++i, t += 0.02) {
+    odom += 0.5 * 0.02;
+    mo += 0.03 * 0.5 * 0.02;
+    m.yaw(t, mo, odom, 0.5, 0);
+  }
+  for (int i = 0; i < 150; ++i, t += 0.02) m.yaw(t, mo, odom, 0.0, 0);
+  EXPECT_NEAR(m.scale(0), 1.009, 0.001);
+  // Rejected SLAM: no learning.
+  const double before = m.scale(0);
+  m.slam(t, {1, 0, 0}, cov, {0, 0, 0}, cov);
+  for (int i = 0; i < 157; ++i, t += 0.02) {
+    odom += 0.01;
+    mo += 0.001;
+    m.yaw(t, mo, odom, 0.5, 0);
+  }
+  for (int i = 0; i < 150; ++i, t += 0.02) m.yaw(t, mo, odom, 0.0, 0);
+  EXPECT_EQ(m.scale(0), before);
+}
+
+// 4 x 3 m room, 5 cm cells, with a box so the scan has a unique fit.
+static std::vector<int8_t> room(int &w, int &h) {
+  w = 80;
+  h = 60;
+  std::vector<int8_t> grid(w * h, 0);
+  for (int u = 0; u < w; ++u) grid[u] = grid[(h - 1) * w + u] = 100;
+  for (int v = 0; v < h; ++v) grid[v * w] = grid[v * w + w - 1] = 100;
+  for (int u = 34; u < 50; ++u) {
+    for (int v = 24; v < 36; ++v) grid[v * w + u] = 100;
+  }
+  return grid;
+}
+
+static std::vector<std::pair<double, double>> cast(const std::vector<int8_t> &grid, int w, int h, const Pose2 &pose) {
+  std::vector<std::pair<double, double>> points;
+  for (int k = 0; k < 360; ++k) {
+    const double a = k * M_PI / 180.0;
+    for (double r = 0.1; r < 8.0; r += 0.01) {
+      const double x = pose.x + r * std::cos(pose.yaw + a), y = pose.y + r * std::sin(pose.yaw + a);
+      const int u = static_cast<int>(x / 0.05), v = static_cast<int>(y / 0.05);
+      if (u < 0 || v < 0 || u >= w || v >= h) break;
+      if (grid[v * w + u] >= 65) {
+        points.emplace_back(r * std::cos(a), r * std::sin(a));
+        break;
+      }
+    }
+  }
+  return points;
+}
+
+TEST(ScanRelocalizer, FindsThePoseInAWideWindowOrFails) {
+  ScanRelocalizer r;
+  const ScanRelocalizerConfig config{0.3, 15.0 * M_PI / 180.0, 0.02, M_PI / 180.0, 0.05, 0.5, 180, 65};
+  ASSERT_TRUE(r.configure(config));
+  int w = 0, h = 0;
+  const auto grid = room(w, h);
+  ASSERT_TRUE(r.set_map(w, h, 0.05, 0.0, 0.0, grid));
+  const Pose2 truth{1.2, 1.0, 0.1};
+  const auto points = cast(grid, w, h, truth);
+  const auto found = r.match(points, {truth.x + 0.2, truth.y - 0.15, truth.yaw - 0.14});  // 25 cm, 8 deg off
+  ASSERT_TRUE(found);
+  EXPECT_NEAR(found->pose.x, truth.x, 0.03);
+  EXPECT_NEAR(found->pose.y, truth.y, 0.03);
+  EXPECT_NEAR(found->pose.yaw, truth.yaw, 0.02);
+  EXPECT_GT(found->score, 0.8);
+  EXPECT_GT(*r.score(points, truth), 0.8);
+  // 60 cm off along x: walls parallel to x still fit, so the score drops but not to zero.
+  EXPECT_LT(*r.score(points, {truth.x + 0.6, truth.y, truth.yaw}), *r.score(points, truth) - 0.2);
+  // A scan that fits nowhere (the robot is really elsewhere, out of the window): failure.
+  std::vector<std::pair<double, double>> wrong;
+  for (int k = 0; k < 360; ++k) wrong.emplace_back(0.4 * std::cos(k * M_PI / 180.0), 0.4 * std::sin(k * M_PI / 180.0));
+  EXPECT_FALSE(r.match(wrong, truth));
+  EXPECT_FALSE(r.set_map(w, h, 0.05, 0.0, 0.0, std::vector<int8_t>(w * h, 0)));  // no wall
+}
+
+TEST(ScanOdometry, TracksMotionThroughKeyframesDespiteASlippingPrediction) {
+  int w = 0, h = 0;
+  const auto grid = room(w, h);
+  ScanOdometry odom;
+  const ScanOdometryConfig config{{0.08, 3.0 * M_PI / 180.0, 0.01, 0.5 * M_PI / 180.0, 0.03, 0.4, 360, 50},
+                                  0.02, 6.0, 0.3, 15.0 * M_PI / 180.0};
+  ASSERT_TRUE(odom.configure(config));
+  Pose2 truth{0.6, 0.6, 0.0}, estimate = truth;
+  EXPECT_FALSE(odom.update(cast(grid, w, h, truth), {0, 0, 0}));  // first scan: keyframe only
+  // 1.2 m forward, a 90 deg left turn, 0.45 m on (stopping short of the box): several keyframes. The prediction carries the true
+  // turn (IMU) but the wheels claim 4 cm more travel per scan than happened (slip).
+  int steps = 0;
+  auto drive = [&](const Pose2 &move, int n) {
+    for (int i = 0; i < n; ++i, ++steps) {
+      truth = compose(truth, move);
+      const auto step = odom.update(cast(grid, w, h, truth), {move.x + 0.04, move.y, move.yaw});
+      ASSERT_TRUE(step) << "scan " << steps;
+      EXPECT_GT(step->score, 0.6);
+      EXPECT_NEAR(step->delta.x, move.x, 0.012);
+      estimate = compose(estimate, step->delta);
+    }
+  };
+  drive({0.03, 0.0, 0.0}, 40);
+  drive({0.0, 0.0, 3.0 * M_PI / 180.0}, 30);
+  drive({0.03, 0.0, 0.0}, 15);
+  EXPECT_NEAR(estimate.x, truth.x, 0.03);
+  EXPECT_NEAR(estimate.y, truth.y, 0.03);
+  EXPECT_NEAR(estimate.yaw, truth.yaw, 0.02);
+  // Sideways slide (skid steer slip): seen as lateral motion.
+  truth = compose(truth, {0.0, 0.03, 0.0});
+  const auto slide = odom.update(cast(grid, w, h, truth), {0, 0, 0});
+  ASSERT_TRUE(slide);
+  EXPECT_NEAR(slide->delta.y, 0.03, 0.012);
+  // A scan from elsewhere: no step, and the next scan restarts from it.
+  std::vector<std::pair<double, double>> wrong;
+  for (int k = 0; k < 360; ++k) wrong.emplace_back(0.4 * std::cos(k * M_PI / 180.0), 0.4 * std::sin(k * M_PI / 180.0));
+  EXPECT_FALSE(odom.update(wrong, {0, 0, 0}));
+  EXPECT_FALSE(odom.configure({config.matcher, 0.02, 0.1, 0.3, 0.2}));  // grid smaller than 10 cells
+}
+
+TEST(ImuProcessor, FrozenPrimaryHandsOverToTheBackupAndComesBack) {
+  ImuProcessor imu;
+  ASSERT_TRUE(imu.configure(imu_config(3)));
+  const Vector3 up{0.0, 0.0, 1.0};
+  imu.update(0, 0.0, {0, 0, 0.01}, up, true);
+  imu.update(1, 0.0, {0, 0, -0.02}, up, true);
+  double t = 0.0;
+  auto step = [&](double primary_z, double backup_z) {
+    t += 0.02;
+    imu.update(0, t, {0.001, 0.002, primary_z}, up, false);
+    imu.update(1, t, {0.001, 0.002, backup_z}, up, false);
+    return imu.select(t, false);
+  };
+  // Live and noisy: never frozen, the primary is used.
+  for (int i = 0; i < 20; ++i) EXPECT_EQ(step(0.31 + 0.001 * (i % 3), 0.28 + 0.001 * (i % 2))->board, 0u);
+  // The primary repeats its raw sample exactly: frozen after 10, the backup takes over.
+  std::optional<YawRate> rate;
+  for (int i = 0; i < 9; ++i) rate = step(0.5, 0.28 + 0.001 * (i % 2));
+  EXPECT_EQ(rate->board, 0u);
+  rate = step(0.5, 0.28);
+  EXPECT_TRUE(imu.frozen(0));
+  EXPECT_EQ(rate->board, 1u);
+  EXPECT_NEAR(rate->value, 0.30, 1e-9);
+  // Changing again: back after 10 changing samples.
+  for (int i = 0; i < 9; ++i) rate = step(0.31 + 0.001 * (i % 3), 0.28 + 0.001 * (i % 2));
+  EXPECT_EQ(rate->board, 1u);
+  rate = step(0.315, 0.281);  // differs from the 0.312 before it
+  EXPECT_FALSE(imu.frozen(0));
+  EXPECT_EQ(rate->board, 0u);
+}
+
+namespace {
+using P2 = std::vector<std::array<double, 2>>;
+// 2 m x 2 m, 5 cm cells, origin (0, 0): a wall along x = 1.0 m (column 20), the rest free.
+nav_msgs::msg::OccupancyGrid wall_map() {
+  nav_msgs::msg::OccupancyGrid map;
+  map.info.width = map.info.height = 40;
+  map.info.resolution = 0.05;
+  map.info.origin.orientation.w = 1.0;
+  map.data.assign(40 * 40, 0);
+  for (int y = 0; y < 40; ++y) map.data[y * 40 + 20] = 100;
+  return map;
+}
+P2 blob(double x, double y) { return {{x, y}, {x + 0.02, y}, {x, y + 0.02}, {x + 0.02, y + 0.02}}; }
+size_t kept(const std::vector<bool> &keep) { return static_cast<size_t>(std::count(keep.begin(), keep.end(), true)); }
+}  // namespace
+
+TEST(LidarObstacleFilter, PersistentObjectsPassFlickersAndSinglePointsDoNot) {
+  craft_perception::LidarObstacleFilter filter;
+  ASSERT_TRUE(filter.configure({}));  // 3 frames, 3 points, no map
+  // A 4-point object: dropped while history builds up, kept from the third frame.
+  EXPECT_EQ(kept(filter.filter(blob(0.5, 0.5))), 0u);
+  EXPECT_EQ(kept(filter.filter(blob(0.5, 0.5))), 0u);
+  EXPECT_EQ(kept(filter.filter(blob(0.5, 0.5))), 4u);
+  // One noise point next to it in one frame only: dropped, the object stays.
+  auto frame = blob(0.5, 0.5); frame.push_back({1.5, 1.5});
+  auto keep = filter.filter(frame);
+  EXPECT_EQ(kept(keep), 4u);
+  EXPECT_FALSE(keep.back());
+  // A single persistent point: persists but is a cluster of one.
+  for (int i = 0; i < 3; ++i) keep = filter.filter({{1.5, 1.5}});
+  EXPECT_EQ(kept(keep), 0u);
+  // A slow mover (4 cm per frame) still persists.
+  filter.reset();
+  for (int i = 0; i < 3; ++i) keep = filter.filter(blob(0.2 + 0.04 * i, 0.2));
+  EXPECT_EQ(kept(keep), 4u);
+}
+
+TEST(LidarObstacleFilter, MapWallsAndOffMapPointsAreDropped) {
+  craft_perception::LidarObstacleFilter filter;
+  ASSERT_TRUE(filter.configure({}));
+  filter.set_map(wall_map());
+  ASSERT_TRUE(filter.has_map());
+  EXPECT_NEAR(filter.wall_distance(0.525, 1.0), 0.50, 1e-6);  // cell centre to wall cell centre: 10 cells
+  EXPECT_EQ(filter.wall_distance(-0.1, 1.0), 0.0);  // off the map counts as wall
+  P2 frame = blob(1.05, 1.0);   // the wall itself, seen a few cm off: within 6 cm
+  auto object = blob(0.6, 1.0);  // 0.4 m from the wall
+  frame.insert(frame.end(), object.begin(), object.end());
+  std::vector<bool> keep;
+  for (int i = 0; i < 3; ++i) keep = filter.filter(frame);
+  EXPECT_EQ(kept(keep), 4u);
+  for (size_t i = 0; i < 4; ++i) EXPECT_FALSE(keep[i]);
+  for (size_t i = 4; i < 8; ++i) EXPECT_TRUE(keep[i]);
+}
+
+TEST(LidarObstacleFilter, RejectsBadConfiguration) {
+  craft_perception::LidarObstacleFilter filter;
+  craft_perception::LidarObstacleFilterConfig c;
+  c.cell_m = 0; EXPECT_FALSE(filter.configure(c));
+  c = {}; c.persist_frames = 0; EXPECT_FALSE(filter.configure(c));
+  c = {}; c.min_cluster_points = 0; EXPECT_FALSE(filter.configure(c));
+  c = {}; c.wall_margin_m = -1; EXPECT_FALSE(filter.configure(c));
+}
+
+#include "lidar_processor/scan_merger.hpp"
+
+TEST(ScanMergerFloorRoi, ClearSectorKeepsAllEdgeBinsKeepNearPointsPerSide) {
+  // One LiDAR at x 0.155 facing +x (outward), not flipped; points at the given angle/range from it.
+  lidar_processing::MergerConfig c;
+  c.front_fov_deg = 180; c.fov_near_m = 10; c.body_radius_m = 0.1; c.body_center_x = 0.01275;
+  c.floor_roi.enabled = true;
+  c.floor_roi.front_left = {75.0, {0.88, 0.93, 0.67}};
+  c.floor_roi.front_right = {65.0, {1.37, 1.40, 0.81, 0.73, 0.53}};
+  lidar_processing::ScanMerger merger;
+  ASSERT_TRUE(merger.configure(c));
+  const auto kept = [&](double deg, double range) {
+      sensor_msgs::msg::LaserScan s;
+      s.header.frame_id = "laser"; s.range_min = 0.05f; s.range_max = 8.0f;
+      s.angle_min = static_cast<float>(deg * M_PI / 180); s.angle_increment = 0.01f;
+      s.ranges = {static_cast<float>(range)};
+      const auto out = merger.merge(s, {0.155, 0.0, 0.0, false});
+      return std::any_of(out->ranges.begin(), out->ranges.end(), [](float r) {return std::isfinite(r);});};
+  EXPECT_TRUE(kept(30, 3.0));    // inside the clear sector: any range
+  EXPECT_TRUE(kept(74, 3.0));
+  EXPECT_TRUE(kept(80, 0.5));    // left 80-85 bin: up to 0.93 m
+  EXPECT_FALSE(kept(80, 1.5));
+  EXPECT_TRUE(kept(-70, 1.2));   // right 70-75 bin: up to 1.40 m
+  EXPECT_FALSE(kept(-70, 1.6));
+  EXPECT_TRUE(kept(-60, 3.0));   // right clear sector ends at 65 deg
+  EXPECT_FALSE(kept(-89, 0.6));  // right 85-90 bin: up to 0.53 m
+  c.floor_roi.front_left.clear_deg = 95;  // out of range
+  EXPECT_FALSE(merger.configure(c));
+  c.floor_roi.enabled = false;
+  ASSERT_TRUE(merger.configure(c));
+  EXPECT_TRUE(kept(80, 1.5));    // ROI off: the plain 180 deg field of view
 }

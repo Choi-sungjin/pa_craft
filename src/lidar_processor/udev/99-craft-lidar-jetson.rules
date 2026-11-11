@@ -1,0 +1,9 @@
+# LDS-03 x2 on the Jetson (CP2102 10c4:ea60). Same VID/PID and by-id, so names follow physical USB ports.
+# 2026-10-31, LiDARs remounted upside down: 1-2.3.4 = front (verified by covering it), 1-2.3.1 = rear
+# (moved from 1-2.3.2). The front socket did not change; a 180 deg yaw error had made the scans look swapped.
+# 2026-11-01: match the hub socket only (1-2.?.N), so moving the hub to another Jetson port (2.3 -> 2.4) keeps the
+# names. Keep the LiDAR cables in the same hub sockets; recheck with scripts/find_lidar_ports.sh (cover one LiDAR).
+#   sudo cp 99-craft-lidar-jetson.rules /etc/udev/rules.d/99-craft-lidar.rules
+#   sudo udevadm control --reload-rules && sudo udevadm trigger && ls -l /dev/lidar_*
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", KERNELS=="1-2.?.4", SYMLINK+="lidar_front", MODE="0666"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", KERNELS=="1-2.?.1", SYMLINK+="lidar_rear",  MODE="0666"

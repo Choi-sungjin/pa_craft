@@ -16,7 +16,12 @@ find_package(geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(diagnostic_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
-find_package(OpenCV 4 REQUIRED COMPONENTS core imgproc aruco)
+find_package(OpenCV 4 REQUIRED COMPONENTS core imgproc)
+if(OpenCV_VERSION VERSION_LESS "4.7")
+  find_package(OpenCV 4 REQUIRED COMPONENTS core imgproc aruco)
+else()
+  find_package(OpenCV 4 REQUIRED COMPONENTS core imgproc objdetect)
+endif()
 find_package(ncnn REQUIRED CONFIG)
 find_package(yaml-cpp REQUIRED)
 
@@ -32,7 +37,7 @@ add_library(perception_modules
   src/yolo_detector.cpp src/apriltag_reader.cpp src/knob_depth.cpp src/knob_lever.cpp
   src/object_detector.cpp src/obstacle_detector.cpp src/puck_axis.cpp
   src/d435_perception.cpp src/c310_perception.cpp src/shared_frame.cpp
-  src/state_estimator.cpp src/lidar_obstacle_detector.cpp src/lidar_perception.cpp)
+  src/state_estimator.cpp src/imu_processor.cpp src/localization_monitor.cpp src/scan_relocalizer.cpp src/scan_odometry.cpp src/lidar_obstacle_detector.cpp src/lidar_obstacle_filter.cpp src/lidar_perception.cpp)
 target_compile_features(perception_modules PUBLIC cxx_std_17)
 target_include_directories(perception_modules PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

@@ -60,11 +60,13 @@ TF laser_rear: x=-0.163 y=0.000 yaw=0.0deg
 
 | launch 인자 | 기본값 | 설명 |
 | --- | --- | --- |
-| `front_fov_deg` / `rear_fov_deg` | `200.0` | 각 LiDAR 의 로봇 바깥 방향 기준 전체 FOV [deg] |
-| `fov_near_m` | `0.30` | FOV 밖 점 중 로봇 중앙에서 이 거리 안쪽만 버림 [m]. 기둥은 지우고 옆쪽 먼 장애물은 남김 |
-| `body_radius_m` | `0.25` | 로봇 중앙에서 이 거리 안쪽 점은 FOV 와 상관없이 버림 [m]. FOV 안쪽에 걸리는 기둥 제거용 |
-| `front_x`, `front_y` / `rear_x`, `rear_y` | `0.1437`, `-0.0113` / `-0.1437`, `0.0113` | 로봇 중앙 기준 LiDAR 위치 [m] (퍽 보정 결과) |
-| `front_yaw_deg` / `rear_yaw_deg` | `180.0` / `0.97` | LiDAR 방향 (두 대 모두 180° 돌려 장착, 후방은 퍽 보정 +0.97°) |
+| `front_fov_deg` / `rear_fov_deg` | `180.0` | 각 LiDAR 의 로봇 바깥 방향 기준 전체 FOV [deg] |
+| `fov_near_m` | `10.0` | FOV 밖 점 중 몸체 중앙에서 이 거리 안쪽만 버림 [m]. 10 > range_max 라 FOV 밖은 모두 버림(2026-10-31, 업사이드다운 장착). 예전 0.30: 기둥만 지우고 옆쪽 먼 장애물은 남김 |
+| `body_radius_m` | `0.25` | 몸체 중앙에서 이 거리 안쪽 점은 FOV 와 상관없이 버림 [m]. FOV 안쪽에 걸리는 기둥 제거용 |
+| `body_center_x` | `0.01275` | 몸체 중앙(두 LiDAR 가운데)의 `base_link` x [m]. 몸체 필터·FOV 방향의 중심 |
+| `front_x`, `front_y` / `rear_x`, `rear_y` | `0.155`, `0.0` / `-0.1295`, `0.0` | `base_link`(회전 중심) 기준 LiDAR 위치 [m]. 2026-10-31 실측: 전방 LiDAR 중심이 회전축 중심 155 mm 앞, 몸체 중심 간 284.5 mm, 둘 다 좌우 가운데 선 위 |
+| `front_yaw_deg` / `rear_yaw_deg` | `180.0` / `0.0` | LiDAR 스캔 0도 방향. 2026-10-31 뒤집어 재장착 후에도 각 LiDAR 의 0도는 로봇 안쪽을 향함(모터 대칭, 손 가림으로 실측) |
+| `front_roll_deg` / `rear_roll_deg` | `180.0` / `180.0` | 180 = 뒤집어(업사이드다운) 장착. 병합·보정 코드가 스캔 각도 부호를 뒤집는다 |
 | `front_port` / `rear_port` | `/dev/lidar_front` / `/dev/lidar_rear` | udev 링크 |
 
 ### FOV 조정 (실행 중)
@@ -95,10 +97,10 @@ python3 scripts/check_dir.py
 
 | 항목 | 값 | 근거 |
 | --- | --- | --- |
-| LiDAR 위치 | 전방 (0.1437, −0.0113), 후방 (−0.1437, 0.0113) | 퍽 보정 결과 (LiDAR 간 0.288 m, 자로 잰 28 cm 와 8 mm 차이). CAD 값(±0.163)에서 교체 |
-| LiDAR 방향 | 전방 180°, 후방 0.97° | 두 LiDAR 모두 180° 돌려 장착됨(원위치가 어려워 그대로 사용). 같은 물체를 두 LiDAR 가 같은 좌표로 보고, 로봇 오른쪽 사람이 −y 에 찍히는 것 확인 |
-| 로봇 중앙 | 두 LiDAR 의 가운데 = `base_link` | CAD 몸체(330 mm) 중앙과 일치 |
-| 스캔 높이 | z=0.122 | 미실측. 2D 결과에는 영향 없음 |
+| LiDAR 위치 | 전방 (0.155, 0), 후방 (−0.1295, 0) | 2026-10-31 재장착 후 실측: 전방 LiDAR 중심이 회전축 중심 155 mm 앞, 몸체 중심 간 284.5 mm(판 320 mm − 내측 249 mm), 둘 다 좌우 가운데 선 위. 이전: 퍽 보정 (0.1697, −0.0113) / (−0.1177, 0.0113) |
+| LiDAR 방향 | 전방 yaw 180°, 후방 0°, 둘 다 roll 180° | 2026-10-31 뒤집어 재장착(업사이드다운). 스캔 0도가 로봇 안쪽을 향함: 모터 4개가 raw 0도 기준 대칭, 전방 LiDAR 를 손으로 덮으면 raw 90~240도가 막힘. 좌우(−y)는 비대칭 물체로 확인할 것 |
+| `base_link` | 앞뒤 바퀴 축 가운데(4WD 스키드 스티어 회전 중심), 2026-10-30부터 | 두 LiDAR 가운데(몸체 중앙)는 그보다 12.75 mm 앞(2026-10-31 실측, 이전 차체는 26 mm) → `body_center_x` |
+| 스캔 높이 | z=0.021 | 2026-10-31 실측(지면 ~ 원통 높이 중앙, 뒤집은 뒤). 2D 결과에는 영향 없음, 지면 반사 주의 |
 | LiDAR 포트 | `1-1.2.1`=front, `1-1.2.3`=rear | PA18 Pi 실측. `udev/99-craft-lidar.rules` |
 
 참고: 두 LiDAR 중심 사이를 자로 재면 28 cm, CAD 에서는 약 32.6 cm 입니다. 퍽 보정 결과(0.288 m)가 실측과 맞아 CAD 대신 보정 값을 씁니다.
@@ -138,7 +140,7 @@ python3 scripts/check_dir.py
 3. 퍽 반지름을 재서 넣고 실행합니다 (Pi, `lidar_processor.launch.py` 실행 중).
 
    ```bash
-   ros2 run lidar_processor lidar_calibrator --ros-args -p puck_radius:=0.035
+   ros2 run lidar_processor lidar_calibrator --ros-args -p puck_radius:=0.035 -p body_center_x:=0.01275
    ```
 
 4. 출력 확인 후 `launch/lidar_processor.launch.py` 기본값에 반영하고 다시 빌드합니다.

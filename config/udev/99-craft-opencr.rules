@@ -1,0 +1,6 @@
+# Both OpenCRs report 0483:5740 and the same serial, so names follow the socket on the robot's USB hub.
+# 2026-11-01: the hub moved from Jetson port 2.3 to 2.4, which broke the fixed 2.3.3 match (both boards became
+# wheel_clock). Match the hub socket only, whichever Jetson port the hub is in: .3 = arm/LM, .2 = wheel/clock.
+# Keep the board cables in the same hub sockets.
+SUBSYSTEM=="tty", KERNEL=="ttyACM*", ENV{ID_VENDOR_ID}=="0483", ENV{ID_MODEL_ID}=="5740", ENV{ID_PATH}=="platform-3610000.usb-usb-0:2.?.3:1.0", SYMLINK+="opencr_arm_lm", ENV{ID_MM_DEVICE_IGNORE}="1"
+SUBSYSTEM=="tty", KERNEL=="ttyACM*", ENV{ID_VENDOR_ID}=="0483", ENV{ID_MODEL_ID}=="5740", ENV{ID_PATH}=="platform-3610000.usb-usb-0:2.?.2:1.0", SYMLINK+="opencr_wheel_clock", ENV{ID_MM_DEVICE_IGNORE}="1"

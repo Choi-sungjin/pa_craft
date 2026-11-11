@@ -1,0 +1,28 @@
+# craft_voice on the robot (Jetson + Bluetooth speaker/microphone): the cute persona that answers to its name.
+# Start: tools/run_voice.sh (no colcon build needed) or
+#   ros2 run craft_voice voice_node --ros-args --params-file config/voice_robot.yaml
+# Anything not listed here keeps the node default (see voice.yaml for all parameters).
+voice_node:
+  ros__parameters:
+    camera: none                  # voice only; set d435 on the robot to let it also describe what it sees
+    use_image: false
+    state_mode: template          # state changes in fixed words, at once (GPT thinks when asked and when it notices)
+    announce_states: Ready,Run.Execute,Run.Complete,Run.Stopping,Fault
+    state_cooldown_s: 8.0
+    narrate_period_s: 0.0         # no periodic narration: it speaks when something changes or when called
+    style: cute
+    persona: 귀엽고 발랄한 로봇 친구처럼 짧은 반말 한 문장으로 말해. 이름은 크래프트야. 미션 소개는 하지 마.
+    max_chars: 60
+    tts_model: gpt-realtime-2.1
+    tts_voice: marin
+    tts_instructions: 귀엽고 발랄한 로봇 친구 목소리로, 밝고 살짝 신난 억양으로 짧고 또렷하게 말해. 오류와 멈춤은 차분하게 말해.
+    player_command: pw-play {file}
+    stream_player_command: aplay -q -t raw -f S16_LE -r {rate} -c 1 -   # ALSA default = PipeWire on the Jetson
+    listen: true
+    mic_command: pw-record --rate 16000 --channels 1 --format s16 -
+    wake_words: 크래프트
+    follow_up_s: 6.0
+    notice: true
+    # Recordings made earlier (craft-voice-sandbox): the path search reaction, the step cheer, the finale.
+    # wake = the answer to the name alone ("짜스!").
+    reactions: "wake=~/craft-voice-sandbox/recordings/jjasseu.wav,replan=~/craft-voice-sandbox/recordings/replanning.wav,step_done=~/craft-voice-sandbox/recordings/jjasseu.wav,run_done=~/craft-voice-sandbox/recordings/mission_complete.angry.wav,idle=~/craft-voice-sandbox/recordings/mission_complete.angry.wav"

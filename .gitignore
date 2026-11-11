@@ -17,6 +17,8 @@ __pycache__/
 # Local environment settings
 .env
 .env.*
+# craft_voice keys: env/openai.env.example is the template, the filled-in copy stays local
+src/craft_voice/env/*.env
 
 # Local-only: large model workspace, editor, Claude outputs, nested build outputs
 /custom_yolo26/
@@ -24,3 +26,9 @@ __pycache__/
 /Claude outputs/
 /src/craft_planning/v75_ws/build/
 /src/craft_planning/v75_ws/install/
+
+# rosbags stay local (~/bags, test/*/logs); CSV logs and bag metadata.yaml are kept
+*.mcap
+*.db3
+# nested CMake build trees
+tools/*/build/

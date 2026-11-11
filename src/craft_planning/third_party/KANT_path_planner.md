@@ -3,8 +3,8 @@
 - Repository: https://github.com/JunmyeongPark/KANT_path_planner
 - Revision: `9af403b68bc4378516132201e9f215cea4518ea1`
 - Author/account: JunmyeongPark
-- Imported core: `astar_arc.py` through the `run()` API, now `src/kant_astar_arc.py`.
-- Imported examples: `maps/map20*.txt`, now `maps/kant/`.
+- Imported core: `astar_arc.py` through the `run()` API, now `src/astar_arc.py`.
+- Imported examples: `maps/map20*.txt`, now `maps/astar_arc/`.
 - Original README: `KANT_path_planner_README.md` alongside this file.
 - No LICENSE file or license declaration was present at the imported revision.
 

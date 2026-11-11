@@ -6,3 +6,4 @@ torchvision==0.29.0
 opencv-python==5.0.0.93
 numpy==2.5.3
 pyrealsense2==2.59.1.11053
+openai==3.42.1          # craft_voice (GPT + speech); key from OPENAI_API_KEY

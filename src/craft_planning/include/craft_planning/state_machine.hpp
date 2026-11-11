@@ -8,7 +8,7 @@ enum class RunPhase {AwaitRequest, PrepareTask, Compute, Execute, Complete, Stop
 enum class StepKind {Navigate, Tcp, Gripper, Clock, Wait};
 struct StateMachineConfig {
   double initialization_timeout_s = 10, ready_timeout_s = 5;
-  double compute_timeout_s = 3, execution_timeout_s = 30;
+  double compute_timeout_s = 3, execution_timeout_s = 60;
   double feedback_timeout_s = 0.5, stop_timeout_s = 3;
   int max_compute_retries = 1;
 };

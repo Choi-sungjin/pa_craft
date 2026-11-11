@@ -1,6 +1,7 @@
 #pragma once
 
 #include "craft_planning/arm_planner.hpp"
+#include "craft_planning/grasp_region.hpp"
 #include "craft_planning/path_planner.hpp"
 #include "craft_planning/state_machine.hpp"
 
@@ -28,17 +29,21 @@ struct PlanningStep {
 struct PlanningConfig {
   PathPlannerConfig path;
   ArmPlannerConfig arm;
+  GraspRegionConfig grasp;
   StateMachineConfig fsm;
   double loop_hz = 20.0;
   double replan_period_s = 0.2;
+  double block_wait_s = 2.0;    // blocked path: pause this long before replanning
+  double min_segment_m = 0.15;  // STOP_TURN corners closer than this to the start are not segment ends
   double odom_timeout_s = 0.5;
   double joint_timeout_s = 0.5;
   double observation_timeout_s = 0.5;
   double obstacle_timeout_s = 0.5;
   double cruise_speed = 0.12;
-  double goal_tolerance = 0.03;
+  double goal_tolerance = 0.10;
   double observation_min_confidence = 0.5;
   bool require_lidar = true;
+  bool require_arm_joints = true;  // false: Ready without arm joint feedback (drive-only, arm board off)
   bool goal_heading_required = false;
   std::string joint_state_topic = "/control/arm_joints";
   std::map<std::string, std::vector<PlanningStep>> missions;

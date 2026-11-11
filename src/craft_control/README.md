@@ -43,7 +43,7 @@ motor measurements. Healthy boards continue receiving hold commands.
 `[slide_joint, shoulder_joint, elbow_joint, wrist_pitch_joint, tool_roll_joint]`,
 with units `[m, rad, rad, rad, rad]`, `frame_id=base_link`. It is emitted only for
 fresh healthy arm feedback with both arm and LM mappings confirmed and valid
-calibration. Values invert the configured motor offsets, directions and gearing;
+calibration. Values invert the configured motor offsets, directions and measured LM conversion;
 they are measured feedback, not the previous command or RViz interpolation.
 
 Physical dimensions, limits, tracking tolerances, and clock geometry are defined
@@ -60,14 +60,32 @@ values in YAML. `LmController` handles the slide joint independently, converting
 linear displacement in metres to motor radians:
 
 ```text
-lm_motor_angle = lm_motor_offset + lm_motor_direction * lm_gear_ratio * position_m / lm_pulley_radius
+lm_motor_angle = lm_motor_offset + lm_motor_direction * position_m / lm_meters_per_rad
 ```
 
 LM motor limits and calibration use separate `lm_*` parameters, including
-`lm_mapping_confirmed`. Zero pulley radius and gear ratio disable LM targets and
-hold its measured motor angle; they do not disable the rotational arm controller.
-LM limits retain the former slide channel's values, in motor radians, pending
-hardware calibration. `GripperController` remains independent.
+`lm_mapping_confirmed`. A zero `lm_meters_per_rad` disables LM targets and
+holds its measured motor angle; this does not disable the rotational arm controller.
+`lm_meters_per_rad` is measured travel divided by motor rotation in radians; separate
+pulley radius and gear ratio parameters are unnecessary. LM calibration uses
+102 mm travel over -399.4 to 509.2 degrees, with -54.97 degrees as slide zero (63.3 mm from the motor end). `GripperController` remains independent.
+
+Direction settings assume hardware Reverse OFF. With URDF +Y forward and +Z up
+at the reference pose, `arm_joint_directions` is `[+1, +1, -1, +1]` in
+shoulder, elbow, wrist_pitch, tool_roll order; `lm_motor_direction` is `+1`
+(URDF `slide_joint` axis is -X, so + moves toward the LM motor, same as motor raw +).
+These arm signs were inferred from the reported physical motions at the reference
+pose and still require hardware validation with calibrated offsets. Arm firmware
+preserves raw motor signs; apply the URDF sign correction only in host YAML.
+Wheel signs are applied in firmware: left `+1`, right `-1`. Clock uses firmware
+`+1`, host `clock_direction: +1`, and host zero angle 165.5 degrees (slot 12, at the loading guide; 2026-11-03 after reassembly, was 210.0, 314.6).
+Gripper closes toward 229 degrees (5 degrees inside the 234-degree hard stop) from its
+94-degree open pose; its opposite closed endpoint is -53.1 degrees (limit -48.1).
+Grasp is detected by current (0.1 A for 0.1 s), not by reaching the close target. It uses open/close targets rather than an IK sign.
+
+Arm zero offsets and wrist pitch limits remain uncalibrated. Mapping confirmation
+flags and both firmware `kHardwareConfirmed` flags remain false. No board upload
+or physical motion validation has been performed for these settings.
 
 `TaskCommand.joints` carries the five-joint IK result: slide [m], then shoulder,
 elbow, wrist_pitch and tool_roll [rad]. ControlMaster validates the complete manipulator
@@ -110,21 +128,35 @@ vertices and avoiding spline overshoot outside the checked path. `/control/track
 remains a visualization output. Path endpoint position and optional requested goal yaw are
 checked in LateralController; `wheel_heading_tolerance` is configured in control YAML.
 
-The longitudinal controller limits `target_v`. Pure Pursuit
-selects a path point at least `lookahead_distance` away, starting at the nearest
-path point; it uses the last available point if the remaining path is shorter.
-With that point transformed into the chassis frame `(x, y)`:
+The longitudinal controller limits `target_v`. "My node" is the path sample the robot is at:
+the nearest within +-3 samples of the previous one (ties go ahead), searched over the whole path
+only when that window is more than `lookahead_distance` away, so a path that overlaps itself
+(U-turn) never switches branches. Pure Pursuit targets the first sample at least
+`lookahead_distance` along the path from my node (or the last one). When that target is more
+than `wheel_heading_tolerance` off the heading (behind or beside the robot), the robot first
+turns in place until it is within half of it. Arrival needs the endpoint within tolerance and
+my node near the end of the path. Path updates may change the endpoint (Planning sends one A*+arc
+segment per task, up to a STOP_TURN corner). With the target transformed into the chassis
+frame `(x, y)`:
 
 ```text
 curvature = 2*y / (x*x + y*y)
 omega = limited_v * curvature
-left  = limited_v / wheel_radius - omega * wheel_separation / (2*wheel_radius)
-right = limited_v / wheel_radius + omega * wheel_separation / (2*wheel_radius)
+separation = skid_steer_factor * wheel_track   (factor 0 -> 1 + (wheelbase/wheel_track)^2)
+left  = limited_v / wheel_radius - omega * separation / (2*wheel_radius)
+right = limited_v / wheel_radius + omega * separation / (2*wheel_radius)
 ```
 
+The drive is 4WD skid steer: the rear wheels follow their side in firmware, and turning
+scrubs the wheels sideways, so the chassis turns less than a two-wheel differential drive
+with the same wheel speeds. The effective `separation` covers that for Pure Pursuit, the
+in-place alignment turn, and wheel odometry yaw. Wheel centers are 0.289 m apart left/right
+and 0.230 m front/rear, so the geometric estimate is 1.63 (0.471 m); replace
+`skid_steer_factor` with the measured wheel/IMU ratio of `test/drive/rotate.py`.
+Odometry and paths refer to the turning center, midway between the axles.
 Both wheel commands are scaled by the same factor if either exceeds `max_wheel`.
-Commands are wheel angular velocities in rad/s. Wheel centers are 0.288 m apart;
-wheel radius is 0.033 m. Tune lookahead and endpoint tolerance on the robot.
+Commands are wheel angular velocities in rad/s; wheel radius is 0.033 m. Tune lookahead
+and endpoint tolerance on the robot.
 
 Empty/invalid paths, missing/invalid odometry, differing frames, and endpoint
 arrival stop the wheels. The next valid path uses
@@ -172,13 +204,16 @@ command first, in the same order, then the board-specific state:
 ```text
 host -> OpenCR: wheel_l,wheel_r,clock_motor_angle
 OpenCR -> host: wheel_l_feedback,wheel_r_feedback,clock_motor_angle,wheel_state,clock_state,
-                imu_ok,gz
+                imu_ok,gx,gy,gz,ax,ay,az
 ```
 
-Each sample also publishes `/control/wheel/odom` (wheel dead reckoning with twist covariance) and,
-when `imu_ok=1`, `/control/imu/data` in `imu_link` (OpenCR board-frame yaw rate only, minus
-`imu_gyro_z_bias`; no orientation or acceleration). `odom->base_link` comes from robot_localization
-(`craft_perception/config/ekf.yaml`); set `publish_odom_tf: true` only when running without it.
+The arm/LM board appends the same seven IMU fields after `arm_lm_state,gripper_current_a`.
+Both boards are fixed to the chassis. Each sample also publishes `/control/wheel/odom` (wheel dead
+reckoning with twist covariance) and relays the board's IMU fields raw on `/control/imu/wheel_clock` /
+`/control/imu/lm_arm` (`sensor_msgs/Imu`, board frame, gyro offset included, accel in m/s^2; nothing
+while `imu_ok=0`). craft_perception's `imu_processor` turns both into the chassis yaw rate
+(`/perception/imu/data`). `odom->base_link` comes from robot_localization (`craft_perception/config/ekf.yaml`); set
+`publish_odom_tf: true` only when running without it.
 
 The control node reports on each new valid serial sample:
 
@@ -213,6 +248,11 @@ A new path revision resets
 `/control/wheel_target_reached`. Arrival tolerances are configured per controller. All tolerances come from `config/control.yaml`, are
 validated as positive by ControlMaster, and are stored in each controller at
 configuration, so every controller exposes `is_target_reached(feedback)`.
+`arm_angle_tolerance` and `lm_angle_tolerance` are 0.5 motor degrees (~6 ticks; LM ~0.06 mm)
+and must equal the per-axis tolerances in `firmware/lm_arm/config.h`: the board reports
+"moving" until each axis is inside its own tolerance, so a host value tighter than the
+firmware one never completes. Arm joints use a position I gain to reach it under load; the
+LM has none, so watch for an LM step that never settles.
 Clock completion additionally requires `clock_state` idle, checked by ControlMaster.
 Targets outside motor limits are not expected: planning accounts for them in IK.
 

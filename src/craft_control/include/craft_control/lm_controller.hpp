@@ -12,7 +12,7 @@ public:
   // ControlMaster supplies YAML configuration. Limits/offset are motor rad, target is metres.
   bool configure(
     const std::string & joint_name, double min_angle, double max_angle,
-    double direction, double offset, double pulley_radius, double gear_ratio, double tolerance);
+    double direction, double offset, double meters_per_rad, double tolerance);
   bool is_valid_target(const std::string & joint_name, double position) const;
   void set_target(double position);  // store a validated linear position [m]
   void clear_target();
@@ -28,8 +28,7 @@ private:
   double max_angle_ = 0.0;
   double direction_ = 0.0;
   double offset_ = 0.0;
-  double pulley_radius_ = 0.0;
-  double gear_ratio_ = 0.0;
+  double meters_per_rad_ = 0.0;  // measured linear travel per motor radian
   double tolerance_ = 0.0;
   double target_position_ = 0.0;
   bool conversion_ready_ = false;

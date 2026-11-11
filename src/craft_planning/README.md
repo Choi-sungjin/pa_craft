@@ -11,7 +11,7 @@ the package never starts an example mission or invents physical target positions
 | --- | --- |
 | `src/planning_master.cpp` | ROS I/O, TF, input snapshots, asynchronous work, commands and diagnostics |
 | `StateMachine` | Readiness, deadlines, bounded calculation retries, completion and cancellation |
-| `PathPlanner` | Static maps, footprint inflation, native A*, dynamic obstacles and collision checks |
+| `PathPlanner` | Static maps, footprint inflation, A*+arc (C++ port), dynamic obstacles and collision checks |
 | `ArmPlanner` | Headless URDF FK/IK with Pinocchio and a measured joint seed |
 | `planning_config.cpp` | Required typed ROS parameters and strict mission YAML parsing |
 
@@ -23,9 +23,10 @@ only one is in flight. Cancellation/fault changes a generation so old
 results are discarded. Only calculations may retry, never physical actions.
 
 The installed executable is C++. `scripts/planning_master.py` forwards to the C++ executable. Python `src/path_planner.py` and
-`src/kant_astar_arc.py` remain importable references with regression tests. Native
-C++ planning does not execute KANT `PASS`/`STOP_TURN`/`ALIGN` metadata or its
-corner-fillet/speed-profile algorithm. Provenance remains in `third_party/`.
+`src/astar_arc.py` remain importable references with regression tests. The C++
+`PathPlanner` is a port of `astar_arc.py` (same costs, heap tie order and fillet search;
+waypoints matched the Python planner on 40/40 random arena3_clean starts, ~24 ms vs ~560 ms).
+Provenance remains in `third_party/`.
 The bundled `v75_ws` IK header and URDF are reused directly; no external
 `/ik_target`/`/ik_solution` bridge or RViz demo is needed at runtime.
 
@@ -70,6 +71,15 @@ Joint order is `slide_joint`, `shoulder_joint`, `elbow_joint`, `wrist_pitch_join
 RViz's interpolated `/joint_states` is not hardware feedback. Arm encoder
 feedback comes from the control side; point `joint_state_topic` at its topic.
 
+IK branch choice: a TCP pose can have several in-limit joint solutions (elbow up/down).
+`ArmPlanner` solves from the seed and from `max_restarts` fixed-seed random starts,
+keeps every distinct solution, and returns the one with the least elbow load; loads
+within 1 mm count as equal and then the solution nearest the seed wins. The URDF has
+no inertias, so the load is the gravity moment about the elbow axis with equal masses
+at the wrist pitch, tool roll and TCP origins (base +z up). Control interpolates in
+joint space, so a far branch means a large swing; the measured puck poses have only
+one in-limit solution.
+
 ## Configuration, maps and coordinates
 
 Supply the complete [config/planning.yaml](config/planning.yaml). All application
@@ -90,15 +100,34 @@ or PNG. STL unions horizontal slices and preserves XY world origin. Text uses
 an integer `block_size/res` ratio; its first row is the top. ROS YAML supplies
 resolution and origin translation/yaw. Unknown pixels, transparency and outside
 map positions are blocked; raw images and ASCII STL are rejected. Inflation uses
-`r_robot + margin`, conservatively including occupied cell area. Dynamic points
+`r_robot + margin` on the A*+arc ESDF (centre distance minus half a cell). Dynamic points
 are inflated in a private snapshot without modifying the static map.
 
-Native eight-direction A* includes heading-change/proximity costs, forbids
-diagonal corner cutting, and shortens routes only with collision-free lines of
-sight. Requested start/goal XY is preserved. `max_cells`, `max_expansions` and
-sampling checks bound work. Control resamples paths into a spline; its matching
-`/control/tracking_path` must also pass collision checks before driving, and new
-obstacle inputs trigger another check.
+A*+arc search: state (cell, heading E/N/W/S) from the robot's heading rounded to 90 degrees; one
+cell forward costs `res * (1 + proximity)`, a 90 degree turn in place costs `lam`. Corners get
+the largest collision-free fillet (bisection, `r_hi_global`); `R >= r_min` is `PASS`, else
+`STOP_TURN` (also start, 180 degree reversals and the goal). With `goal_heading_required` the
+last `approach_len` is straight (`ALIGN`). `PathPlan` carries the waypoints, per-pose speed
+limits and `stops` (pose indices of intermediate `STOP_TURN` corners). A start just inside the
+margin leaves straight to the nearest free cell within 0.10 m while `r_robot` is clear.
+Requested start/goal XY is preserved. `max_cells`, `max_expansions` and sampling checks
+bound work.
+
+## Puck graspable check
+
+`grasp_region.hpp`, no IK. On every `/perception/vision/d435/puck_observations` message the nearest puck
+is taken to `ik.base_frame` (centre and axis through TF) and judged: alignment first (lying: long axis
+within `grasp_region.axis_tolerance_deg` of chassis forward, 180 degree symmetric; standing: any direction),
+then the centre against that type's region `[x_min, x_max, y_min, y_max, z_min, z_max]` shrunk by `margin`.
+Regions are measured by experiment for an approach along the long axis; min >= max means not measured and
+never graspable. `confirm_count` consecutive graspable checks confirm it. Diagnostics: `puck_graspable`,
+`puck_grasp_reason`, `puck_grasp_confirmed`, `puck_base_link` (use the last one while measuring regions).
+
+`plan_stop()` picks the stop along the approach (chassis forward) that minimises
+`J = w_box / (d_short - min_box_gap) + w_grasp * ((s - good_plane) / sigma)^2`: `d_short` is the shortest
+distance between the front-face segment (LM guide plane) and the detected box square, `s` the front face
+to puck centre distance, `sigma` half the region length in x. The box barrier is infinite at the 3 cm safety
+gap; the grasp check must hold at the stop. 1 mm grid plus golden section (tens of microseconds).
 
 ## Missions and commands
 
@@ -167,9 +196,13 @@ Completion and physical-stop criteria live in Control/controllers. Planning only
 IDs, message freshness and response deadlines. Faults clear the queue. Both cancel and
 operation stop clear pending work. Lifecycle commands are accepted only on `/planning/command`.
 
-During navigation, PathPlanner regenerates a path from the current pose/obstacle snapshot
-every `replan_period_s` (default 0.2 s, at most one calculation in flight). Valid updates
-preserve task ID and increase revision while staying in Run.Execute. Failed/expired replans
+A Navigate path goes to Control one segment at a time: up to the first `STOP_TURN` corner.
+Control reports that segment SUCCEEDED; Planning stays in Run.Execute, plans the rest from
+there and sends it as a new task ID. While driving, every `replan_period_s` Planning only
+checks the rest of the segment against the current obstacles (~5 ms); it replans (at most one
+calculation in flight, ~25-50 ms on arena3_clean) only when that is blocked, because the start
+heading is rounded to 90 degrees and a replan inside a fillet would change the plan under the
+robot. Such updates preserve task ID and increase revision. Failed/expired replans
 caused by a temporarily blocked route pause wheel speed and retry without dropping the task
 or queue. Invalid input, resource-limit and expired computations still fault. Control follows
 the planner's segments without spline overshoot.

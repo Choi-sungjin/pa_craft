@@ -1,0 +1,35 @@
+# Overlay on ekf.yaml for craft.launch.py lidar_odom:=true (2026-10-31): x/y from LiDAR odometry
+# (perception lidar_odometry, /perception/lidar/odom), yaw rate from the IMU as before, the wheels kept as
+# a loosely trusted backup for long featureless stretches where scan matching slides along the corridor.
+#   odom0 wheels : vx, vy (nonholonomic 0) at wheel_vx_variance 0.0025, vyaw at wheel_vyaw_variance 0.01
+#                  (control.yaml); control raises both 100x while the wheel and IMU yaw rates disagree (slip).
+#   odom1 LiDAR  : vx, vy at 0.0009 (perception.yaml lidar_odometry.twist_variance) -> ~75 % of x/y.
+#   imu0         : vyaw at 0.0001 -> ~99 % of the yaw rate against the wheels' 0.01.
+# No pose fusion from either odometry: their own headings drift apart from the IMU's.
+#
+# *_config order: [x, y, z, roll, pitch, yaw, vx, vy, vz, vroll, vpitch, vyaw, ax, ay, az]
+
+ekf_local:
+  ros__parameters:
+    # LiDAR twists arrive stamped at their scan, up to ~0.1 s behind: correct at that time.
+    smooth_lagged_data: true
+    history_length: 1.0
+    odom0_config: [false, false, false, false, false, false,
+                   true,  true,  false, false, false, true,
+                   false, false, false]
+    odom1: /perception/lidar/odom
+    odom1_config: [false, false, false, false, false, false,
+                   true,  true,  false, false, false, false,
+                   false, false, false]
+    odom1_queue_size: 10
+
+ekf_global:
+  ros__parameters:
+    odom0_config: [false, false, false, false, false, false,
+                   true,  true,  false, false, false, true,
+                   false, false, false]
+    odom1: /perception/lidar/odom
+    odom1_config: [false, false, false, false, false, false,
+                   true,  true,  false, false, false, false,
+                   false, false, false]
+    odom1_queue_size: 10

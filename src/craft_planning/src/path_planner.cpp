@@ -9,12 +9,17 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <limits>
+#include <optional>
 #include <queue>
 #include <stdexcept>
+#include <string>
+#include <tuple>
 #include <utility>
 
 namespace craft_planning
@@ -112,10 +117,10 @@ void inflate(Grid & g, double padding)
   g.blocked.resize(distances.size()); g.clearance.resize(distances.size());
   for (std::size_t i = 0; i < distances.size(); ++i) {
     const auto p = g.center(static_cast<int>(i));
-    // Subtract an occupied cell's half diagonal: conservative distance to its area.
-    g.clearance[i] = std::min({std::max(0.0, std::sqrt(distances[i]) * g.res - g.res / std::sqrt(2.0)),
+    // A*+arc ESDF: centre-to-centre distance minus half a cell; outside the map counts as occupied.
+    g.clearance[i] = std::min({std::max(std::sqrt(distances[i]) * g.res - 0.5 * g.res, 0.0),
       p.x, p.y, g.width * g.res - p.x, g.height * g.res - p.y});
-    g.blocked[i] = g.clearance[i] <= padding + 1e-12;
+    g.blocked[i] = g.occupied[i] || g.clearance[i] < padding;  // occupied stays blocked with zero padding
   }
 }
 
@@ -289,107 +294,319 @@ Grid obstacle_snapshot(const Grid & original, const geometry_msgs::msg::PoseArra
   return grid;
 }
 
-double point_segment_distance_squared(Point p, Point a, Point b)
+// ---------------------------------------------------------------------------------------------------------
+// A*+arc, ported from astar_arc.py (same costs, heap tie order and fillet search).
+// Grid cells are A*+arc cells: local metres = (index + 0.5) * res; point checks use the inflated grid.
+// ---------------------------------------------------------------------------------------------------------
+class NoRoute : public RouteUnavailable
 {
-  const auto d = b - a; const double length = squared(d);
-  const double t = length > 0 ? std::clamp(((p.x - a.x) * d.x + (p.y - a.y) * d.y) / length, 0.0, 1.0) : 0;
-  return squared(p - lerp(a, b, t));
+public:
+  using RouteUnavailable::RouteUnavailable;
+};
+constexpr std::array<int, 4> kDx{1, 0, -1, 0}, kDy{0, 1, 0, -1};  // heading 0=E, 1=N, 2=W, 3=S
+constexpr std::array<double, 4> kHeading{0.0, kPi / 2, kPi, -kPi / 2};
+const char * const kStopTurn = "STOP_TURN", * const kPass = "PASS", * const kAlign = "ALIGN";
+int wrap4(int h) {return (h % 4 + 4) % 4;}
+Point operator+(Point a, Point b) {return {a.x + b.x, a.y + b.y};}
+Point operator*(Point a, double k) {return {a.x * k, a.y * k};}
+
+struct State {int x, y, h;};
+struct Corner {int x, y, h_in, h_out;};
+struct Waypoint
+{
+  Point p; double theta; std::string mode; double radius = 0, v_max = 0; std::string reason;
+  int h_in = -1, h_out = -1;
+};
+struct Sample {Point p; double yaw, kappa, v;};
+struct Leg
+{
+  std::vector<State> states; std::vector<Waypoint> waypoints; std::vector<Sample> path;
+  std::vector<std::size_t> stops; std::size_t expanded = 0;
+};
+
+bool point_free(const Grid & g, Point p)
+{
+  const int x = static_cast<int>(std::floor(p.x / g.res)), y = static_cast<int>(std::floor(p.y / g.res));
+  return g.contains(x, y) && !g.blocked[g.index(x, y)];
 }
 
-double segment_rectangle_distance_squared(Point a, Point b, double x, double y, double size)
+int min_turns(int h, int dx, int dy)
 {
-  double enter = 0, leave = 1;
-  const auto slab = [&enter, &leave](double start, double delta, double lo, double hi) {
-      if (std::abs(delta) < 1e-15) {return start >= lo && start <= hi;}
-      double u = (lo - start) / delta, v = (hi - start) / delta;
-      if (u > v) {std::swap(u, v);} enter = std::max(enter, u); leave = std::min(leave, v);
-      return enter <= leave;
+  std::array<bool, 4> need{dx > 0, dy > 0, dx < 0, dy < 0};
+  const int count = need[0] + need[1] + need[2] + need[3];
+  if (!count) {return 0;}
+  if (need[h]) {return count - 1;}
+  if (count == 1) {for (int d = 0; d < 4; ++d) {if (need[d]) {return wrap4(d - h) == 2 ? 2 : 1;}}}
+  return 2;
+}
+
+// (start, start_h) -> goal; with goal_h >= 0 the goal counts only at that heading. Forward one cell costs
+// res * (1 + proximity), a 90 degree turn in place costs lam.
+std::vector<State> astar_arc_search(
+  const Grid & g, const PathPlannerConfig & c, State start, int gx, int gy, int goal_h, std::size_t & expanded)
+{
+  if (g.blocked[g.index(start.x, start.y)]) {throw RouteUnavailable("Start is in an inflated obstacle");}
+  if (g.blocked[g.index(gx, gy)]) {throw RouteUnavailable("Goal is in an inflated obstacle");}
+  const double pad = c.r_robot + c.margin;
+  const auto hfun = [&](int x, int y, int h) {
+      const int dx = gx - x, dy = gy - y;
+      int t = min_turns(h, dx, dy);
+      if (goal_h >= 0 && dx == 0 && dy == 0 && h != goal_h) {t = wrap4(goal_h - h) == 2 ? 2 : 1;}
+      return g.res * (std::abs(dx) + std::abs(dy)) + c.lam * t;
     };
-  if (slab(a.x, b.x - a.x, x, x + size) && slab(a.y, b.y - a.y, y, y + size)) {return 0;}
-  double result = kInfinity;
-  for (auto p : {a, b}) {result = std::min(result, squared({p.x - std::clamp(p.x, x, x + size), p.y - std::clamp(p.y, y, y + size)}));}
-  for (const Point p : {Point{x, y}, Point{x + size, y}, Point{x, y + size}, Point{x + size, y + size}}) {
-    result = std::min(result, point_segment_distance_squared(p, a, b));
-  }
-  return result;
-}
-
-bool segment_free(const Grid & g, Point a, Point b, double padding)
-{
-  for (const auto p : {a, b}) {
-    if (!(p.x > padding && p.y > padding && p.x < g.width * g.res - padding && p.y < g.height * g.res - padding)) {return false;}
-  }
-  // Subdivide for a narrow candidate-cell box, but use exact segment/rectangle distance
-  // within each box. Tiny collisions between samples cannot slip through.
-  const int steps = std::max(1, static_cast<int>(std::ceil(std::hypot(b.x - a.x, b.y - a.y) / g.res)));
-  for (int step = 0; step < steps; ++step) {
-    const auto p = lerp(a, b, static_cast<double>(step) / steps), q = lerp(a, b, static_cast<double>(step + 1) / steps);
-    const int x0 = std::max(0, static_cast<int>(std::floor((std::min(p.x, q.x) - padding) / g.res - 1e-9)));
-    const int x1 = std::min(g.width - 1, static_cast<int>(std::floor((std::max(p.x, q.x) + padding) / g.res + 1e-9)));
-    const int y0 = std::max(0, static_cast<int>(std::floor((std::min(p.y, q.y) - padding) / g.res - 1e-9)));
-    const int y1 = std::min(g.height - 1, static_cast<int>(std::floor((std::max(p.y, q.y) + padding) / g.res + 1e-9)));
-    for (int y = y0; y <= y1; ++y) {
-      for (int x = x0; x <= x1; ++x) {
-        if (g.occupied[g.index(x, y)] && segment_rectangle_distance_squared(p, q, x * g.res, y * g.res, g.res) <= padding * padding + 1e-14) {return false;}
+  struct Entry
+  {
+    double f, cost; int x, y, h;
+    bool operator>(const Entry & o) const {return std::tie(f, cost, x, y, h) > std::tie(o.f, o.cost, o.x, o.y, o.h);}
+  };
+  const auto id = [&g](int x, int y, int h) {return static_cast<std::size_t>(g.index(x, y)) * 4 + h;};
+  std::vector<double> best(g.occupied.size() * 4, std::numeric_limits<double>::infinity());
+  std::vector<int64_t> parent(best.size(), -1);
+  std::vector<uint8_t> closed(best.size(), 0);
+  std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> open;
+  best[id(start.x, start.y, start.h)] = 0;
+  open.push({hfun(start.x, start.y, start.h), 0.0, start.x, start.y, start.h});
+  int64_t goal_state = -1;
+  while (!open.empty()) {
+    const auto e = open.top(); open.pop();
+    const auto here = id(e.x, e.y, e.h);
+    if (closed[here]) {continue;}
+    closed[here] = 1;
+    require(++expanded <= c.max_expansions, "A* exceeded max_expansions");
+    if (e.x == gx && e.y == gy && (goal_h < 0 || e.h == goal_h)) {goal_state = static_cast<int64_t>(here); break;}
+    std::array<Entry, 3> next{};
+    int count = 0;
+    const int nx = e.x + kDx[e.h], ny = e.y + kDy[e.h];
+    if (g.contains(nx, ny) && !g.blocked[g.index(nx, ny)]) {
+      const double prox = std::clamp((pad + c.prox_band - g.clearance[g.index(nx, ny)]) / c.prox_band, 0.0, 1.0) * c.w_prox;
+      next[count++] = {0, g.res * (1.0 + prox), nx, ny, e.h};
+    }
+    next[count++] = {0, c.lam, e.x, e.y, wrap4(e.h + 1)};
+    next[count++] = {0, c.lam, e.x, e.y, wrap4(e.h - 1)};
+    for (int k = 0; k < count; ++k) {
+      const auto & n = next[k];
+      const double cost = e.cost + n.cost;
+      const auto there = id(n.x, n.y, n.h);
+      if (cost < best[there]) {
+        best[there] = cost; parent[there] = static_cast<int64_t>(here);
+        open.push({cost + hfun(n.x, n.y, n.h), cost, n.x, n.y, n.h});
       }
     }
   }
-  return true;
+  if (goal_state < 0) {throw NoRoute("No route through the inflated map");}
+  std::vector<State> states;
+  for (int64_t s = goal_state; s >= 0; s = parent[s]) {
+    const int cell = static_cast<int>(s / 4);
+    states.push_back({cell % g.width, cell / g.width, static_cast<int>(s % 4)});
+  }
+  std::reverse(states.begin(), states.end());
+  return states;
 }
 
-std::vector<Point> astar(const Grid & g, Point start, Point goal, double start_yaw, const PathPlannerConfig & config)
+// A* states -> [start, corner..., goal] with the heading before and after each.
+std::vector<Corner> compress_corners(const std::vector<State> & states)
 {
-  const int first = g.cell(start), last = g.cell(goal);
-  const double padding = config.r_robot + config.margin;
-  require(first >= 0 && last >= 0, "Start or goal is outside the map");
-  if (g.blocked[first] || g.blocked[last] || !segment_free(g, start, start, padding) ||
-    !segment_free(g, goal, goal, padding))
-  {
-    throw RouteUnavailable("Start or goal is in an inflated obstacle");
+  std::vector<State> moves;  // forward steps: leave (x, y) along h
+  for (std::size_t i = 0; i + 1 < states.size(); ++i) {
+    if (states[i + 1].x != states[i].x || states[i + 1].y != states[i].y) {moves.push_back(states[i]);}
   }
-  constexpr std::array<int, 8> dx{1, 1, 0, -1, -1, -1, 0, 1}, dy{0, 1, 1, 1, 0, -1, -1, -1};
-  struct Entry {double f, cost; int state; bool operator<(const Entry & other) const {return f > other.f;}};
-  std::priority_queue<Entry> open;
-  std::vector<double> costs(g.occupied.size() * 8, std::numeric_limits<double>::infinity());
-  std::vector<int> parent(costs.size(), -1);
-  const int heading = (static_cast<int>(std::lround(std::remainder(start_yaw, 2 * kPi) / (kPi / 4))) % 8 + 8) % 8;
-  const int initial = first * 8 + heading;
-  const auto heuristic = [&g, last](int cell) {const auto d = g.center(cell) - g.center(last); return std::hypot(d.x, d.y);};
-  costs[initial] = 0; open.push({heuristic(first), 0, initial});
-  int final = -1; std::size_t expansions = 0;
-  while (!open.empty()) {
-    const auto current = open.top(); open.pop();
-    if (current.cost != costs[current.state]) {continue;}
-    require(++expansions <= config.max_expansions, "A* exceeded max_expansions");
-    const int cell = current.state / 8, x = cell % g.width, y = cell / g.width, h = current.state % 8;
-    if (cell == last) {final = current.state; break;}
-    for (int direction = 0; direction < 8; ++direction) {
-      const int nx = x + dx[direction], ny = y + dy[direction];
-      if (!g.contains(nx, ny) || g.blocked[g.index(nx, ny)]) {continue;}
-      if (dx[direction] && dy[direction] && (g.blocked[g.index(nx, y)] || g.blocked[g.index(x, ny)])) {continue;}
-      const int next_cell = g.index(nx, ny), next = next_cell * 8 + direction;
-      const int difference = std::abs(direction - h), turn = std::min(difference, 8 - difference);
-      const double proximity = std::clamp((padding + config.prox_band - g.clearance[next_cell]) / config.prox_band, 0.0, 1.0);
-      const double candidate = current.cost + g.res * (direction % 2 ? std::sqrt(2.0) : 1.0) *
-        (1 + config.w_prox * proximity) + config.lam * turn / 2.0;
-      if (candidate < costs[next]) {costs[next] = candidate; parent[next] = current.state; open.push({candidate + heuristic(next_cell), candidate, next});}
+  const auto & s0 = states.front();
+  std::vector<Corner> pts{{s0.x, s0.y, s0.h, moves.empty() ? s0.h : moves.front().h}};
+  for (std::size_t i = 0; i + 1 < moves.size(); ++i) {
+    if (moves[i + 1].h != moves[i].h) {pts.push_back({moves[i + 1].x, moves[i + 1].y, moves[i].h, moves[i + 1].h});}
+  }
+  const auto & last = states.back();
+  pts.push_back({last.x, last.y, moves.empty() ? s0.h : moves.back().h, last.h});
+  return pts;
+}
+
+struct Fillet {std::vector<Point> points; Point t1, t2; double a0, sweep, turn;};
+Fillet make_fillet(Point corner, Point u_in, Point u_out, double r, double ds)
+{
+  Fillet f;
+  f.t1 = corner - u_in * r; f.t2 = corner + u_out * r;
+  const Point o = corner - u_in * r + u_out * r;
+  const double cross = u_in.x * u_out.y - u_in.y * u_out.x;
+  f.turn = (cross > 0) - (cross < 0);
+  f.a0 = std::atan2(f.t1.y - o.y, f.t1.x - o.x); f.sweep = f.turn * kPi / 2;
+  const double count = std::ceil(std::abs(f.sweep) * r / ds) + 1;
+  require(std::isfinite(count) && count <= 1e6, "Path sampling exceeds the map/work resource limit");
+  const int n = std::max(2, static_cast<int>(count));
+  for (int i = 0; i < n; ++i) {
+    const double a = f.a0 + (i == n - 1 ? f.sweep : f.sweep * i / (n - 1));
+    f.points.push_back({o.x + r * std::cos(a), o.y + r * std::sin(a)});
+  }
+  return f;
+}
+
+bool arc_free(const Grid & g, const std::vector<Point> & points)
+{
+  return std::all_of(points.begin(), points.end(), [&g](Point p) {return point_free(g, p);});
+}
+
+double max_fillet_radius(const Grid & g, const PathPlannerConfig & c, Point corner, Point u_in, Point u_out,
+  double in_avail, double out_avail, double arc_sample)
+{
+  double hi = std::min({c.r_hi_global, in_avail, out_avail}), lo = 0.0;
+  if (hi <= 0) {return 0.0;}
+  if (arc_free(g, make_fillet(corner, u_in, u_out, hi, arc_sample).points)) {return hi;}
+  while (hi - lo > c.r_tol) {
+    const double r = 0.5 * (lo + hi);
+    (arc_free(g, make_fillet(corner, u_in, u_out, r, arc_sample).points) ? lo : hi) = r;
+  }
+  return lo;
+}
+
+double v_for_radius(const PathPlannerConfig & c, double r)
+{
+  return r <= 0 ? 0.0 : std::min({c.v_ref, c.w_max * r, std::sqrt(c.a_lat_max * r)});
+}
+
+std::string fixed3(double v) {char text[32]; std::snprintf(text, sizeof(text), "%.3f", v); return text;}
+
+// approach > 0 keeps the last `approach` metres straight (no fillet) and ends in ALIGN.
+std::vector<Waypoint> build_waypoints(const Grid & g, const PathPlannerConfig & c, const std::vector<State> & states,
+  int goal_heading, double approach, double arc_sample)
+{
+  const auto pts = compress_corners(states);
+  const std::size_t n = pts.size();
+  std::vector<Point> xy;
+  for (const auto & p : pts) {xy.push_back(g.center(g.index(p.x, p.y)));}
+  static const std::array<const char *, 4> dir_name{"r", "u", "l", "d"};
+  std::vector<std::string> forced(n);
+  forced[0] = "start";
+  forced[n - 1] = approach > 0 ? std::string("goal ALIGN (") + dir_name[goal_heading] + ")" : "goal";
+  for (std::size_t i = 1; i + 1 < n; ++i) {if (wrap4(pts[i].h_out - pts[i].h_in) == 2) {forced[i] = "180° reversal";}}
+  std::vector<double> r_used(n, 0.0);
+  std::vector<Waypoint> wps;
+  for (std::size_t i = 0; i < n; ++i) {
+    const auto & p = pts[i];
+    if (!forced[i].empty()) {
+      const int th = i == n - 1 && goal_heading >= 0 ? goal_heading : p.h_out;
+      wps.push_back({xy[i], kHeading[th], i == n - 1 && approach > 0 ? kAlign : kStopTurn, 0, 0, forced[i], p.h_in, th});
+      continue;
+    }
+    const double len_in = std::abs(xy[i].x - xy[i - 1].x) + std::abs(xy[i].y - xy[i - 1].y);
+    const double len_out = std::abs(xy[i + 1].x - xy[i].x) + std::abs(xy[i + 1].y - xy[i].y);
+    const double in_avail = len_in - r_used[i - 1];
+    double out_avail = forced[i + 1].empty() ? 0.5 * len_out : len_out;
+    if (i == n - 2 && approach > 0) {out_avail = len_out - approach;}
+    if (out_avail <= 1e-9) {
+      wps.push_back({xy[i], kHeading[p.h_out], kStopTurn, 0, 0, "approach entry (turn in place)", p.h_in, p.h_out});
+      continue;
+    }
+    const Point u_in{static_cast<double>(kDx[p.h_in]), static_cast<double>(kDy[p.h_in])};
+    const Point u_out{static_cast<double>(kDx[p.h_out]), static_cast<double>(kDy[p.h_out])};
+    const double r = max_fillet_radius(g, c, xy[i], u_in, u_out, in_avail, out_avail, arc_sample);
+    std::string limit = r >= c.r_hi_global - 1e-9 ? "global" : r >= std::min(in_avail, out_avail) - 1e-9 ? "segment" : "obstacle";
+    if (r >= c.r_min) {
+      r_used[i] = r;
+      if (i == n - 2 && approach > 0 && r >= out_avail - 1e-9) {limit = "approach";}
+      wps.push_back({xy[i], kHeading[p.h_out], kPass, r, v_for_radius(c, r), "R limited by " + limit, p.h_in, p.h_out});
+    } else {
+      wps.push_back({xy[i], kHeading[p.h_out], kStopTurn, 0, 0, "R=" + fixed3(r) + " < R_MIN (" + limit + ")", p.h_in, p.h_out});
     }
   }
-  if (final < 0) {throw RouteUnavailable("No route through the inflated map");}
-  std::vector<Point> reversed;
-  for (int state = final; state >= 0; state = parent[state]) {reversed.push_back(g.center(state / 8));}
-  std::reverse(reversed.begin(), reversed.end());
-  reversed.insert(reversed.begin(), start); reversed.push_back(goal);
-  // Farthest visible shortcut only; no unverified spline or corner-cutting fillet.
-  std::vector<Point> result{start};
-  for (std::size_t anchor = 0; anchor + 1 < reversed.size();) {
-    std::size_t next = reversed.size() - 1;
-    while (next > anchor + 1 && !segment_free(g, reversed[anchor], reversed[next], padding)) {--next;}
-    require(segment_free(g, reversed[anchor], reversed[next], padding), "No collision-free connection between path samples");
-    if (squared(reversed[next] - result.back()) > 1e-20) {result.push_back(reversed[next]);}
-    anchor = next;
+  return wps;
+}
+
+// Lines and fillets sampled every ds; stops = sample indices of intermediate STOP_TURN corners.
+void build_path(const PathPlannerConfig & c, Leg & leg, double ds = 0.02)
+{
+  auto & out = leg.path;
+  const auto & wps = leg.waypoints;
+  Point cur = wps.front().p;
+  const auto add_line = [&out, ds](Point a, Point b, double yaw, double v) {
+      const double length = std::hypot(b.x - a.x, b.y - a.y);
+      if (length < 1e-9) {return;}
+      const int k = std::max(1, static_cast<int>(std::ceil(length / ds)));
+      for (int i = 0; i < k; ++i) {out.push_back({lerp(a, b, static_cast<double>(i) / k), yaw, 0.0, v});}
+    };
+  for (std::size_t i = 1; i < wps.size(); ++i) {
+    const auto & w = wps[i];
+    const double yaw_in = w.h_in >= 0 ? kHeading[w.h_in] : wps[i - 1].theta;
+    if (w.mode == kPass) {
+      const Point u_in{static_cast<double>(kDx[w.h_in]), static_cast<double>(kDy[w.h_in])};
+      const Point u_out{static_cast<double>(kDx[w.h_out]), static_cast<double>(kDy[w.h_out])};
+      const auto f = make_fillet(w.p, u_in, u_out, w.radius, ds);
+      add_line(cur, f.t1, yaw_in, c.v_ref);
+      for (std::size_t j = 0; j + 1 < f.points.size(); ++j) {
+        const double yaw = f.a0 + f.sweep * j / (f.points.size() - 1) + f.turn * kPi / 2;
+        out.push_back({f.points[j], std::atan2(std::sin(yaw), std::cos(yaw)), f.turn / w.radius, w.v_max});
+      }
+      cur = f.t2;
+    } else {
+      add_line(cur, w.p, yaw_in, c.v_ref);
+      cur = w.p;
+      if (i + 1 < wps.size()) {leg.stops.push_back(out.size());}
+    }
   }
-  return result;
+  out.push_back({wps.back().p, wps.back().theta, 0.0, 0.0});
+  // A zero-length line can leave a stop index past the next sample; keep only real interior samples.
+  leg.stops.erase(std::remove_if(leg.stops.begin(), leg.stops.end(),
+    [&out](std::size_t i) {return i == 0 || i + 1 >= out.size();}), leg.stops.end());
+  leg.stops.erase(std::unique(leg.stops.begin(), leg.stops.end()), leg.stops.end());
+}
+
+double leg_time(const PathPlannerConfig & c, const Leg & leg)
+{
+  double drive = 0;
+  for (std::size_t i = 0; i + 1 < leg.path.size(); ++i) {
+    const auto & a = leg.path[i], & b = leg.path[i + 1];
+    drive += std::hypot(b.p.x - a.p.x, b.p.y - a.p.y) / std::max(a.v, 1e-3);
+  }
+  int quarter_turns = 0, stops = 0;
+  for (const auto & w : leg.waypoints) {
+    if (w.mode != kStopTurn) {continue;}
+    if (w.h_in >= 0 && w.h_out >= 0) {quarter_turns += std::min(wrap4(w.h_out - w.h_in), wrap4(w.h_in - w.h_out));}
+    stops += w.reason != "start";
+  }
+  return drive + quarter_turns * (kPi / 2) / c.w_max + stops * c.v_ref / c.a_lon_max;
+}
+
+// One goal. With goal_h >= 0: A* to the entry point E = goal - L * u(goal_h) arriving along goal_h, then
+// straight E -> goal; L = approach_len + {r_hi, r_hi / 2, 0}, the fastest estimate wins.
+Leg plan_leg(const Grid & g, const PathPlannerConfig & c, State start, int gx, int gy, int goal_h, double arc_sample)
+{
+  Leg leg;
+  if (goal_h < 0) {
+    leg.states = astar_arc_search(g, c, start, gx, gy, -1, leg.expanded);
+    leg.waypoints = build_waypoints(g, c, leg.states, -1, 0.0, arc_sample);
+    build_path(c, leg);
+    return leg;
+  }
+  const int n_app = std::max(1, static_cast<int>(std::lround(c.approach_len / g.res)));
+  const auto cells = [&](int n) {
+      std::vector<std::pair<int, int>> cs;
+      for (int i = 0; i <= n; ++i) {cs.push_back({gx - (n - i) * kDx[goal_h], gy - (n - i) * kDy[goal_h]});}
+      return cs;
+    };
+  const auto clear = [&g](const std::vector<std::pair<int, int>> & cs) {
+      return std::all_of(cs.begin(), cs.end(), [&g](const auto & p) {
+          return g.contains(p.first, p.second) && !g.blocked[g.index(p.first, p.second)];});
+    };
+  if (!clear({{gx, gy}})) {throw RouteUnavailable("Goal is in an inflated obstacle");}
+  if (!clear(cells(n_app))) {throw RouteUnavailable("Goal approach line crosses an inflated obstacle");}
+  std::array<int, 3> extras{static_cast<int>(std::lround(c.r_hi_global / g.res)),
+    static_cast<int>(std::lround(0.5 * c.r_hi_global / g.res)), 0};
+  std::sort(extras.begin(), extras.end(), std::greater<int>());
+  std::optional<std::pair<double, Leg>> best;
+  std::size_t expanded = 0;
+  for (std::size_t k = 0; k < extras.size(); ++k) {
+    if (k && extras[k] == extras[k - 1]) {continue;}
+    const auto cs = cells(n_app + extras[k]);
+    if (!clear(cs)) {continue;}
+    Leg candidate;
+    try {candidate.states = astar_arc_search(g, c, start, cs[0].first, cs[0].second, goal_h, expanded);} catch (const NoRoute &) {continue;}
+    for (std::size_t i = 1; i < cs.size(); ++i) {candidate.states.push_back({cs[i].first, cs[i].second, goal_h});}
+    candidate.waypoints = build_waypoints(g, c, candidate.states, goal_h, n_app * g.res, arc_sample);
+    build_path(c, candidate);
+    const double t = leg_time(c, candidate);
+    if (!best || t < best->first - 1e-6) {best.emplace(t, std::move(candidate));}
+  }
+  if (!best) {throw NoRoute("No route to the goal approach line");}
+  leg = std::move(best->second); leg.expanded = expanded;
+  return leg;
 }
 }  // namespace
 
@@ -401,6 +618,9 @@ void PathPlanner::configure(const PathPlannerConfig & config)
     require(!config.map_file.empty() && !config.map_frame.empty(), "map_file and map_frame are required");
     for (const double p : {config.res, config.block_size, config.prox_band, config.arc_sample}) {require(std::isfinite(p) && p > 0, "Planner lengths must be positive and finite");}
     for (const double p : {config.r_robot, config.margin, config.lam, config.w_prox}) {require(std::isfinite(p) && p >= 0, "Planner costs and footprint must be nonnegative and finite");}
+    for (const double p : {config.r_hi_global, config.r_tol, config.v_ref, config.w_max, config.a_lat_max,
+         config.a_lon_max, config.approach_len}) {require(std::isfinite(p) && p > 0, "Planner fillet/speed parameters must be positive and finite");}
+    require(std::isfinite(config.r_min) && config.r_min >= 0 && config.r_min <= config.r_hi_global, "r_min must be in [0, r_hi_global]");
     require(std::isfinite(config.r_robot + config.margin) && config.max_cells > 0 &&
       config.max_cells <= static_cast<std::size_t>(std::numeric_limits<int>::max() / 8) && config.max_expansions > 0 &&
       config.occupancy_threshold >= 1 && config.occupancy_threshold <= 100, "Invalid planner resource limit or occupancy threshold");
@@ -429,6 +649,9 @@ PathPlan PathPlanner::plan(
   const nav_msgs::msg::Odometry & odom, const geometry_msgs::msg::PoseStamped & goal,
   const geometry_msgs::msg::PoseArray & map_obstacles) const
 {
+  // A start just inside the margin (tracking error, a robot placed near a wall) leaves straight to the nearest
+  // free cell within this distance while the body itself (r_robot) stays clear; it is a STOP_TURN segment.
+  constexpr double kEscape = 0.10;
   PathPlan result;
   try {
     const auto data = std::atomic_load(&data_); require(data != nullptr, "Planner has not been configured");
@@ -436,36 +659,74 @@ PathPlan PathPlanner::plan(
     require(odom.header.frame_id == config.map_frame && goal.header.frame_id == config.map_frame, "Map, goal and odometry must use the same frame");
     const double start_yaw = pose_yaw(odom.pose.pose), goal_yaw = pose_yaw(goal.pose);
     const auto grid = obstacle_snapshot(data->grid, map_obstacles, config);
-    const auto points = astar(grid, grid.local(odom.pose.pose.position), grid.local(goal.pose.position), start_yaw - grid.yaw, config);
-    result.path.header.frame_id = config.map_frame;
-    const double spacing = std::min(config.arc_sample, grid.res / 2);
-    const auto append = [&result, &grid, &config](Point p, double yaw) {
-        geometry_msgs::msg::PoseStamped pose; pose.header.frame_id = config.map_frame;
-        pose.pose.position.x = grid.ox + std::cos(grid.yaw) * p.x - std::sin(grid.yaw) * p.y;
-        pose.pose.position.y = grid.oy + std::sin(grid.yaw) * p.x + std::cos(grid.yaw) * p.y;
-        pose.pose.orientation.z = std::sin(yaw / 2); pose.pose.orientation.w = std::cos(yaw / 2);
-        result.path.poses.push_back(pose);
-      };
-    for (std::size_t i = 1; i < points.size(); ++i) {
-      const auto a = points[i - 1], b = points[i]; const auto d = b - a;
-      const double count = std::ceil(std::hypot(d.x, d.y) / spacing);
-      const auto limit = std::min(config.max_cells * 16, config.max_expansions);
-      require(std::isfinite(count) && count <= limit && result.path.poses.size() <= limit - count,
-        "Path sampling exceeds the map/work resource limit");
-      const auto steps = static_cast<std::size_t>(count);
-      for (std::size_t s = 0; s < steps; ++s) {append(lerp(a, b, static_cast<double>(s) / steps), std::atan2(d.y, d.x) + grid.yaw);}
+    const Point start = grid.local(odom.pose.pose.position), target = grid.local(goal.pose.position);
+    const int first = grid.cell(start), last = grid.cell(target);
+    require(first >= 0 && last >= 0, "Start or goal is outside the map");
+    const auto quarter = [&grid](double yaw) {return wrap4(static_cast<int>(std::lround((yaw - grid.yaw) / (kPi / 2))));};
+    State from{first % grid.width, first / grid.width, quarter(start_yaw)};
+    std::vector<Sample> escape;
+    if (grid.blocked[first]) {
+      if (grid.clearance[first] < config.r_robot) {throw RouteUnavailable("Start is in an obstacle");}
+      const int reach = static_cast<int>(std::ceil(kEscape / grid.res));
+      int chosen = -1; double nearest = kInfinity;
+      for (int y = from.y - reach; y <= from.y + reach; ++y) {
+        for (int x = from.x - reach; x <= from.x + reach; ++x) {
+          if (!grid.contains(x, y) || grid.blocked[grid.index(x, y)]) {continue;}
+          const Point p = grid.center(grid.index(x, y));
+          const double d = std::hypot(p.x - start.x, p.y - start.y);
+          if (d > kEscape || d >= nearest) {continue;}
+          bool body_clear = true;
+          for (int k = 0; k <= std::ceil(d / (grid.res / 2)) && body_clear; ++k) {
+            const int cell = grid.cell(lerp(start, p, d > 0 ? std::min(1.0, k * grid.res / 2 / d) : 1.0));
+            body_clear = cell >= 0 && grid.clearance[cell] >= config.r_robot;
+          }
+          if (body_clear) {nearest = d; chosen = grid.index(x, y);}
+        }
+      }
+      if (chosen < 0) {throw RouteUnavailable("Start is in an inflated obstacle with no free cell nearby");}
+      const Point p = grid.center(chosen);
+      const double yaw = std::atan2(p.y - start.y, p.x - start.x);
+      const int k = std::max(1, static_cast<int>(std::ceil(nearest / 0.02)));
+      for (int i = 0; i < k; ++i) {escape.push_back({lerp(start, p, static_cast<double>(i) / k), yaw, 0.0, config.v_ref});}
+      from.x = chosen % grid.width; from.y = chosen / grid.width;
     }
-    append(points.back(), goal_yaw);
+    const Leg leg = plan_leg(grid, config, from, last % grid.width, last / grid.width,
+      config.goal_heading_required ? quarter(goal_yaw) : -1, std::min(config.arc_sample, grid.res / 2));
+    std::vector<Sample> samples = escape;
+    samples.insert(samples.end(), leg.path.begin(), leg.path.end());
+    if (!escape.empty()) {result.stops.push_back(escape.size());}
+    for (const auto i : leg.stops) {result.stops.push_back(escape.size() + i);}
+    const double c = std::cos(grid.yaw), s = std::sin(grid.yaw);
+    const auto to_map = [&grid, c, s](Point p) {return Point{grid.ox + c * p.x - s * p.y, grid.oy + s * p.x + c * p.y};};
+    result.path.header.frame_id = config.map_frame;
+    for (const auto & sample : samples) {
+      geometry_msgs::msg::PoseStamped pose; pose.header.frame_id = config.map_frame;
+      const auto p = to_map(sample.p);
+      pose.pose.position.x = p.x; pose.pose.position.y = p.y;
+      const double yaw = sample.yaw + grid.yaw;
+      pose.pose.orientation.z = std::sin(yaw / 2); pose.pose.orientation.w = std::cos(yaw / 2);
+      result.path.poses.push_back(pose);
+      result.speed_limit.push_back(sample.v);
+    }
+    if (!escape.empty()) {
+      const auto p = to_map(start);
+      result.waypoints.push_back({p.x, p.y, escape.front().yaw + grid.yaw, 0, 0, kStopTurn, "escape to the nearest free cell"});
+    }
+    for (const auto & w : leg.waypoints) {
+      const auto p = to_map(w.p);
+      result.waypoints.push_back({p.x, p.y, w.theta + grid.yaw, w.radius, w.v_max, w.mode, w.reason});
+    }
     // Preserve requested XY exactly, including floating-point map-origin transforms.
     result.path.poses.front().pose.position.x = odom.pose.pose.position.x;
     result.path.poses.front().pose.position.y = odom.pose.pose.position.y;
     result.path.poses.back().pose.position.x = goal.pose.position.x;
     result.path.poses.back().pose.position.y = goal.pose.position.y;
+    result.expanded = leg.expanded;
     result.ok = true;
   } catch (const RouteUnavailable & error) {
-    result.path = nav_msgs::msg::Path(); result.error = error.what(); result.retryable = true;
+    result = PathPlan(); result.error = error.what(); result.retryable = true;
   } catch (const std::exception & error) {
-    result.path = nav_msgs::msg::Path(); result.error = error.what();
+    result = PathPlan(); result.error = error.what();
   }
   return result;
 }
@@ -481,7 +742,9 @@ bool PathPlanner::collision_free(const nav_msgs::msg::Path & path, const geometr
       const auto & pose = path.poses[i]; pose_yaw(pose.pose);
       if (!pose.header.frame_id.empty() && pose.header.frame_id != path.header.frame_id) {return false;}
       const auto current = grid.local(pose.pose.position);
-      if (!segment_free(grid, i ? previous : current, current, data->config.r_robot + data->config.margin)) {return false;}
+      const Point from = i ? previous : current;
+      const int steps = std::max(1, static_cast<int>(std::ceil(std::hypot(current.x - from.x, current.y - from.y) / (grid.res / 2))));
+      for (int k = 0; k <= steps; ++k) {if (!point_free(grid, lerp(from, current, static_cast<double>(k) / steps))) {return false;}}
       previous = current;
     }
     return true;

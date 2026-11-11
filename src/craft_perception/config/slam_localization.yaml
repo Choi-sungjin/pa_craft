@@ -1,0 +1,9 @@
+# Overlay on slam.yaml for craft.launch.py slam_map:=<base> (2026-11-01): localize in a saved pose graph
+# (<base>.posegraph + .data, e.g. ~/maps/arena3_clean) instead of building a new map. craft.launch.py
+# passes map_file_name and runs localization_slam_toolbox_node. The start pose is a placeholder:
+# demo/corner/global_localizer.py finds the real one from the scan and sends it on /initialpose.
+slam_toolbox:
+  ros__parameters:
+    mode: localization
+    map_start_pose: [0.0, 0.0, 0.0]
+    stack_size_to_use: 40000000  # deserializing a large pose graph needs a bigger stack (slam_toolbox example)

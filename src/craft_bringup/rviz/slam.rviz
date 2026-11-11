@@ -1,0 +1,169 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Grid
+      Enabled: true
+      Cell Size: 1
+      Plane Cell Count: 20
+      Reference Frame: map
+    - Class: rviz_default_plugins/Map
+      Name: SLAM map
+      Enabled: true
+      Topic:
+        Value: /perception/lidar/map
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+        Depth: 1
+      Alpha: 0.8
+      Color Scheme: map
+    - Class: rviz_default_plugins/LaserScan
+      Name: merged scan
+      Enabled: true
+      Topic:
+        Value: /lidar/merged
+        Reliability Policy: Best Effort
+        Depth: 5
+      Size (m): 0.03
+      Style: Flat Squares
+      Color Transformer: FlatColor
+      Color: 255; 60; 60
+      Decay Time: 0
+    # What planning sees: /perception/lidar/obstacle after LidarObstacleFilter (map walls, persistence, clusters).
+    # Raw points the filter dropped show only in the red merged scan.
+    - Class: rviz_default_plugins/PoseArray
+      Name: planning obstacles (filtered)
+      Enabled: true
+      Topic:
+        Value: /perception/lidar/obstacle
+        Reliability Policy: Reliable
+        Depth: 5
+      Shape: Arrow (Flat)
+      Color: 0; 220; 220
+      Alpha: 1
+      Arrow Length: 0.06
+    - Class: rviz_default_plugins/MarkerArray
+      Name: pose graph (loop closures)
+      Enabled: true
+      Topic:
+        Value: /perception/lidar/slam_toolbox/graph_visualization
+        Reliability Policy: Reliable
+        Depth: 5
+    - Class: rviz_default_plugins/Marker
+      Name: EKF odometry
+      Enabled: true
+      Topic:
+        Value: /odometry/local/trail
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+        Depth: 1
+    - Class: rviz_default_plugins/Odometry
+      Name: LiDAR odometry
+      Enabled: false
+      Topic:
+        Value: /perception/lidar/odom
+        Reliability Policy: Reliable
+        Depth: 5
+      Keep: 200
+      Position Tolerance: 0.05
+      Angle Tolerance: 0.2
+      Shape:
+        Value: Arrow
+        Color: 27; 175; 122
+        Shaft Length: 0.15
+        Shaft Radius: 0.01
+        Head Length: 0.05
+        Head Radius: 0.03
+      Covariance:
+        Value: false
+    - Class: rviz_default_plugins/Odometry
+      Name: wheel odometry
+      Enabled: false
+      Topic:
+        Value: /control/wheel/odom
+        Reliability Policy: Best Effort
+        Depth: 5
+      Keep: 200
+      Position Tolerance: 0.05
+      Angle Tolerance: 0.2
+      Shape:
+        Value: Arrow
+        Color: 235; 104; 52
+        Shaft Length: 0.15
+        Shaft Radius: 0.01
+        Head Length: 0.05
+        Head Radius: 0.03
+      Covariance:
+        Value: false
+    - Class: rviz_default_plugins/Path
+      Name: corner planned path
+      Enabled: true
+      Topic:
+        Value: /corner/path
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+        Depth: 1
+      Line Style: Billboards
+      Line Width: 0.03
+      Color: 60; 220; 90
+      Alpha: 1
+    - Class: rviz_default_plugins/Path
+      Name: corner driven trail
+      Enabled: true
+      Topic:
+        Value: /corner/trail
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+        Depth: 1
+      Line Style: Billboards
+      Line Width: 0.03
+      Color: 255; 210; 40
+      Alpha: 1
+    - Class: rviz_default_plugins/Pose
+      Name: corner goal
+      Enabled: true
+      Topic:
+        Value: /corner/goal
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+        Depth: 1
+      Shape: Arrow
+      Color: 255; 0; 255
+      Shaft Length: 0.3
+      Shaft Radius: 0.03
+      Head Length: 0.1
+      Head Radius: 0.07
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Enabled: true
+      Show Names: true
+      Marker Scale: 0.3
+      Frames:
+        All Enabled: false
+        map:
+          Value: true
+        odom:
+          Value: true
+        base_link:
+          Value: true
+  Global Options:
+    Fixed Frame: map
+    Background Color: 48; 48; 48
+    Frame Rate: 15
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Measure
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Name: Current View
+      Scale: 80
+      X: 0
+      Y: 0
+    Saved: ~
+Window Geometry:
+  Width: 1400
+  Height: 900

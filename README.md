@@ -69,13 +69,14 @@ pa_craft/
     │   │   └── planning_master.py
     │   ├── src/
     │   │   ├── __init__.py
-    │   │   ├── kant_astar_arc.py
+    │   │   ├── astar_arc.py
     │   │   └── path_planner.py
     │   ├── maps/maze.stl          # 기본 경로 계획 맵 (Gazebo 월드 좌표)
-    │   ├── maps/kant/             # 원본 예제 맵
+    │   ├── maps/astar_arc/            # 원본 예제 맵
     │   ├── test/
     │   └── third_party/           # 원본 저장소 및 커밋 기록
     ├── lidar_processor/          # 전·후방 LDS-03 드라이버 launch, TF, 360도 병합
+    ├── craft_voice/              # 카메라 + 상태머신 → GPT → 음성 발화 (Python)
     └── craft_sensors/
         ├── CMakeLists.txt
         ├── package.xml
@@ -94,6 +95,18 @@ pa_craft/
 | `src/craft_perception` | C++ PerceptionMaster + D435/C310 클래스 (ncnn·AprilTag·깊이·레버·puck 인지) ([실행·주기 설정](src/craft_perception/README.md)) |
 | `src/craft_planning` | 주행 경로 계획 |
 | `src/craft_control` | 로봇 팔·시계 조작 계획, 주행 및 조작 목표를 제어 입력으로 연결 |
+| `src/craft_voice` | 지금 하는 일(`/planning/state`)과 주변 상황(카메라·인식 결과)을 GPT(OpenAI API)로 문장화해 스피커로 말함 ([실행 안내](src/craft_voice/README.md)) |
 | `firmware/wheel_clock`, `firmware/lm_arm` | OpenCR 두 대의 모터 펌웨어 ([설정·빌드 안내](firmware/README.md)) |
+
+## 실행
+
+```bash
+source install/setup.bash
+ros2 launch craft_bringup craft.launch.py                  # 전체를 한 터미널에서
+ros2 run craft_bringup craft_dashboard.sh                  # terminator 4분할: 인지 / 판단 / 제어 / 인프라
+ros2 run craft_bringup craft_dashboard.sh start_lidar:=false   # launch 인자는 모든 창에 그대로 전달
+```
+
+대시보드는 `craft.launch.py`를 `group:=perception|planning|control|infra`로 나눠 창마다 하나씩 띄웁니다. 한 창에서 Ctrl+C를 누르면 그 그룹만 종료됩니다.
 
 `requirements.txt`는 Python 의존성 목록입니다. `build/`, `install/`, `log/`, `venv-craft/` 같은 로컬 생성물은 `.gitignore`로 제외합니다.

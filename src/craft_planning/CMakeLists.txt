@@ -20,7 +20,7 @@ find_package(PNG REQUIRED)
 find_package(Threads REQUIRED)
 
 add_library(planning_modules
-  src/state_machine.cpp src/path_planner.cpp src/arm_planner.cpp src/planning_config.cpp)
+  src/state_machine.cpp src/path_planner.cpp src/arm_planner.cpp src/planning_config.cpp src/grasp_region.cpp)
 target_compile_features(planning_modules PUBLIC cxx_std_17)
 target_compile_options(planning_modules PRIVATE -Wall -Wextra -Wpedantic)
 target_include_directories(planning_modules PUBLIC
@@ -44,10 +44,10 @@ install(DIRECTORY include/ DESTINATION include)
 install(FILES v75_ws/src/v75_robot_description/urdf/v75_robot.urdf
   DESTINATION share/${PROJECT_NAME}/urdf)
 
-# Keep the original KANT implementation importable for reference and regression tests.
+# Keep the original A*+arc (Python) implementation importable for reference and regression tests.
 set(reference_python_dir "${CMAKE_CURRENT_BINARY_DIR}/reference_python/${PROJECT_NAME}")
 file(MAKE_DIRECTORY "${reference_python_dir}")
-foreach(source __init__.py path_planner.py kant_astar_arc.py)
+foreach(source __init__.py path_planner.py astar_arc.py)
   configure_file("src/${source}" "${reference_python_dir}/${source}" COPYONLY)
 endforeach()
 ament_python_install_package(${PROJECT_NAME} PACKAGE_DIR "${reference_python_dir}")
@@ -59,7 +59,7 @@ install(FILES README.md IMPLEMENTATION.md DESTINATION share/${PROJECT_NAME})
 if(BUILD_TESTING)
   find_package(ament_cmake_pytest REQUIRED)
   find_package(ament_cmake_gtest REQUIRED)
-  foreach(module state_machine path_planner_cpp arm_planner planning_config)
+  foreach(module state_machine path_planner_cpp arm_planner planning_config grasp_region)
     ament_add_gtest(test_${module} test/test_${module}.cpp)
     target_link_libraries(test_${module} planning_modules)
     target_compile_definitions(test_${module} PRIVATE

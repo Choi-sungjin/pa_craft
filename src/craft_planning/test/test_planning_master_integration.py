@@ -41,7 +41,8 @@ class Fake:
                            ('/perception/lidar/obstacle', PoseArray), ('/planning/command', String),
                            ('/planning/mission', String), ('/planning/target_base_pose', PoseStamped),
                            ('/planning/target_tcp_pose', PoseStamped), ('/perception/vision/object_pose', PoseStamped),
-                           ('/perception/vision/d435/apriltag', Int32MultiArray)]:
+                           ('/perception/vision/d435/apriltag', Int32MultiArray),
+                           ('/perception/localization/state', String)]:
             self.pubs[topic] = node.create_publisher(cls, topic, 10)
         node.create_subscription(String, '/planning/state', self.on_state, 10)
         node.create_subscription(Bool, '/planning/hold', lambda m: setattr(self, 'hold', m.data), 10)
@@ -159,14 +160,16 @@ def fake(tmp_path, monkeypatch, request):
             helper = Path(__file__).resolve().parents[2] / 'craft_control/test/test_planning_watchdog_integration.py'
             spec = importlib.util.spec_from_file_location('pty_helpers', helper)
             module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
-            boards = [module.FakeBoard([0.,0.,0.,0.,0.,.2,0,0]), module.FakeBoard([0.,0.,0.,0,0,1,0])]
+            # Firmware CSV: positions/states, then imu_ok, gx, gy, gz [rad/s], ax, ay, az [g] (still, upright).
+            imu = [1, 0., 0., 0., 0., 0., 1.]
+            boards = [module.FakeBoard([0.,0.,0.,0.,0.,.2,0,0] + imu), module.FakeBoard([0.,0.,0.,0,0] + imu)]
             control_binary = Path(get_package_prefix('craft_control'))/'lib/craft_control/control_master'
             control_config = Path(get_package_share_directory('craft_control'))/'config/control.yaml'
             args = [str(control_binary),'--ros-args','--params-file',str(control_config)]
             for key, value in {'arm_lm_port':boards[0].port,'clock_wheel_port':boards[1].port,
                                'arm_ik_mapping_confirmed':'true','lm_mapping_confirmed':'true',
-                               'gripper_mapping_confirmed':'true','lm_pulley_radius':'1.0',
-                               'lm_gear_ratio':'1.0','gripper_open_angle':'0.2',
+                               'gripper_mapping_confirmed':'true','lm_meters_per_rad':'1.0',
+                               'gripper_open_angle':'0.2',
                                'gripper_close_angle':'1.2'}.items():
                 args.extend(['-p',f'{key}:={value}'])
             control_child = subprocess.Popen(args,stdout=log,stderr=log)
@@ -192,7 +195,11 @@ def test_queue_ids_replan_and_stale_completion(fake):
     first=f.starts()[0].task_id
     f.pubs['/planning/target_base_pose'].publish(p)  # duplicate request
     f.goal(2.)
+    f.run_for(.3)  # no periodic replanning while the path is clear
+    assert not any(c.operation==TaskCommand.UPDATE_PATH for c in f.commands)
+    f.obstacles=[(1.,.5)]  # blocks the straight path: replan around it, same task
     f.wait(lambda: any(c.operation==TaskCommand.UPDATE_PATH for c in f.commands))
+    f.obstacles=[]
     assert len(f.starts())==1
     assert all(c.task_id==first for c in f.commands)
     revisions=[c.revision for c in f.commands]; assert revisions==sorted(set(revisions))
@@ -233,9 +240,68 @@ def test_replan_route_failure_retries_and_invalid_request_is_rejected(fake):
     f.wait(lambda:any(c.operation == TaskCommand.UPDATE_PATH and c.speed > 0.
                       for c in f.commands[updates_before:]))
 
+def test_path_is_sent_one_stop_turn_segment_at_a_time(fake):
+    # One-cell C-space corridor (padding 0.24 m, 0.1 m grid) east along y=0.35 that steps up one cell to
+    # y=0.45 at x=1.55: two corners 0.1 m apart leave no room for a fillet, so (1.55, 0.35) is a STOP_TURN
+    # and the path goes out as two control tasks.
+    f=fake; f.position=(.35,.35)
+    wall=lambda a, b, n: [(a[0]+(b[0]-a[0])*i/n, a[1]+(b[1]-a[1])*i/n) for i in range(n+1)]
+    f.obstacles=wall((0.,.65),(1.25,.65),25)+wall((1.85,.15),(3.9,.15),41)+wall((1.85,.75),(3.9,.75),41)
+    p=PoseStamped(); p.header.stamp=f.node.get_clock().now().to_msg(); p.header.frame_id='map'
+    p.pose.position.x, p.pose.position.y = 3.05, .45; p.pose.orientation.w=1.
+    f.pubs['/planning/target_base_pose'].publish(p)
+    f.wait(lambda: len(f.starts())==1)
+    first=f.starts()[0]; end=first.path.poses[-1].pose.position
+    assert abs(end.x-1.55)<1e-6 and abs(end.y-.35)<1e-6  # first segment ends at the STOP_TURN corner
+    f.run_for(.3); assert len(f.starts())==1 and f.state=='Run.Execute'
+    f.position=(end.x, end.y); f.result_status=TaskResult.SUCCEEDED
+    f.wait(lambda: len(f.starts())==2)
+    second=f.starts()[1]; assert second.task_id>first.task_id and f.state=='Run.Execute'
+    start, end=second.path.poses[0].pose.position, second.path.poses[-1].pose.position
+    assert abs(start.x-1.55)<1e-6 and abs(start.y-.35)<1e-6  # planned again from the corner
+    assert abs(end.x-3.05)<1e-6 and abs(end.y-.45)<1e-6      # the rest, up to the goal
+    f.position=(3.05,.45); f.result_status=TaskResult.SUCCEEDED
+    f.wait(lambda: f.state=='Run.AwaitRequest')
+    assert len(f.starts())==2
+
+def test_blocked_path_waits_resumes_or_replans(fake):
+    f=fake; f.goal(); f.wait(lambda:f.state=='Run.Execute')
+    first=f.starts()[-1]; n=len(f.commands)
+    # A passer-by on the path for less than block_wait_s: pause, then the same path resumes (no replan).
+    f.obstacles=[(1.,.5)]
+    f.wait(lambda:any(c.operation==TaskCommand.UPDATE_PATH and c.speed==0. for c in f.commands[n:]))
+    f.run_for(.5); f.obstacles=[]
+    f.wait(lambda:any(c.operation==TaskCommand.UPDATE_PATH and c.speed>0. for c in f.commands[n:]))
+    resumed=[c for c in f.commands[n:] if c.operation==TaskCommand.UPDATE_PATH and c.speed>0.][0]
+    assert [p.pose.position for p in resumed.path.poses]==[p.pose.position for p in first.path.poses]
+    # Still blocked after block_wait_s (2 s): a new path around it.
+    n=len(f.commands); f.obstacles=[(1.,.5)]
+    f.run_for(1.); assert not any(c.operation==TaskCommand.UPDATE_PATH and c.speed>0. for c in f.commands[n:])
+    f.wait(lambda:any(c.operation==TaskCommand.UPDATE_PATH and c.speed>0. for c in f.commands[n:]),4)
+    detour=[c for c in f.commands[n:] if c.operation==TaskCommand.UPDATE_PATH and c.speed>0.][-1]
+    assert max(p.pose.position.y for p in detour.path.poses)>.7 and f.state=='Run.Execute'
+
+def test_segments_that_end_where_they_start_fault(fake):
+    # The jog corridor of the segment test; control "arrives" at once while the robot never moves.
+    f=fake; f.position=(.35,.35); f.auto_complete=True
+    wall=lambda a, b, n: [(a[0]+(b[0]-a[0])*i/n, a[1]+(b[1]-a[1])*i/n) for i in range(n+1)]
+    f.obstacles=wall((0.,.65),(1.25,.65),25)+wall((1.85,.15),(3.9,.15),41)+wall((1.85,.75),(3.9,.75),41)
+    p=PoseStamped(); p.header.stamp=f.node.get_clock().now().to_msg(); p.header.frame_id='map'
+    p.pose.position.x, p.pose.position.y = 3.05, .45; p.pose.orientation.w=1.
+    f.pubs['/planning/target_base_pose'].publish(p)
+    f.wait(lambda:f.state=='Fault',8)
+    assert len(f.starts())==3
+
 def test_control_feedback_timeout(fake):
     f=fake; f.goal(); f.wait(lambda:f.state=='Run.Execute')
     f.feedback=False; f.wait(lambda:f.state=='Fault',2)
+
+def test_localization_lost_faults_but_dead_reckoning_does_not(fake):
+    f=fake; f.goal(); f.wait(lambda:f.state=='Run.Execute')
+    f.pubs['/perception/localization/state'].publish(String(data='dead_reckoning')); f.run_for(.15)
+    assert f.state=='Run.Execute'
+    f.pubs['/perception/localization/state'].publish(String(data='lost'))
+    f.wait(lambda:f.state=='Fault',2)
 
 def test_mission_native_ik_and_all_task_types(fake):
     f=fake; f.auto_complete=True
