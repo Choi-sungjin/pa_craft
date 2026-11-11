@@ -263,6 +263,19 @@ def parse_mapping(text: str, separator: str = ':') -> dict[str, str]:
     return result
 
 
+def name_step(step: str, names: dict) -> str:
+    """Spoken name of a step id: exact match, then patterns where '*' captures part of the id
+    ('load_S*': '시작 박스 * 퍽 싣기' turns load_S3 into '시작 박스 3 퍽 싣기')."""
+    if step in names:
+        return names[step]
+    for key, value in names.items():
+        if '*' in key:
+            head, _, tail = key.partition('*')
+            if step.startswith(head) and step.endswith(tail) and len(step) > len(head) + len(tail):
+                return value.replace('*', step[len(head):len(step) - len(tail)])
+    return ''
+
+
 def reason_ko(reason: str) -> str:
     lowered = reason.lower()
     for needle, short, _ in REASON_KO:
@@ -362,6 +375,7 @@ class StateTracker:
     announce: tuple = ('Ready', 'Run.Execute', 'Run.Complete', 'Run.Stopping', 'Fault')
     cooldown_s: float = 10.0
     fault_reason_wait_s: float = 1.2
+    step_name_wait_s: float = 1.2    # diagnostics (step name) are 1 Hz: wait for them before "X, 시작할게요"
     stale_s: float = 3.0
     perception_stale_s: float = 2.0
     step_names: dict = field(default_factory=dict)
@@ -412,6 +426,7 @@ class StateTracker:
         self._lost = False
         self._idle_since = -math.inf
         self._idle_noticed_at = -math.inf
+        self._pending_step: StateEvent | None = None
 
     # ---- sentences ----------------------------------------------------------------------
     def phrase(self, key: str, **values) -> str:
@@ -480,6 +495,11 @@ class StateTracker:
         if now - self._announced_at.get(label, -math.inf) < self.cooldown_s:
             return None
         self._announced_at[label] = now
+        if (label in ('Run.PrepareTask', 'Run.Execute') and not event.step and self.step_name_wait_s > 0 and
+                self.step_started_at > -math.inf):
+            # A new step began but its name is not in yet: say it once the name is known (or after the wait).
+            self._pending_step = event
+            return self.poll(now)
         return event
 
     def update_diagnostics(self, name: str, level: int, message: str, values: dict,
@@ -597,7 +617,24 @@ class StateTracker:
         self.tags = (sorted({int(i) for i in ids}), now)
 
     def poll(self, now: float) -> StateEvent | None:
-        """Pending Fault event, once its reason arrived or the wait ran out."""
+        """A pending event that is ready: a Fault once its reason arrived, a step start once its name did
+        (or when the wait ran out). Dropped if the state changed meanwhile."""
+        fault = self._poll_fault(now)
+        if fault is not None:
+            return fault
+        event = self._pending_step
+        if event is None:
+            return None
+        if self.label != event.label or event.generation != self.generation:
+            self._pending_step = None
+            return None
+        step = self.step_name()
+        if not step and now - event.stamp < self.step_name_wait_s:
+            return None
+        self._pending_step = None
+        return StateEvent(event.label, event.previous, event.stamp, step, '', event.generation)
+
+    def _poll_fault(self, now: float) -> StateEvent | None:
         event = self._pending_fault
         if event is None or self.label != 'Fault' or event.generation != self.generation:
             self._pending_fault = None
@@ -617,7 +654,7 @@ class StateTracker:
     def step_name(self) -> str:
         """Spoken name of the current step; '' for ids without a name (ids are never read out)."""
         step = self.diag.get('step', '') if self.step_known() else ''
-        return self.step_names.get(step, STEP_KO.get(step, ''))
+        return name_step(step, self.step_names) or STEP_KO.get(step, '')
 
     def planning_fresh(self, now: float) -> bool:
         return now - self.label_at <= self.stale_s

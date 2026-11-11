@@ -12,7 +12,7 @@ from launch.actions import DeclareLaunchArgument, LogInfo, OpaqueFunction
 from launch_ros.actions import Node
 
 OVERRIDES = {  # launch argument -> type of the node parameter
-    'camera': str, 'image_topic': str, 'image_transport': str, 'state_mode': str,
+    'camera': str, 'image_topic': str, 'image_transport': str, 'image_source': str, 'state_mode': str,
     'narrate_period_s': float, 'model': str, 'tts_voice': str,
 }
 

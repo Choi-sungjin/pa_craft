@@ -12,3 +12,8 @@
 #     - {id: carousel, type: clock, slot: 1}
 #     - {id: settle, type: wait, duration_s: 1.0}
 missions: {}
+
+# Dice-memory mission (2026-11-04): use these step ids (agreed with craft_voice, which speaks them):
+#   read_barcode, observe_signal, count_sort, load_S1 .. load_S6, allocate,
+#   place_L1 .. place_L3, verify_L1 .. verify_L3, return_home
+# List: src/craft_voice/craft_voice/mission.py MISSION_STEP_IDS.

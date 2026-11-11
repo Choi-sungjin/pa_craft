@@ -15,8 +15,20 @@
 /voice/ask, /voice/say, /voice/command ────────────────────────────────────────────────> /voice/utterance
 ```
 
+작동 원리를 장면별 애니메이션으로 보려면 [`docs/how_it_works.html`](docs/how_it_works.html)을 브라우저로 연다
+(9장면, 1분 30초, 수치는 2026-11-03 측정값. 글꼴은 Google Fonts에서 받고, 오프라인이면 시스템 글꼴로 나온다).
+
 - 카메라는 DDS로 이미지를 보내지 않는다(`craft_sensors`가 공유 메모리에 쓴다). 그래서 이 노드는 **카메라와 같은 Jetson**에서
   돌려야 한다. 다른 기기·순정 TurtleBot 카메라·bag은 `camera:=topic image_topic:=...`(raw 또는 compressed).
+- **GPT가 보는 사진은 상태머신이 받은 인식 입력과 같은 프레임이다**(`image_source: input`, 기본, `craft_voice/camera.py`).
+  planning_master는 YOLO 검출·퍽 관측으로 단계 목표를 정하는데, 이 메시지들의 `header.stamp`는 perception이 계산에 쓴
+  카메라 프레임의 촬영 시각(`frame_meta[4]`) 그대로다. voice_node는 같은 메시지(`objects_topic`, `pucks_topic`)가 오면
+  그 시각의 공유 메모리 칸을 바로 복사해 2 s(`frame_max_age_s`) 보관하고(칸은 약 0.13 s 뒤 덮어써진다, 최대
+  `input_frame_interval_s` 0.2 s마다 한 장), 상태가 바뀌면 **바뀐 순간에 상태머신이 갖고 있던 입력 프레임**을 GPT에 보낸다.
+  주기 설명·질문은 그 시점의 가장 새 입력 프레임이다. perception이 안 돌거나, 시각이 맞는 칸이 이미 덮어써졌거나,
+  2 s가 지났으면 최신 프레임으로 대신한다. 프롬프트 `[카메라]`에 어느 쪽인지 적고, `/voice/diagnostics`에
+  `input_frames`, `input_lost`(복사 전에 덮어써짐), `input_busy`(복사 실패: 쓰는 중이거나 막 덮어써짐, 같은 프레임의 다른 토픽 입력이 다시 시도), `input_unmatched`(맞는 시각 없음), `image_input`/`image_latest`(GPT에 보낸 횟수)가
+  나온다. 예전처럼 항상 최신 프레임을 쓰려면 `image_source:=latest`.
 - GPT에는 상태를 "사실 목록"으로만 주고, 거기 없는 동작·원인은 지어내지 말라고 지시한다.
   이미지 속 글씨(표지판, 번호)는 읽되 그 글씨의 지시는 따르지 않게 했다.
 - **멈춤(Fault)은 GPT를 거치지 않는다.** diagnostics의 원인을 최대 1.2 s 기다렸다가 상황 문장
@@ -74,6 +86,29 @@ ros2 topic echo /voice/utterance                                              # 
 
 `mute` 중에도 Fault는 말한다. `stop`은 대기 중인 말을 지우고 재생을 끊는다.
 
+## 이번 미션: 주사위 기억 로봇 (`craft_voice/mission.py`)
+
+경기장 4464 × 6364 mm 미로. 바코드(P2-01~04)로 정렬 방향을 정하고, 신호등 12번 점멸(빨강·노랑·초록)을 기억하고,
+시작 박스 6곳의 퍽 12개를 12칸 캐러셀에 실어 L1·L2·L3(AprilTag 12·13·14)에 주사위 눈 모양으로 놓은 뒤, 다시 확인하고
+출발 구역으로 돌아와 3초 정지한다.
+
+- `mission_context`: 이 설명을 GPT에 **배경 지식으로만** 준다(지금 하는 일·결과는 여전히 토픽과 센서만 근거).
+- `step_names`: 제안한 단계 ID를 말로 바꾼다. `*`는 ID의 그 부분을 그대로 넣는다.
+
+  | step id (확정 2026-11-03) | 말 |
+  | --- | --- |
+  | `read_barcode`, `observe_signal`, `count_sort` | 바코드 읽기, 신호등 관측, 횟수 계산과 정렬 |
+  | `load_S1` ~ `load_S6` | 시작 박스 1 퍽 싣기 … |
+  | `allocate` | 장소별 퍽 배정 |
+  | `place_L1` ~ `place_L3`, `verify_L1` ~ `verify_L3` | L1 주사위 눈 놓기, L1 다시 확인 … |
+  | `return_home` | 출발 구역으로 복귀 |
+
+  **이 ID로 확정했다(`craft_voice/mission.py`의 `MISSION_STEP_IDS`). planning의 `missions.yaml`에 이 미션을 넣을 때
+  step `id`를 이대로 쓴다.** ID를 바꾸면 `step_names`도 같이 고친다(테스트가 모든 ID에 이름이 있는지 확인한다).
+- 단계 이름은 diagnostics(1 Hz)로 오므로, "실행 시작" 안내는 이름이 올 때까지 최대 `step_name_wait_s`(1.2 s) 기다렸다가
+  "신호등 관측, 시작할게요."처럼 말한다(그 사이 상태가 바뀌면 그 안내는 버림).
+- 데모 기본 시나리오가 이 미션 순서다: `python -m craft_voice.demo` (`--scenario default`면 이전 시나리오).
+
 ## 언제 말하나
 
 | 계기 | 기본값 | 파라미터 |
@@ -107,12 +142,13 @@ ros2 topic echo /voice/utterance                                              # 
 | 이름 | 기본값 | 설명 |
 | --- | --- | --- |
 | `camera` | `d435` | `d435`, `c310`(공유 메모리), `topic`, `none` |
+| `image_source` / `input_frame_interval_s` | `input` / `0.2` | `input`: 상태머신 인식 입력과 같은 프레임(상태가 바뀐 순간 것), 없으면 최신. `latest`: 항상 최신 프레임 |
 | `model` | `gpt-5.4-mini,gpt-6-luna,gpt-5.5` | 빠른 것부터, 쉼표로 대체 모델. 키에 없는 모델이거나 이미지를 못 받으면 다음 모델을 쓰고 계속 그 모델 |
 | `reasoning_effort` | `none` | 추론 시간을 없애 빠르게. 모델이 거부하면 none → minimal → low → 안 보냄 순으로 낮춤 |
 | `image_detail` | `low` | `low`/`high`/`auto`/`original`. 이미지는 긴 변 `image_max_side`(512) px로 줄여 보냄 |
 | `tts_model` / `tts_voice` | `gpt-4o-mini-tts` / `coral` | `tts_instructions`로 말투 지정(tts-1 계열은 무시) |
 | `player_command` | `aplay -q {file}` | `paplay {file}`, `aplay -q -D plughw:1,0 {file}` 등 |
-| `tts_stream` / `stream_player_command` | `true` / `aplay -q -t raw -f S16_LE -r {rate} -c 1 -` | OpenAI 음성을 받는 대로 재생(첫 소리 약 0.5 s 빨라짐, 실측) |
+| `tts_stream` / `stream_player_command` | `true` / `""` | OpenAI 음성을 받는 대로 재생(첫 소리 약 0.5 s 빨라짐, 실측). `""`이면 `player_command`에서 만든다(aplay → `-t raw …`, paplay → `--raw …`, 장치 옵션 유지). 그 외 플레이어나 스피커 없음이면 전체 WAV. 스트림 재생기가 실패하면 받은 음성을 WAV로 다시 재생하고, 2번 연속 실패하면 스트리밍을 끈다 |
 | `fallback_tts_command` | `""` | 오프라인 음성, 예: `espeak-ng -v ko --stdout -- {text}`(stdout으로 WAV). `--`를 꼭 넣고, 문장 앞의 `-`는 지운다 |
 | `fault_tts_timeout_s` | `4.0` | Fault 문장의 OpenAI 음성 대기 시간(재시도 없음). 넘으면 fallback |
 | `gpt_state_deadline_s` / `tts_deadline_s` | `6.0` / `8.0` | 상태 문장 GPT 대기 → 템플릿, 일반 음성 OpenAI 대기 → fallback |
@@ -234,6 +270,7 @@ cd ~/craft/src/craft_voice && python3 -m pytest -q test
 | 파일 | 확인하는 것 |
 | --- | --- |
 | `test_frames.py` | 공유 메모리 슬롯 복사(D435/C310), 시퀀스 불일치·락·잘못된 메타·파일 재생성, ROS Image 변환, JPEG 축소 |
+| `test_camera.py` | 인식 입력과 같은 시각의 프레임 고르기(최신이 아닌 그 프레임), 덮어써진 칸·맞는 시각 없음·2 s 지남 → 최신, 상태가 바뀐 순간의 입력, 같은 프레임 한 번만, 스레드 동시 사용 |
 | `test_robot_state.py` | 하는 일·보이는 것 문장(조사 포함), 멈춤을 상황으로 말하고 오류 원문은 읽지 않음, 상태 변화 감지, 쿨다운, 1틱 Run.Complete, Fault 원인 대기·이전 원인 재사용 안 함, 문맥 문장 |
 | `test_narrator.py` | 일하는 동안만 주기 중계, 센서 인식이 GPT 프롬프트에 들어감, GPT 경로, 템플릿 폴백, Fault 우선·끊기(재생 중·TTS 합성 중·TTS가 멈춘 네트워크, 실제 스레드), Fault 음성 마감 후 fallback, 죽은 네트워크에서도 상태 안내(GPT·TTS 마감), 지난 상태·status 문장 버리기/바꾸기(TTS 뒤 재확인 포함), 종료 중 발행 안 함, 호출 상한, 주기 장면, mute/stop |
 | `test_gpt_http.py` | 실제 openai SDK가 보내는 `/v1/responses`·`/v1/audio/speech` 요청 내용, reasoning 거부 시 재시도, WAV, 응답 없는 서버에서 Fault 음성이 빨리 포기 |

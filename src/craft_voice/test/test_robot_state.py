@@ -15,7 +15,7 @@ def test_changes_only_and_announce_filter():
 
 
 def test_cooldown_per_label():
-    t = StateTracker(cooldown_s=10.0)
+    t = StateTracker(cooldown_s=10.0, step_name_wait_s=0.0)
     assert t.update_planning('Run.Execute', 0.0)
     t.update_planning('Run.Complete', 1.0)
     t.update_planning('Run.AwaitRequest', 1.05)
@@ -84,7 +84,7 @@ def test_step_names_in_templates():
 
 def test_step_from_previous_step_is_not_used():
     """Diagnostics are 1 Hz: the next step's Run.Execute can come before any diagnostics naming it."""
-    t = StateTracker(step_names=parse_mapping('approach:접근'), cooldown_s=0.0)
+    t = StateTracker(step_names=parse_mapping('approach:접근'), cooldown_s=0.0, step_name_wait_s=0.0)
     t.update_planning('Run.Execute', 5.0)
     diag(t, 'Run.Execute: ', 9.98, step='approach')
     assert t.template(t.update_planning('Run.Complete', 10.0)) == '접근, 끝났어요.'
@@ -98,7 +98,7 @@ def test_step_from_previous_step_is_not_used():
 
 
 def test_new_step_detected_without_prepare_task_sample():
-    t = StateTracker(cooldown_s=0.0)
+    t = StateTracker(cooldown_s=0.0, step_name_wait_s=0.0)
     diag(t, 'Run.Execute: ', 9.98, step='approach')
     t.update_planning('Run.Complete', 10.0)
     t.update_planning('Run.AwaitRequest', 10.05)
@@ -108,7 +108,7 @@ def test_new_step_detected_without_prepare_task_sample():
 
 def test_new_step_when_complete_and_await_samples_are_lost():
     """QA round 3 #2: Execute -> PrepareTask directly (two samples lost) is still a new step."""
-    t = StateTracker(cooldown_s=0.0)
+    t = StateTracker(cooldown_s=0.0, step_name_wait_s=0.0)
     t.update_planning('Run.PrepareTask', 1.0)
     diag(t, 'Run.Execute: ', 2.0, step='approach')
     t.update_planning('Run.Compute', 2.1)

@@ -84,9 +84,10 @@ def frame():
 
 def make(backend=None, player=None, frames=frame, clock=None, start=False, **config):
     texts = []
-    narrator = Narrator(NarratorConfig(**config), StateTracker(), backend=backend, player=player or Player(),
-                        frame_provider=frames, on_text=lambda kind, text: texts.append((kind, text)),
-                        clock=clock or Clock(), start=start)
+    # step_name_wait_s=0: these tests are about queueing; waiting for the 1 Hz step name is tested on its own.
+    narrator = Narrator(NarratorConfig(**config), StateTracker(step_name_wait_s=0.0), backend=backend,
+                        player=player or Player(), frame_provider=frames,
+                        on_text=lambda kind, text: texts.append((kind, text)), clock=clock or Clock(), start=start)
     return narrator, texts
 
 
@@ -1017,3 +1018,125 @@ def test_fault_cuts_a_streaming_sentence_and_is_not_streamed():
         assert backend.urgent and backend.urgent[-1] is True
     finally:
         narrator.close()
+
+
+def test_step_start_announced_with_its_name_after_diagnostics():
+    """Narrator level: the Execute announcement waits for the 1 Hz step name (tick delivers it)."""
+    from craft_voice.mission import STEP_NAMES
+    from craft_voice.robot_state import parse_mapping
+    clock = Clock()
+    texts = []
+    narrator = Narrator(NarratorConfig(state_mode='template'), StateTracker(step_names=parse_mapping(STEP_NAMES)),
+                        player=Player(), on_text=lambda kind, text: texts.append((kind, text)), clock=clock,
+                        start=False)
+    narrator.planning_state('Ready')
+    run(narrator)
+    narrator.planning_state('Run.PrepareTask')
+    clock.now += 0.3
+    narrator.planning_state('Run.Execute')
+    narrator.tick()
+    run(narrator)
+    assert texts[-1][1].startswith('준비됐어요')                  # nothing yet: waiting for the name
+    clock.now += 0.5
+    narrator.diagnostics('planning/state_machine', 0, 'Run.Execute: ', {'step': 'read_barcode'})
+    narrator.tick()
+    run(narrator)
+    assert texts[-1] == ('state', '바코드 읽기, 시작할게요.')
+
+
+def test_close_cuts_a_streaming_sentence():
+    """QA: close() stopped the WAV player only; a streaming sentence kept playing (or stuck in write)."""
+    backend = StreamingBackend(chunks=(b'a',) * 50, chunk_delay=0.05)
+    stream = FakeStreamPlayer(block=True)
+    narrator = Narrator(NarratorConfig(state_mode='template'), StateTracker(), backend=backend, player=Player(),
+                        stream_player=stream, clock=Clock(), start=True)
+    narrator.planning_state('Run.Execute')
+    deadline = time.monotonic() + 3
+    while not stream.data and time.monotonic() < deadline:
+        time.sleep(0.01)
+    started = time.monotonic()
+    narrator.close()
+    assert stream.stops >= 1 and time.monotonic() - started < 1.5
+
+
+class BrokenStreamPlayer(FakeStreamPlayer):
+    def finish(self):
+        raise RuntimeError('stream player exited 1: audio open error')
+
+
+def test_stream_player_failure_is_logged_replayed_as_wav_then_streaming_off(caplog):
+    backend = StreamingBackend(chunks=(b'\x01\x00', b'\x02\x00'))
+    stream = BrokenStreamPlayer()
+    narrator, texts = make_streaming(backend, stream, state_mode='template', repeat_window_s=0.0)
+    with caplog.at_level('ERROR', logger='craft_voice'):
+        narrator.planning_state('Ready')
+        run(narrator)
+        assert 'audio playback failed (stream): stream player exited 1: audio open error' in caplog.text
+        wav = narrator.player.played[-1]
+        from craft_voice.audio import wav_seconds
+        assert wav.startswith(b'RIFF') and wav_seconds(wav) > 0         # what was received, as a WAV
+        assert narrator.stream_player is stream                          # one failure: still streaming
+        narrator.planning_state('Run.Stopping')
+        run(narrator)
+        assert narrator.stream_player is None and 'speaking whole WAVs from now on' in caplog.text
+    assert len(narrator.player.played) == 2 and narrator.stats['spoken'] == 2
+
+
+def test_demo_streams_only_through_the_chosen_player():
+    import argparse
+    import sys
+    from craft_voice.audio import CommandPlayer
+    from craft_voice.demo import default_stream_player
+    args = argparse.Namespace(stream='auto', stream_player='')
+    custom = CommandPlayer([sys.executable, '-c', 'pass', '{file}'])
+    assert default_stream_player(args, custom) is None                   # custom player: whole WAVs to it
+    aplay = CommandPlayer(['aplay', '-q', '-D', 'plughw:1,0', '{file}'])
+    assert default_stream_player(args, aplay).command[:4] == ['aplay', '-q', '-D', 'plughw:1,0']
+    assert default_stream_player(args, None) is None
+
+
+# ---- which picture GPT sees (camera.CameraFrames supplies Picture objects) ----------------------------
+def test_state_change_sends_the_state_machine_input_frame_of_that_moment():
+    import cv2
+    from craft_voice.camera import Picture
+    asked = []
+
+    def frames(at=None):
+        asked.append(at)
+        return Picture(np.full((360, 640, 3), 200, np.uint8), 'input', clock.now - 0.4, 123, '/pucks')
+    clock = Clock()
+    backend = Backend('퍽을 싣기 시작할게요.')
+    narrator, texts = make(backend, frames=frames, clock=clock)
+    narrator.planning_state('Idle')
+    narrator.planning_state('Ready')          # the change happens at 100.0
+    clock.now = 101.0                         # GPT gets to it a second later
+    run(narrator)
+    assert asked == [100.0]                   # the picture of the moment of the change, not of "now"
+    _, prompt, jpeg = backend.calls[0]
+    assert cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR).mean() == pytest.approx(200, abs=2)
+    assert '상태머신이 받은 인식 입력과 같은 프레임, 0.4초 전 사진' in prompt
+    assert narrator.stats['image_input'] == 1 and narrator.stats['image_latest'] == 0
+
+
+def test_scene_uses_its_own_time_and_reports_a_newest_frame_fallback():
+    from craft_voice.camera import Picture
+    asked = []
+    clock = Clock()
+
+    def frames(at=None):
+        asked.append(at)
+        return Picture(np.zeros((36, 64, 3), np.uint8), 'latest', clock.now, 0)
+    backend = Backend()
+    narrator, _ = make(backend, frames=frames, clock=clock)
+    narrator.command('describe')
+    run(narrator)
+    assert asked == [100.0] and '최신 카메라 사진, 0.0초 전' in backend.calls[0][1]
+    assert narrator.stats['image_latest'] == 1
+
+
+def test_provider_without_parameters_still_works():
+    backend = Backend()
+    narrator, _ = make(backend, frames=frame)   # laptop demo / bench: newest frame, no time
+    narrator.command('describe')
+    run(narrator)
+    assert backend.calls[0][2][:2] == b'\xff\xd8' and '이미지 첨부됨 (로봇 앞쪽 카메라)\n' in backend.calls[0][1] + '\n'

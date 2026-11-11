@@ -140,20 +140,40 @@ class CommandPlayer:
                 self._process.terminate()
 
 
+def stream_command_for(player: list[str]) -> list[str] | None:
+    """The raw-PCM stdin variant of a WAV player command, keeping its device options; None if there is none.
+
+    aplay -q -D plughw:1,0 {file}  ->  aplay -q -D plughw:1,0 -t raw -f S16_LE -r {rate} -c 1 -
+    paplay --device=X {file}      ->  paplay --device=X --raw --format=s16le --rate={rate} --channels=1
+    """
+    if not player:
+        return None
+    name = os.path.basename(player[0])
+    keep = [arg for arg in player if arg != '{file}']
+    if name == 'aplay':
+        return keep + ['-t', 'raw', '-f', 'S16_LE', '-r', '{rate}', '-c', '1', '-']
+    if name == 'paplay':
+        return keep + ['--raw', '--format=s16le', '--rate={rate}', '--channels=1']
+    return None
+
+
 class StreamPlayer:
     """Plays raw 16-bit mono PCM fed chunk by chunk to a command's stdin, e.g.
-    `aplay -q -t raw -f S16_LE -r {rate} -c 1 -` (or `paplay --raw --format=s16le --rate={rate} --channels=1`).
+    `aplay -q -t raw -f S16_LE -r {rate} -c 1 -` (see stream_command_for).
     Same stop/cancel contract as CommandPlayer; writing never holds the lock, so stop() always gets through.
+    A write that the player does not take within write_timeout_s (wedged device) stops the player.
     """
 
-    def __init__(self, command: list[str], timeout_s: float = 120.0):
+    def __init__(self, command: list[str], timeout_s: float = 120.0, write_timeout_s: float = 5.0):
         if not command:
             raise ValueError('stream player command is empty')
         self.command = list(command)
         self.timeout_s = timeout_s
+        self.write_timeout_s = write_timeout_s
         self._lock = threading.Lock()
         self._process: subprocess.Popen | None = None
         self._stopped = False
+        self._timed_out = False
 
     @property
     def playing(self) -> bool:
@@ -165,27 +185,42 @@ class StreamPlayer:
         with self._lock:
             if cancelled is not None and cancelled():
                 return False
-            self._stopped = False
+            self._stopped = self._timed_out = False
             try:
+                # bufsize=0: each chunk goes to the player at once, never held in a Python buffer
                 self._process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-                                                 stderr=subprocess.DEVNULL)
+                                                 stderr=subprocess.PIPE, bufsize=0)
             except OSError as error:
                 raise RuntimeError(f'cannot run stream player {argv[0]!r}: {error}') from error
         return True
+
+    def _watchdog(self):
+        with self._lock:
+            if self._process is not None and self._process.poll() is None:
+                self._timed_out = True
+                self._process.kill()
 
     def write(self, chunk: bytes) -> bool:
         """False once the player stopped or died (then the rest is not sent)."""
         process = self._process
         if process is None or self._stopped:
             return False
+        timer = threading.Timer(self.write_timeout_s, self._watchdog)
+        timer.daemon = True
+        timer.start()
         try:
-            process.stdin.write(chunk)
+            view = memoryview(chunk)
+            while view:
+                written = process.stdin.write(view)
+                view = view[written or 0:]
             return True
         except (BrokenPipeError, OSError, ValueError):
             return False
+        finally:
+            timer.cancel()
 
     def finish(self) -> bool:
-        """End of audio: wait until it has been played. False if it was stopped or failed."""
+        """End of audio: wait until it has been played. False if it was stopped; raises if the player failed."""
         process = self._process
         if process is None:
             return False
@@ -199,11 +234,20 @@ class StreamPlayer:
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
+            error = process.stderr.read().decode(errors='replace').strip() if process.stderr else ''
+            if process.stderr:
+                process.stderr.close()
         finally:
             with self._lock:
                 self._process = None
-                stopped = self._stopped
-        return not stopped and process.returncode == 0
+                stopped, timed_out = self._stopped, self._timed_out
+        if stopped:
+            return False
+        if timed_out:
+            raise RuntimeError(f'stream player took no audio for {self.write_timeout_s} s (device stuck?)')
+        if process.returncode != 0:
+            raise RuntimeError(f'stream player exited {process.returncode}: {error}')
+        return True
 
     def stop(self):
         with self._lock:

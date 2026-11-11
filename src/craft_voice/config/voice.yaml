@@ -9,6 +9,12 @@ voice_node:
     camera_description: 로봇 앞쪽 D435 카메라   # told to GPT so it knows where the picture comes from
     use_image: true
     frame_max_age_s: 2.0          # older frames are not sent
+    # input: GPT sees the frame the planning state machine's vision input came from (YOLO detections and
+    #        puck observations carry that frame's camera stamp); at a state change, the one it had then.
+    #        Falls back to the newest frame when perception is not running or the stamp matches nothing.
+    # latest: always the newest camera frame.
+    image_source: input
+    input_frame_interval_s: 0.2   # copy an input frame at most this often (at least frame_max_age_s / 63: 64 copies kept)
     image_max_side: 512           # longer side after resizing, before JPEG
     jpeg_quality: 80
 
@@ -30,7 +36,11 @@ voice_node:
     # All labels: Idle, Ready, Run.AwaitRequest, Run.PrepareTask, Run.Compute, Run.Execute,
     #             Run.Complete, Run.Stopping, Fault
     announce_states: Ready,Run.Execute,Run.Complete,Run.Stopping,Fault
-    step_names: ""                # spoken names of mission step ids, e.g. "approach:접근,grasp_pose:잡기 자세"
+    # Spoken names of planning step ids; '*' copies that part of the id (load_S3 -> 시작 박스 3 퍽 싣기).
+    # Dice mission step ids (agreed 2026-11-03, craft_voice/mission.py MISSION_STEP_IDS), same as missions.yaml.
+    step_names: "read_barcode:바코드 읽기,observe_signal:신호등 관측,count_sort:횟수 계산과 정렬,load_S*:시작 박스 * 퍽 싣기,allocate:장소별 퍽 배정,place_L*:L* 주사위 눈 놓기,verify_L*:L* 다시 확인,return_home:출발 구역으로 복귀"
+    # Background for GPT so narration uses the mission's words ("" = none). Facts still come only from topics.
+    mission_context: "주사위 기억 미션(경기장 4.5 x 6.4 m, 벽으로 나뉜 미로): 출발 구역에서 시작해 바코드(P2-01~P2-04)를 읽어 오름차순/내림차순을 정하고, 신호등이 1초씩 12번 깜빡이는 빨강·노랑·초록 순서를 기억한 뒤 색별 횟수를 센다. 시작 박스 6곳에서 퍽 12개를 12칸 캐러셀에 싣고, 횟수 순서대로 L1·L2·L3(AprilTag 12·13·14)에 퍽을 주사위 눈 모양으로 내려놓는다. 놓은 자리를 다시 확인하고 출발 구역으로 돌아와 3초 멈추면 끝난다."
     state_cooldown_s: 10.0        # the same label is announced at most once per cooldown
     state_mode: gpt               # gpt: GPT phrases it (with the image) | template: fixed sentence, faster
     fault_reason_wait_s: 1.2      # wait this long for the diagnostics fault reason before speaking
@@ -72,7 +82,9 @@ voice_node:
     tts_sample_rate: 24000        # raw PCM rate of the speech endpoint (16-bit mono)
     player_command: aplay -q {file}          # or: paplay {file}  /  aplay -q -D plughw:1,0 {file}
     tts_stream: true              # play OpenAI speech while it arrives (first audio ~0.6 s sooner, measured)
-    stream_player_command: aplay -q -t raw -f S16_LE -r {rate} -c 1 -   # raw 16-bit mono on stdin; paplay --raw --format=s16le --rate={rate} --channels=1
+    # "" = derived from player_command with its device options (aplay -> -t raw ..., paplay -> --raw ...);
+    # other players speak whole WAVs. Explicit example: aplay -q -t raw -f S16_LE -r {rate} -c 1 -
+    stream_player_command: ""
     fallback_tts_command: ""      # offline speech when OpenAI is unreachable, e.g. espeak-ng -v ko --stdout -- {text}
 
     # ---- persona, reactions, memory -----------------------------------------------------------------

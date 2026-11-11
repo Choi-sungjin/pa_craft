@@ -8,7 +8,9 @@ sub: /planning/state (std_msgs/String, transient local), /planning/diagnostics,
      (craft_perception/DetectionArray), pucks_topic (PuckObservationArray), tags_topic (Int32MultiArray),
      camera: /vision/d435/frame_meta + /dev/shm/craft_vision (camera:=d435),
              /vision/c310/frame_meta + /dev/shm/craft_c310 (camera:=c310),
-             image_topic (camera:=topic, raw or compressed), or nothing (camera:=none)
+             image_topic (camera:=topic, raw or compressed), or nothing (camera:=none);
+     image_source:=input sends GPT the frame the state machine's vision input came from (same stamp as
+     objects_topic / pucks_topic, see camera.py), latest the newest frame
      /voice/ask (String: a question), /voice/say (String: speak as is),
      /voice/command (String: describe | status | wake | mute | unmute | stop | listen | deaf)
      microphone (listen:=true): "크래프트" -> says what it is doing; "크래프트, <question>" -> answers
@@ -22,8 +24,6 @@ from fixed templates through fallback_tts_command (or only published).
 from __future__ import annotations
 
 import math
-import threading
-import time
 
 import rclpy
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
@@ -31,9 +31,11 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from std_msgs.msg import Bool, String, UInt64MultiArray
 
-from .audio import CommandPlayer, CommandTts, StreamPlayer, split_command
-from .frames import ShmFrameReader, compressed_to_bgr, image_to_bgr
+from .audio import CommandPlayer, CommandTts, StreamPlayer, split_command, stream_command_for
+from .camera import CameraFrames, stamp_ns
+from .frames import ShmFrameReader
 from .gpt import DEFAULT_STT_MODEL, DEFAULT_TTS_MODEL, DEFAULT_TTS_VOICE
+from .mission import MISSION_CONTEXT, STEP_NAMES
 from .narrator import Narrator, NarratorConfig
 from .robot_state import StateTracker, parse_list, parse_mapping
 from .wiring import DEFAULT_CACHE_DIR, DEFAULT_MIC_COMMAND, load_lines, load_reactions, make_cache, make_listener
@@ -50,6 +52,8 @@ PARAMETERS = {
     'camera_description': '로봇 앞쪽 D435 카메라',
     'use_image': True,
     'frame_max_age_s': 2.0,
+    'image_source': 'input',
+    'input_frame_interval_s': 0.2,
     'image_max_side': 512,
     'jpeg_quality': 80,
     'planning_state_topic': '/planning/state',
@@ -60,7 +64,8 @@ PARAMETERS = {
     'event_topics': '/planning/command,/planning/mission,/planning/approach_box,/planning/approach_box_near',
     'flag_topics': '/planning/hold,/control/gripper_grasped',   # std_msgs/Bool, context only
     'announce_states': 'Ready,Run.Execute,Run.Complete,Run.Stopping,Fault',
-    'step_names': '',
+    'step_names': STEP_NAMES,
+    'mission_context': MISSION_CONTEXT,
     'state_cooldown_s': 10.0,
     'state_mode': 'gpt',
     'fault_reason_wait_s': 1.2,
@@ -95,7 +100,7 @@ PARAMETERS = {
     'tts_deadline_s': 8.0,
     'player_command': 'aplay -q {file}',
     'tts_stream': True,
-    'stream_player_command': 'aplay -q -t raw -f S16_LE -r {rate} -c 1 -',
+    'stream_player_command': '',
     'fallback_tts_command': '',
     # ---- persona, reactions, memory ----
     'style': 'polite',                      # polite | cute (short friendly 반말)
@@ -140,6 +145,7 @@ class VoiceNode(Node):
                                announce_situations=tuple(parse_list(p['announce_situations'])))
         config = NarratorConfig(
             language=p['language'], persona=p['persona'], camera_description=p['camera_description'],
+            mission_context=p['mission_context'],
             max_chars=p['max_chars'], state_mode=p['state_mode'], narrate_period_s=p['narrate_period_s'],
             narrate_idle_period_s=p['narrate_idle_period_s'],
             min_interval_s=p['min_interval_s'], max_gpt_calls_per_min=p['max_gpt_calls_per_min'],
@@ -177,18 +183,19 @@ class VoiceNode(Node):
         self._speaking_pub = self.create_publisher(Bool, '/voice/speaking', QoSProfile(
             depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self._diagnostics_pub = self.create_publisher(DiagnosticArray, '/voice/diagnostics', 10)
-        self._frame_lock = threading.Lock()
-        self._frame_max_age_s = p['frame_max_age_s']
-        self._latest = None  # (receive time, message or meta)
-        self._reader = None
-        self._camera = p['camera']
+        self._frames = None
         self._setup_camera(p)
 
-        stream = split_command(p['stream_player_command']) if p['tts_stream'] and backend else []
+        # Streaming plays on the same speaker as player_command (device options kept); none without a speaker.
+        stream = []
+        if p['tts_stream'] and backend and player:
+            stream = split_command(p['stream_player_command']) or stream_command_for(player) or []
+            if not stream:
+                log.info(f'no raw-PCM variant of {player[0]!r}: speaking whole WAVs (set stream_player_command)')
         self.narrator = Narrator(
             config, tracker, backend=backend, player=CommandPlayer(player) if player else None,
             stream_player=StreamPlayer(stream) if stream else None,
-            frame_provider=self._frame if config.use_image else None,
+            frame_provider=self._frames.pick if config.use_image and self._frames else None,
             fallback_tts=CommandTts(fallback) if fallback else None,
             on_text=self._publish_text, on_speaking=self._publish_speaking, logger=log,
             speech_cache=make_cache(backend, p['speech_cache_dir']))
@@ -230,6 +237,7 @@ class VoiceNode(Node):
         log.info(f"voice ready: camera={p['camera']} gpt={'on' if backend else 'off'} model={p['model']} "
                  f"tts={p['tts_model']}/{p['tts_voice']} state_mode={p['state_mode']} style={p['style']} "
                  f"narrate every {p['narrate_period_s']}s player={' '.join(player) or 'none'} "
+                 f"stream={' '.join(stream) or 'off'} "
                  f"microphone={'on (' + p['wake_words'] + ')' if self.listener else 'off'}")
 
     # ---- what perception sees ---------------------------------------------------------------
@@ -254,54 +262,48 @@ class VoiceNode(Node):
             log.warning('craft_perception messages not found: YOLO objects and pucks are left out')
             return
         if p['objects_topic']:
-            self.create_subscription(DetectionArray, p['objects_topic'], lambda m: self.narrator.objects(
-                [d.label for d in m.detections]), qos_profile_sensor_data)
+            def on_objects(m, topic=p['objects_topic']):
+                self._input_frame(m.header, topic)
+                self.narrator.objects([d.label for d in m.detections])
+            self.create_subscription(DetectionArray, p['objects_topic'], on_objects, qos_profile_sensor_data)
         if p['pucks_topic']:
-            self.create_subscription(PuckObservationArray, p['pucks_topic'], lambda m: self.narrator.pucks(
+            def on_pucks(m, topic=p['pucks_topic']):
+                self._input_frame(m.header, topic)
                 # Without a depth axis the centre is (0,0,0) and 'standing' is meaningless: report unknown.
-                [(o.standing, math.sqrt(o.center.x ** 2 + o.center.y ** 2 + o.center.z ** 2))
-                 if o.axis_valid else (None, None) for o in m.observations]), qos_profile_sensor_data)
+                self.narrator.pucks([(o.standing, math.sqrt(o.center.x ** 2 + o.center.y ** 2 + o.center.z ** 2))
+                                     if o.axis_valid else (None, None) for o in m.observations])
+            self.create_subscription(PuckObservationArray, p['pucks_topic'], on_pucks, qos_profile_sensor_data)
+
+    def _input_frame(self, header, topic: str):
+        """planning_master acts on these same messages; their stamp is the camera frame they came from."""
+        if self._frames is not None:
+            self._frames.on_input(stamp_ns(getattr(header, 'stamp', None)), topic)
 
     # ---- camera -----------------------------------------------------------------------------
     def _setup_camera(self, p):
         camera = p['camera']
+        if camera == 'none':
+            return
+        if camera not in SHM_CAMERAS and camera != 'topic':
+            raise ValueError("camera must be d435, c310, topic or none")
+        if camera == 'topic' and p['image_transport'] not in ('raw', 'compressed'):
+            raise ValueError("image_transport must be 'raw' or 'compressed'")
+        reader = None
         if camera in SHM_CAMERAS:
-            name, depth, topic = SHM_CAMERAS[camera]
-            self._reader = ShmFrameReader(name, depth)
-            self.create_subscription(UInt64MultiArray, topic, lambda m: self._store(list(m.data)),
-                                     qos_profile_sensor_data)
-        elif camera == 'topic':
+            name, depth, _ = SHM_CAMERAS[camera]
+            reader = ShmFrameReader(name, depth)
+        self._frames = CameraFrames(reader, mode=p['image_source'], max_age_s=p['frame_max_age_s'],
+                                    min_interval_s=p['input_frame_interval_s'])
+        if camera in SHM_CAMERAS:
+            self.create_subscription(UInt64MultiArray, SHM_CAMERAS[camera][2],
+                                     lambda m: self._frames.on_meta(m.data), qos_profile_sensor_data)
+        else:
             if p['image_transport'] == 'compressed':
                 from sensor_msgs.msg import CompressedImage as ImageType
-            elif p['image_transport'] == 'raw':
-                from sensor_msgs.msg import Image as ImageType
             else:
-                raise ValueError("image_transport must be 'raw' or 'compressed'")
-            self.create_subscription(ImageType, p['image_topic'], self._store, qos_profile_sensor_data)
-        elif camera != 'none':
-            raise ValueError("camera must be d435, c310, topic or none")
-
-    def _store(self, item):
-        with self._frame_lock:
-            self._latest = (time.monotonic(), item)
-
-    def _frame(self):
-        """Called from the think thread: newest frame as BGR, or None if there is none fresh."""
-        for _ in range(3):
-            with self._frame_lock:
-                latest = self._latest
-            if latest is None or time.monotonic() - latest[0] > self._frame_max_age_s:
-                return None
-            received, item = latest
-            if self._reader is None:
-                if hasattr(item, 'format'):
-                    return compressed_to_bgr(item.data)
-                return image_to_bgr(item.encoding, item.height, item.width, item.step, item.data)
-            frame = self._reader.snapshot(item)
-            if frame is not None:
-                return frame.bgr
-            time.sleep(0.04)  # slot busy or overwritten: take the next frame_meta
-        return None
+                from sensor_msgs.msg import Image as ImageType
+            self.create_subscription(ImageType, p['image_topic'], lambda m: self._frames.on_image(
+                m, stamp_ns(getattr(getattr(m, 'header', None), 'stamp', None))), qos_profile_sensor_data)
 
     # ---- callbacks / outputs ----------------------------------------------------------------
     def _on_diagnostics(self, msg: DiagnosticArray):
@@ -338,9 +340,11 @@ class VoiceNode(Node):
             stats.update({f'mic_{key}': value for key, value in self.listener.stats.items()},
                          mic_enabled=self.listener.enabled)
         status.values = [KeyValue(key=key, value=str(value)) for key, value in sorted(stats.items())]
-        with self._frame_lock:
-            age = time.monotonic() - self._latest[0] if self._latest else float('inf')
-        status.values.append(KeyValue(key='frame_age_s', value=f'{age:.2f}'))
+        if self._frames is not None:
+            latest, newest = self._frames.ages()
+            status.values.append(KeyValue(key='frame_age_s', value=f'{latest:.2f}'))
+            status.values.append(KeyValue(key='input_frame_age_s', value=f'{newest:.2f}'))
+            status.values += [KeyValue(key=key, value=str(value)) for key, value in sorted(self._frames.stats.items())]
         msg = DiagnosticArray(status=[status])
         msg.header.stamp = self.get_clock().now().to_msg()
         self._diagnostics_pub.publish(msg)
@@ -349,8 +353,8 @@ class VoiceNode(Node):
         if self.listener is not None:
             self.listener.close()
         self.narrator.close()
-        if self._reader is not None:
-            self._reader.close()
+        if self._frames is not None:
+            self._frames.close()
         super().destroy_node()
 
 
