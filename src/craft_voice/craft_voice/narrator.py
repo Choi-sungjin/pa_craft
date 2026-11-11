@@ -4,9 +4,14 @@ The robot narrates: what it is doing (planning state machine) and what it sees
 (camera + perception), when its action changes and every narrate_period_s
 while it works. Problems are told as situations, never as error codes.
 
+It also answers when called by name (wake(): the microphone listener heard "크래프트"), with what it
+remembers of the last minutes as facts to reason from, reacts to things that happen without a state
+change (a blocked path, a new path being searched), remarks on what it notices by itself (a state that
+lasts unusually long), and plays recorded reactions for chosen events.
+
 Two worker threads:
-  think: GPT jobs (state change, scene, status, question) -> sentence
-  speak: sentence -> TTS -> player, highest priority first
+  think: GPT jobs (state change, scene, status, question, thought) -> sentence
+  speak: sentence -> TTS (or the speech cache, or a recording) -> player, highest priority first
 Fault sentences skip the think thread (fixed template with the exact reason),
 drop pending state/scene speech and cut off what is playing, so a slow GPT
 call never delays a fault announcement.
@@ -21,13 +26,17 @@ import re
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
+from .audio import pcm_to_wav, read_clip
 from .frames import encode_jpeg
-from .robot_state import STATE_KO, StateEvent, StateTracker
+from .robot_state import STATE_KO, Notice, StateEvent, StateTracker, is_status_question
 
-PRIORITY = {'scene': 0, 'state': 1, 'status': 2, 'ask': 2, 'say': 2, 'fault': 3}  # speaking order
-THINK_PRIORITY = {'state': 3, 'ask': 2, 'status': 2, 'scene': 0}  # GPT order: announcements expire, so first
+# speaking order; 'ack' (the "응!" when called by name) is older than its answer, so it goes first
+PRIORITY = {'scene': 0, 'thought': 0, 'state': 1, 'status': 2, 'ask': 2, 'say': 2, 'ack': 2, 'fault': 3}
+# GPT order: announcements expire, so first
+THINK_PRIORITY = {'state': 3, 'ask': 2, 'status': 2, 'thought': 1, 'scene': 0}
+SKIP = 'SKIP'  # GPT's answer to a follow-up sentence that was not meant for the robot
 EVENT_LABELS = ('Run.Complete',)  # still true after the state moved on; other labels describe "now"
 LANGUAGE = {'ko': '한국어', 'en': 'English', 'ja': '日本語'}
 
@@ -56,6 +65,18 @@ class NarratorConfig:
     tts_deadline_s: float = 8.0        # other speech uses the fallback TTS if OpenAI has not answered by then
     scene_max_age_s: float = 10.0
     max_pending_questions: int = 3
+    # ---- called by name (microphone) ----
+    wake_mode: str = 'think'              # the name alone: 'think' = GPT says what it is doing, 'template' = fixed words
+    wake_ack: bool = True                 # a short "응!" at once, while the answer is being made
+    gpt_voice_deadline_s: float = 5.0     # an answer to the name uses fixed words if GPT has not answered by then
+    conversation_s: float = 90.0          # earlier questions and answers stay in the prompt this long
+    # ---- things of its own ----
+    notice: bool = False                  # remarks on what it notices (a long compute, a blocked path, lost state)
+    thought_max_age_s: float = 10.0
+    # event -> recorded WAV played instead of a spoken sentence: replan, blocked, step_done, run_done, done,
+    # ready, wake (the name alone), ack (the name with a question), idle (and any notice key).
+    # A missing or broken file falls back to the sentence.
+    reactions: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -66,6 +87,9 @@ class Job:
     event: StateEvent | None = None
     requested: bool = False  # asked for on /voice/command, so a failure is spoken too
     cancelled: bool = False  # a narration whose situation changed while GPT was still writing it
+    voice: bool = False      # asked by voice (the name was called): a short deadline
+    followup: bool = False   # said right after an answer without the name: may not be meant for the robot
+    notice: Notice | None = None
 
     @property
     def priority(self) -> int:
@@ -82,10 +106,14 @@ class Utterance:
     cancelled: bool = False    # preempted by a fault or 'stop' (possibly before playback started)
     retried: bool = False      # a stale 'status'/requested 'scene' answer was already replaced once
     requested: bool = False    # asked for (describe/status): replaced by the current facts if stale
+    clip: str = ''             # a recording to play instead of synthesizing the text
+    fixed: bool = False        # fixed words (not written by GPT): the synthesized speech is kept in the cache
+    question: str = ''         # what the person asked, for the conversation memory
+    boost: float = 0.0         # a reaction to something that just happened goes before answers (not faults)
 
     @property
-    def priority(self) -> int:
-        return PRIORITY[self.kind]
+    def priority(self) -> float:
+        return PRIORITY[self.kind] + self.boost
 
 
 _MARKUP = re.compile(r'[*#`_>|~\[\]]+|^\s*[-•·]\s*|\s*\n+\s*', re.MULTILINE)
@@ -105,7 +133,7 @@ def clean_text(text: str, max_chars: int) -> str:
 class Narrator:
     def __init__(self, config: NarratorConfig, tracker: StateTracker, backend=None, player=None,
                  frame_provider=None, fallback_tts=None, on_text=None, on_speaking=None, logger=None,
-                 clock=time.monotonic, start: bool = True, stream_player=None):
+                 clock=time.monotonic, start: bool = True, stream_player=None, speech_cache=None):
         self.config = config
         self.tracker = tracker
         self.backend = backend
@@ -115,6 +143,9 @@ class Narrator:
         self.stream_player = stream_player
         self.frame_provider = frame_provider
         self.fallback_tts = fallback_tts
+        self.speech_cache = speech_cache   # fixed sentences already synthesized: at once, also offline
+        self.audible = False               # sound is coming out of the speaker (the microphone ignores it)
+        self._dialogue: deque = deque(maxlen=6)   # (time, question, answer)
         self.on_text = on_text
         self.on_speaking = on_speaking
         self.log = logger or logging.getLogger('craft_voice')
@@ -161,7 +192,12 @@ class Narrator:
 
     def diagnostics(self, name: str, level: int, message: str, values: dict):
         with self._lock:
-            self.tracker.update_diagnostics(name, level, message, values, self.clock())
+            generation = self.tracker.generation
+            event = self.tracker.update_diagnostics(name, level, message, values, self.clock())
+            if self.tracker.generation != generation:
+                self._preempt_narration()  # the path got blocked or cleared: the old narration is not true
+            if event:
+                self._on_event(event)
 
     def control_status(self, ready: bool, fault: bool, held: bool, stopped: bool, reason: str):
         with self._lock:
@@ -191,6 +227,49 @@ class Narrator:
         question = question.strip()
         if question:
             self._submit(Job('ask', self.clock(), text=question))
+
+    def wake(self, question: str = ''):
+        """Called by name (the microphone heard "크래프트 ..."). '' = the name alone: say what I am doing."""
+        question = question.strip()
+        now = self.clock()
+        with self._lock:
+            if self._closed or self.muted:
+                return
+            if question and is_status_question(question):
+                # "뭐 하는 상태야?": the state machine itself answers, at once and in fixed words
+                # (no GPT round trip, and the same answer when the network is slow or down).
+                self._enqueue(Utterance('status', self.tracker.current_template(now), now,
+                                        self.tracker.generation, fixed=True, question=question))
+                return
+            thinks = self.backend is not None and (question or self.config.wake_mode == 'think')
+            if thinks and self.config.wake_ack:
+                # GPT and speech take a second or two: answer the call at once with a short word
+                # (the name alone: "짜스!", or the recording set as the 'wake' reaction).
+                self._enqueue(self._fixed('ack', 'ack' if question else 'wake', now,
+                                          reaction='ack' if question else 'wake'))
+        if thinks:
+            warm = getattr(self.backend, 'warm', None)
+            if warm:
+                warm()
+            self._submit(Job('ask' if question else 'status', now, text=question, voice=True))
+        else:
+            with self._lock:
+                text = self.tracker.current_template(now) if not question else \
+                    f"{self.tracker.phrase('cannot_answer')} {self.tracker.current_template(now)}"
+                self._enqueue(Utterance('status', text, now, self.tracker.generation, fixed=True,
+                                        question=question or '(이름을 부름)'))
+
+    def followup(self, text: str):
+        """A sentence heard right after an answer, without the name. Answered only if GPT takes it as
+        meant for the robot (other people's talk gets no answer)."""
+        text = text.strip()
+        if text and self.backend is not None:
+            self._submit(Job('ask', self.clock(), text=text, voice=True, followup=True))
+
+    def _fixed(self, kind: str, key: str, now: float, reaction: str = '', label: str = '') -> Utterance:
+        """Lock held. A fixed sentence by phrase key, or the recording set for `reaction`."""
+        return Utterance(kind, self.tracker.phrase(key), now, self.tracker.generation, label=label, fixed=True,
+                         clip=self.config.reactions.get(reaction, '') if reaction else '')
 
     def say(self, text: str):
         text = clean_text(text, max(self.config.max_chars, 400))
@@ -236,6 +315,10 @@ class Narrator:
             if event:
                 self._on_event(event)
             cfg = self.config
+            if cfg.notice:
+                noticed = self.tracker.notice(now)
+                if noticed:
+                    self._on_notice(noticed, now)
             idle = not (self._jobs or self._utterances or self._current or self._thinking)
             label = self.tracker.label if self.tracker.planning_fresh(now) else None
             period = cfg.narrate_period_s if label and label.startswith('Run.') else cfg.narrate_idle_period_s
@@ -257,24 +340,59 @@ class Narrator:
             self.player.stop()
         for thread in self._threads:
             thread.join(timeout=2.0)
+        closer = getattr(self.backend, 'close', None)
+        if closer:
+            closer()
 
     def status(self) -> dict:
         with self._lock:
             return dict(self.stats, muted=self.muted, pending_jobs=len(self._jobs),
                         pending_speech=len(self._utterances), speaking=self._current is not None,
-                        thinking=self._thinking)
+                        thinking=self._thinking, audible=self.audible)
 
     # ---- queueing ---------------------------------------------------------------------------
+    def _reaction(self, event: StateEvent) -> str:
+        """Lock held. The recording set for this event ('' = none): the event is then played, not spoken."""
+        reactions = self.config.reactions
+        if not reactions:
+            return ''
+        if event.situation:
+            return reactions.get(event.situation, '')
+        if event.label == 'Run.Complete':
+            done = self.tracker.last_done or {}
+            key = 'run_done' if done.get('queued') == 0 else 'step_done'  # nothing queued behind it: the run is over
+            return reactions.get(key) or reactions.get('done', '')
+        return reactions.get({'Ready': 'ready'}.get(event.label, ''), '')
+
+    def _on_notice(self, noticed: Notice, now: float):
+        """Lock held. Something the robot noticed by itself: a recording, a GPT remark or fixed words."""
+        if self.muted or self._closed:
+            return
+        clip = self.config.reactions.get(noticed.key, '')
+        fixed = self.tracker.phrase('notice.' + noticed.key)
+        if clip or self.backend is None or self.config.state_mode == 'template' or \
+                noticed.key in ('state_lost', 'state_back'):
+            if clip or fixed:
+                self._enqueue(Utterance('thought', fixed or noticed.key, now, noticed.generation, fixed=True,
+                                        clip=clip))
+        else:
+            self._submit(Job('thought', now, notice=noticed))
+
     def _on_event(self, event: StateEvent):
         self._latest_state_generation = event.generation
+        clip = '' if event.fault else self._reaction(event)
         if event.fault:
-            self._enqueue(Utterance('fault', self.tracker.template(event), event.stamp, event.generation))
+            self._enqueue(Utterance('fault', self.tracker.template(event), event.stamp, event.generation,
+                                    fixed=True))
         elif self.muted:
             return
-        elif self.backend is None or self.config.state_mode == 'template' or self._think_busy_with_request():
+        elif clip or event.situation or self.backend is None or self.config.state_mode == 'template' or \
+                self._think_busy_with_request():
             # Fixed words now rather than waiting for GPT behind someone's question: announcements expire.
+            # A situation (blocked path, new path) is a reaction: said at once, never through GPT.
             self._enqueue(Utterance('state', self.tracker.template(event), event.stamp, event.generation,
-                                    label=event.label))
+                                    label=event.situation or event.label, fixed=True, clip=clip,
+                                    boost=1.5 if event.situation else 0.0))
         else:
             busy = self._thinking_job
             if busy is not None and busy.kind == 'state':
@@ -371,8 +489,12 @@ class Narrator:
             self._jobs.remove(job)
             self._thinking = True
             self._thinking_job = job
-            generation = job.event.generation if job.event else self.tracker.generation
+            generation = job.event.generation if job.event else \
+                (job.notice.generation if job.notice else self.tracker.generation)
         try:
+            warm = getattr(self.backend, 'warm', None)
+            if warm:
+                warm()  # a sentence is on its way: have the speech connection open by the time it is written
             text, from_gpt = self._compose(job)
         finally:
             with self._lock:
@@ -381,8 +503,10 @@ class Narrator:
         if text and not job.cancelled:
             # A fixed sentence made after a slow failure is new: its age starts now, not at the request.
             created = job.created if from_gpt else self.clock()
+            question = job.text if job.kind == 'ask' else ('(이름을 부름)' if job.voice else '')
             self._enqueue(Utterance(job.kind, text, created, generation,
-                                    label=job.event.label if job.event else '', requested=job.requested))
+                                    label=job.event.label if job.event else '', requested=job.requested,
+                                    fixed=not from_gpt, question=question))
         return True
 
     def _fallback(self, job: Job, why: str) -> str | None:
@@ -391,10 +515,15 @@ class Narrator:
                 return self.tracker.template(job.event)
             if job.kind == 'status':
                 return self.tracker.current_template(self.clock())
+            if job.kind == 'thought':
+                return self.tracker.phrase('notice.' + job.notice.key) or None
+            if job.followup:
+                return None  # it may not have been meant for the robot: better silent than a non-answer
         with self._lock:  # never talk about the failure: say what I do and what my sensors see instead
             now_doing = self.tracker.current_template(self.clock())
+            cannot = self.tracker.phrase('cannot_answer')
         if job.kind == 'ask':
-            return f'지금은 그 질문에 답하기 어려워요. {now_doing}'
+            return f'{cannot} {now_doing}'
         return now_doing
 
     def _compose(self, job: Job) -> tuple[str | None, bool]:
@@ -404,11 +533,16 @@ class Narrator:
         if not self._take_budget():
             self.log.warning(f'GPT budget ({self.config.max_gpt_calls_per_min}/min) used up, {job.kind} skipped')
             return self._fallback(job, '요청이 많아서 잠시 뒤에 다시 물어봐 주세요.'), False
-        jpeg = self._grab_jpeg() if self.config.use_image else None
+        # The name alone and a remark of its own are about the state, not the view: no picture, sooner.
+        wants_image = self.config.use_image and job.kind != 'thought' and not (job.voice and job.kind == 'status')
+        jpeg = self._grab_jpeg() if wants_image else None
         instructions, prompt = self._prompt(job, jpeg is not None)
         started = time.monotonic()
         deadline = {'state': self.config.gpt_state_deadline_s, 'scene': self.config.gpt_narrate_deadline_s,
-                    'status': self.config.gpt_narrate_deadline_s, 'ask': self.config.gpt_ask_deadline_s}[job.kind]
+                    'status': self.config.gpt_narrate_deadline_s, 'ask': self.config.gpt_ask_deadline_s,
+                    'thought': self.config.gpt_narrate_deadline_s}[job.kind]
+        if job.voice:
+            deadline = min(deadline, self.config.gpt_voice_deadline_s)  # someone is standing there waiting
         result, value = self._call(lambda: self.backend.generate(instructions, prompt, jpeg), deadline,
                                    lambda: job.cancelled)
         if result == 'cancelled':
@@ -420,6 +554,8 @@ class Narrator:
             return self._fallback(job, 'GPT 응답을 받지 못했어요.'), False
         model = getattr(self.backend, 'model', '?')
         self.log.info(f'GPT {job.kind} {time.monotonic() - started:.1f}s {model} image={jpeg is not None}: {value}')
+        if value.strip().strip('."\'').upper() == SKIP:
+            return None, True  # a follow-up sentence that was not meant for the robot
         text = clean_text(value, self.config.max_chars)
         return (text, True) if text else (self._fallback(job, '빈 응답이었어요.'), False)
 
@@ -472,16 +608,38 @@ class Narrator:
                        '(가는 길, 앞에 있는 물체·신호·사람)을 그 일과 연결해서 말해.')
         elif job.kind == 'status':
             request = '지금 무엇을 하고 있고 주변 상황이 어떤지 알려 줘.'
+        elif job.kind == 'thought':
+            request = (f'방금 스스로 알아챈 게 있어: {job.notice.facts}. 옆에 있는 사람에게 이 상황을 한 문장으로 '
+                       '말해 줘. 사람이 도와줄 수 있는 일이면 짧게 부탁해도 돼.')
         else:
             request = (f'사람이 이렇게 물었어: "{job.text}" 이미지와 로봇 상태를 근거로 답하고, '
                        '근거가 없으면 모른다고 해.')
+        if job.voice:
+            if job.kind == 'status':
+                request = ('누가 방금 내 이름을 불렀어. 지금 무엇을 하고 있는지 한 문장으로 바로 대답해. '
+                           '[기억]에 방금 있었던 눈에 띄는 일이 있으면 짧게 덧붙여도 돼.')
+            else:
+                request += (' 한 문장으로 답해. 왜·언제·얼마나를 물으면 [기억]의 순서와 시간, [로봇 상태]를 근거로 '
+                            '추론해서 답하고, 추론한 것은 "~인 것 같아"처럼 말해. 로봇을 움직이거나 멈추라는 부탁이면 '
+                            '나는 상태만 알려 줄 수 있다고 답해.')
+            if job.followup:
+                request += (' 이 말은 내 이름 없이, 내가 방금 대답한 뒤에 들린 말이야. 나에게 한 말이 아니거나 '
+                            f'무슨 뜻인지 알 수 없으면 다른 말 없이 {SKIP} 라고만 답해.')
         with self._lock:
             now = self.clock()
             context = self.tracker.context_text(now)
             sensed = self.tracker.perception_text(now) or '- (센서 인식 정보 없음)'
+            memory = self.tracker.memory_text(now) if job.kind != 'state' else ''
+            dialogue = [f'- 사람: {question} / 나: {answer}' for at, question, answer in self._dialogue
+                        if now - at <= cfg.conversation_s] if job.kind in ('ask', 'status') else []
         camera = f'이미지 첨부됨 ({cfg.camera_description})' if has_image else '이미지 없음'
-        return instructions, (f'[요청]\n{request}\n\n[로봇 상태]\n{context}\n\n[센서가 확인한 것]\n{sensed}'
-                              f'\n\n[카메라]\n{camera}')
+        prompt = (f'[요청]\n{request}\n\n[로봇 상태]\n{context}\n\n[센서가 확인한 것]\n{sensed}'
+                  f'\n\n[카메라]\n{camera}')
+        if memory:
+            prompt += f'\n\n[기억] (최근에 있었던 일, 오래된 것부터)\n{memory}'
+        if dialogue:
+            prompt += '\n\n[최근 대화]\n' + '\n'.join(dialogue)
+        return instructions, prompt
 
     # ---- speak thread -----------------------------------------------------------------------
     def _speak_loop(self):
@@ -504,6 +662,11 @@ class Narrator:
             return 'state moved on'  # "what I am doing now" became wrong (a refresh is re-rendered instead)
         if u.kind == 'scene' and not after_tts and now - u.created > cfg.scene_max_age_s:
             return 'too late'
+        if u.kind == 'thought':
+            if self.tracker.generation != u.generation:
+                return 'state moved on'  # what it noticed is over
+            if not after_tts and now - u.created > cfg.thought_max_age_s:
+                return 'too late'
         if u.kind == 'state' and u.text == self._last_text and now - self._last_text_at < cfg.repeat_window_s:
             return 'repeat'  # periodic narration may repeat: its timer already spaces it out
         return ''
@@ -537,6 +700,10 @@ class Narrator:
                 if spoken:
                     self._last_text, self._last_text_at = utterance.text, self.clock()
                     self._last_activity = self._last_text_at
+                    if utterance.question:
+                        self._dialogue.append((self._last_text_at, utterance.question, utterance.text))
+                        self.tracker.remember(self._last_text_at, f'사람이 "{utterance.question}"라고 해서 '
+                                                                  f'"{utterance.text}"라고 대답함')
         return True
 
     def _drop(self, u: Utterance, why: str):
@@ -592,6 +759,8 @@ class Narrator:
             else:
                 result, value = self._call(lambda e=engine: e.synthesize(text), None, cancelled)
             if result == 'ok':
+                if engine is self.backend and utterance.fixed and self.speech_cache is not None:
+                    self.speech_cache.put(text, value)  # next time at once, and without the network
                 return value
             if result == 'cancelled':
                 return None
@@ -602,10 +771,29 @@ class Narrator:
 
     def _speak(self, utterance: Utterance) -> bool:
         """True if the sentence went out (published, and played when there is audio)."""
+        ready = self._ready_audio(utterance)
+        if ready is not None:
+            return self._deliver(utterance, ready)
         if (self.stream_player is not None and utterance.kind != 'fault' and
                 hasattr(self.backend, 'stream_speech')):
             return self._speak_streaming(utterance)
         return self._deliver(utterance, self._synthesize(utterance))
+
+    def _ready_audio(self, utterance: Utterance) -> bytes | None:
+        """Audio that needs no synthesis: the recording set for this event, or speech kept in the cache."""
+        if utterance.clip:
+            try:
+                return read_clip(utterance.clip)
+            except Exception as error:  # missing or broken recording: say the sentence instead
+                self.log.warning(f'recording {utterance.clip!r} unusable ({type(error).__name__}: {error})')
+        if self.speech_cache is not None:
+            return self.speech_cache.get(utterance.text)
+        return None
+
+    def _sounding(self, on: bool):
+        """Sound starts/stops coming out of the speaker (the microphone listener ignores what it hears)."""
+        self.audible = on
+        self._notify(self.on_speaking, on)
 
     def _deliver(self, utterance: Utterance, wav: bytes | None) -> bool:
         """Last check, publish, play a whole WAV."""
@@ -622,14 +810,14 @@ class Narrator:
         self._notify(self.on_text, utterance.kind, utterance.text)
         if wav is None or self.player is None:
             return True
-        self._notify(self.on_speaking, True)
+        self._sounding(True)
         try:
             if self.player.play(wav, cancelled=lambda: utterance.cancelled):
                 self.stats['spoken'] += 1
         except Exception as error:
             self.log.error(f'audio playback failed: {error}')
         finally:
-            self._notify(self.on_speaking, False)
+            self._sounding(False)
         return True
 
     def _still_true(self, utterance: Utterance) -> bool:
@@ -696,23 +884,28 @@ class Narrator:
             return False
         self.log.info(f'say [{utterance.kind}] {utterance.text}')
         self._notify(self.on_text, utterance.kind, utterance.text)
-        self._notify(self.on_speaking, True)
+        self._sounding(True)
         played = False
+        keep = [] if utterance.fixed and self.speech_cache is not None else None
+        rate = getattr(self.backend, 'sample_rate', 24000)
         try:
-            if self.stream_player.open(getattr(self.backend, 'sample_rate', 24000),
-                                       cancelled=lambda: utterance.cancelled):
+            if self.stream_player.open(rate, cancelled=lambda: utterance.cancelled):
                 chunk = first
                 while isinstance(chunk, bytes) and self.stream_player.write(chunk):
+                    if keep is not None:
+                        keep.append(chunk)
                     chunk = next_chunk(self.config.tts_deadline_s)
                 abort.set()
                 played = self.stream_player.finish()
                 if 'error' in failure:
                     self.log.error(f'TTS stream broke off: {failure["error"]}')
+                elif keep and chunk is None:  # the whole sentence arrived: keep it for next time
+                    self.speech_cache.put(utterance.text, pcm_to_wav(b''.join(keep), rate))
         except Exception as error:
             abort.set()
             self.log.error(f'audio playback failed: {error}')
         finally:
-            self._notify(self.on_speaking, False)
+            self._sounding(False)
         if played:
             self.stats['spoken'] += 1
         return True

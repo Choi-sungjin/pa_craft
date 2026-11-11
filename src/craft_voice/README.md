@@ -36,7 +36,7 @@ aplay -l                                              # 스피커 장치 확인
 ```
 
 API key는 환경 변수 `OPENAI_API_KEY`로 받는다(파라미터 파일·launch·채팅에 넣지 말 것). 환경 변수가 없으면
-키 파일을 이 순서로 찾는다: `$CRAFT_VOICE_ENV` → `src/craft_voice/env/openai.env` → `~/.config/craft_voice/openai.env`.
+`$CRAFT_VOICE_ENV`가 있으면 그 파일만 본다(없는 파일이면 키 없음). 없으면 이 순서로 찾는다: `src/craft_voice/env/openai.env` → `~/.config/craft_voice/openai.env` → `~/.config/craft-voice/openai.key`(키 한 줄만 든 파일).
 `env/openai.env`는 git에서 제외된다(`env/openai.env.example`만 저장소에 있다).
 
 ```bash

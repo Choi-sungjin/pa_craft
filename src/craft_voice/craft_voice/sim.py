@@ -3,10 +3,11 @@
 Plays a scripted timeline of planning_master labels and builds diagnostics in
 the same format planning_master.cpp report() publishes. Scenario text:
 
-    Label[@step][!reason]:seconds, ...
+    Label[@step][!reason][~waiting]:seconds, ...
 
 e.g. "Ready:5, Run.Execute@approach:8, Fault@approach!Run.Execute: execution timeout:10".
-The duration is taken after the last ':', so a reason may contain ':'.
+The duration is taken after the last ':', so a reason may contain ':'. '~waiting' is the diagnostics
+'waiting_for' value, e.g. "Run.Execute@base_goal~path blocked; waiting before replanning:4".
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ class SimStep:
     step: str = ''
     reason: str = ''
     seconds: float = 0.0
+    waiting: str = ''
 
 
 def parse_item(text: str, with_duration: bool = True) -> SimStep:
@@ -42,12 +44,13 @@ def parse_item(text: str, with_duration: bool = True) -> SimStep:
         seconds = float(number)
         if not seconds > 0:
             raise ValueError(f'duration must be > 0: {text!r}')
+    text, _, waiting = text.partition('~')
     head, _, reason = text.partition('!')
     label, _, step = head.partition('@')
     label = label.strip()
     if label not in STATE_KO:
         raise ValueError(f'unknown state {label!r} (one of {", ".join(STATE_KO)})')
-    return SimStep(label, step.strip(), reason.strip(), seconds)
+    return SimStep(label, step.strip(), reason.strip(), seconds, waiting.strip())
 
 
 def parse_scenario(text: str) -> list[SimStep]:
@@ -112,6 +115,6 @@ class SimStateMachine:
     def diagnostics(self, current: SimStep) -> tuple[str, int, str, dict]:
         """(name, level, message, values) as planning_master publishes them (1 Hz)."""
         values = {'task_id': str(self.task_id) if current.step else '', 'step': current.step,
-                  'queued': str(self.queued()), 'waiting_for': ''}
+                  'queued': str(self.queued()), 'waiting_for': current.waiting}
         level = 2 if current.label == 'Fault' else 0
         return DIAGNOSTIC_NAME, level, f'{current.label}: {current.reason}', values

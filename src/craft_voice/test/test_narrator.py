@@ -310,8 +310,8 @@ def test_ask_and_say():
     narrator.ask('뭐 보여?')
     narrator.command('describe')
     run(narrator)
-    assert texts == [('ask', '지금은 그 질문에 답하기 어려워요. 아직 제 작업 상태를 받지 못했어요.'),
-                     ('scene', '아직 제 작업 상태를 받지 못했어요.')]
+    assert texts == [('ask', '지금은 그 질문에 답하기 어려워요. 아직 제 작업 상태를 받지 못했어요. 주행 프로그램이 꺼져 있는 것 같아요.'),
+                     ('scene', '아직 제 작업 상태를 받지 못했어요. 주행 프로그램이 꺼져 있는 것 같아요.')]
 
 
 def test_mute_keeps_faults_and_stop_clears():
@@ -338,7 +338,7 @@ def test_status_command_template():
     narrator, texts = make(None)
     narrator.command('status')
     run(narrator)
-    assert texts == [('status', '아직 제 작업 상태를 받지 못했어요.')]
+    assert texts == [('status', '아직 제 작업 상태를 받지 못했어요. 주행 프로그램이 꺼져 있는 것 같아요.')]
 
 
 def test_tts_fallback_chain():
@@ -541,7 +541,7 @@ def test_requested_scene_failure_is_still_said():
     narrator, texts = make(Backend(gpt_delay=0.6, fail=True), clock=time.monotonic, scene_max_age_s=0.3)
     narrator.command('describe')
     run(narrator)
-    assert texts == [('scene', '아직 제 작업 상태를 받지 못했어요.')]   # what it does, in fixed words
+    assert texts == [('scene', '아직 제 작업 상태를 받지 못했어요. 주행 프로그램이 꺼져 있는 것 같아요.')]   # what it does, in fixed words
 
 
 def test_status_answer_refreshed_when_state_changes_during_tts():
@@ -823,7 +823,7 @@ def test_question_deadline():
     narrator.ask('앞에 뭐 있어?')
     run(narrator)
     assert time.monotonic() - started < 1.5
-    assert texts == [('ask', '지금은 그 질문에 답하기 어려워요. 아직 제 작업 상태를 받지 못했어요.')]
+    assert texts == [('ask', '지금은 그 질문에 답하기 어려워요. 아직 제 작업 상태를 받지 못했어요. 주행 프로그램이 꺼져 있는 것 같아요.')]
 
 
 def test_threads_stop_discards_what_gpt_is_writing():

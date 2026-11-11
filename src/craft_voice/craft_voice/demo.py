@@ -9,8 +9,10 @@ The same Narrator/StateTracker the robot uses gets a simulated planning state
 machine (craft_voice.sim) instead of /planning/state. Type while it runs:
     a question            asked with the current picture and state
     /describe /status     what it sees / what it is doing
-    /state Ready          force a state (Label[@step][!reason]); /fault <reason>; /resume back to the scenario
+    /state Ready          force a state (Label[@step][!reason][~waiting]); /fault <reason>; /resume back to the scenario
+    /wake [question]      as if "크래프트 [question]" was heard; /block /replan /clear: the path gets blocked ...
     /say <text>  /mute  /unmute  /stop  /quit
+With --mic the microphone listens for the name: "크래프트" -> what it is doing, "크래프트, 왜 멈췄어?" -> an answer.
 """
 
 from __future__ import annotations
@@ -26,10 +28,14 @@ import time
 
 import numpy as np
 
+from dataclasses import replace
+
 from .audio import CommandPlayer, CommandTts, StreamPlayer, WinsoundPlayer, split_command
+from .gpt import DEFAULT_STT_MODEL, DEFAULT_TTS_MODEL, DEFAULT_TTS_VOICE
 from .narrator import Narrator, NarratorConfig
 from .robot_state import StateTracker, parse_list, parse_mapping
-from .sim import DEFAULT_SCENARIO, SimStateMachine, parse_item, parse_scenario
+from .sim import DEFAULT_SCENARIO, SimStateMachine, SimStep, parse_item, parse_scenario
+from .wiring import DEFAULT_MIC_COMMAND, load_lines, load_reactions, make_cache, make_listener
 
 log = logging.getLogger('craft_voice')
 IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.bmp', '.webp', '.tif', '.tiff')
@@ -143,22 +149,37 @@ def build(args) -> tuple[Narrator, SimStateMachine, Camera]:
         from .gpt import OpenAIBackend
         backend = OpenAIBackend(model=args.model, tts_model=args.tts_model, voice=args.voice,
                                 tts_instructions=args.tts_instructions, reasoning_effort=args.reasoning_effort,
-                                image_detail=args.image_detail, timeout_s=args.timeout, base_url=args.base_url)
+                                image_detail=args.image_detail, timeout_s=args.timeout, base_url=args.base_url,
+                                stt_model=args.stt_model)
     else:
         log.warning('OPENAI_API_KEY is not set: fixed sentences only, no GPT and no OpenAI speech')
     fallback = split_command(args.fallback_tts)
     camera = Camera(args.camera)
     tracker = StateTracker(announce=tuple(parse_list(args.announce)), cooldown_s=args.cooldown,
-                           step_names=parse_mapping(args.step_names))
+                           step_names=parse_mapping(args.step_names), style=args.style,
+                           lines=load_lines(args.phrases_file, log))
     config = NarratorConfig(state_mode='template' if args.template else 'gpt', narrate_period_s=args.narrate_period,
                             narrate_idle_period_s=args.narrate_idle_period,
                             persona=args.persona, use_image=args.camera.lower() not in ('', 'none'),
-                            camera_description='노트북 카메라 (로봇 대신 시험 중)')
+                            camera_description='노트북 카메라 (로봇 대신 시험 중)', max_chars=args.max_chars,
+                            notice=args.notice, reactions=load_reactions(args.reactions, log))
     narrator = Narrator(config, tracker, backend=backend, player=default_player(args.player),
                         stream_player=default_stream_player(args) if backend else None,
                         frame_provider=camera.frame, fallback_tts=CommandTts(fallback) if fallback else None,
-                        on_text=lambda kind, text: print(f'\n>> [{kind}] {text}', flush=True))
+                        on_text=lambda kind, text: print(f'\n>> [{kind}] {text}', flush=True),
+                        speech_cache=make_cache(backend, args.cache_dir))
     return narrator, SimStateMachine(parse_scenario(args.scenario), loop=not args.once), camera
+
+
+WAITING = {'block': 'path blocked; waiting before replanning', 'replan': 'path still blocked; replanning', 'clear': ''}
+
+
+def set_waiting(sim: SimStateMachine, waiting: str):
+    """The path gets blocked / is being replanned / is clear again, in whatever the robot is doing now."""
+    current = sim.override or sim._last or SimStep('Run.Execute', 'base_goal')
+    if not current.label.startswith('Run.'):
+        current = SimStep('Run.Execute', current.step or 'base_goal')
+    sim.set_override(replace(current, waiting=waiting, seconds=0.0))
 
 
 def handle(line: str, narrator: Narrator, sim: SimStateMachine) -> bool:
@@ -179,13 +200,18 @@ def handle(line: str, narrator: Narrator, sim: SimStateMachine) -> bool:
             sim.fault(rest.strip() or 'execution timeout')
         elif command == 'resume':
             sim.set_override(None)
+        elif command == 'wake':
+            print(f'(heard) 크래프트 {rest}'.rstrip(), flush=True)
+            narrator.wake(rest)
+        elif command in WAITING:
+            set_waiting(sim, WAITING[command])
         elif command == 'say':
             narrator.say(rest)
         elif command in ('describe', 'status', 'mute', 'unmute', 'stop'):
             narrator.command(command)
         else:
-            print('commands: <question> /describe /status /state <Label[@step][!reason]> /fault <reason> '
-                  '/resume /say <text> /mute /unmute /stop /quit', flush=True)
+            print('commands: <question> /describe /status /wake [question] /state <Label[@step][!reason][~waiting]> '
+                  '/fault <reason> /block /replan /clear /resume /say <text> /mute /unmute /stop /quit', flush=True)
     except ValueError as error:
         print(f'! {error}', flush=True)
     return True
@@ -194,6 +220,15 @@ def handle(line: str, narrator: Narrator, sim: SimStateMachine) -> bool:
 def run(args) -> int:
     narrator, sim, camera = build(args)
     stop = threading.Event()
+    listener = None
+    if args.mic:
+        listener = make_listener(narrator, narrator.backend, log,
+                                 mic_command=DEFAULT_MIC_COMMAND if args.mic == 'auto' else args.mic,
+                                 wake_words=args.wake_words, follow_up_s=args.follow_up,
+                                 on_heard=lambda question: print(f'\n(heard) 크래프트 {question}'.rstrip(), flush=True))
+        if listener is not None:
+            listener.start()
+            print(f'microphone on: say "{args.wake_words.split(",")[0]}"', flush=True)
 
     def read_input():
         for line in sys.stdin:
@@ -226,9 +261,11 @@ def run(args) -> int:
     except KeyboardInterrupt:
         pass
     finally:
+        if listener is not None:
+            listener.close()
         narrator.close()
         camera.close()
-    print(f'stats: {narrator.status()}', flush=True)
+    print(f'stats: {narrator.status()}' + (f' microphone: {listener.stats}' if listener else ''), flush=True)
     return 0
 
 
@@ -250,8 +287,19 @@ def parser() -> argparse.ArgumentParser:
                    help='fastest first, comma separated fallbacks')
     p.add_argument('--reasoning-effort', default='none')
     p.add_argument('--image-detail', default='low')
-    p.add_argument('--tts-model', default='gpt-4o-mini-tts')
-    p.add_argument('--voice', default='coral')
+    p.add_argument('--tts-model', default=DEFAULT_TTS_MODEL,
+                   help='gpt-realtime-* speaks through the Realtime API; gpt-4o-mini-tts etc. through audio/speech')
+    p.add_argument('--voice', default=DEFAULT_TTS_VOICE)
+    p.add_argument('--stt-model', default=DEFAULT_STT_MODEL)
+    p.add_argument('--style', choices=['polite', 'cute'], default='polite', help='wording of the fixed sentences')
+    p.add_argument('--phrases-file', default='', help='JSON {key: sentence} replacing single fixed sentences')
+    p.add_argument('--max-chars', type=int, default=150)
+    p.add_argument('--notice', action='store_true', help='remarks on what it notices by itself')
+    p.add_argument('--reactions', default='', help='recordings by event: "replan=a.wav,step_done=b.wav,run_done=c.wav"')
+    p.add_argument('--cache-dir', default='', help='keep synthesized fixed sentences here ("" = off)')
+    p.add_argument('--mic', default='', help="'auto' (pw-record) or a command writing raw 16 kHz mono PCM to stdout")
+    p.add_argument('--wake-words', default='크래프트')
+    p.add_argument('--follow-up', type=float, default=6.0, help='seconds after an answer when no name is needed')
     p.add_argument('--tts-instructions', default='밝고 또렷한 한국어 안내 로봇 목소리로, 조금 빠르게 말해.')
     p.add_argument('--timeout', type=float, default=15.0)
     p.add_argument('--base-url', default='', help='OpenAI-compatible endpoint ("" = api.openai.com)')

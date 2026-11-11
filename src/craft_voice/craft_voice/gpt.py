@@ -1,4 +1,8 @@
-"""OpenAI calls: image + robot state -> sentence (Responses API), sentence -> speech.
+"""OpenAI calls: image + robot state -> sentence (Responses API), sentence -> speech, speech -> text.
+
+Speech comes from the audio/speech endpoint, or from the Realtime API when tts_model is a Realtime
+model (e.g. gpt-realtime-2.1 with the voice marin). Without the openai SDK installed a small
+standard-library client is used instead (plainclient.py), so the robot needs no extra package.
 
 The key comes from OPENAI_API_KEY (never from a parameter file). Models are
 parameters because OpenAI retires them: the SDK this was written against
@@ -22,6 +26,12 @@ def openai_auth_available() -> bool:
     return bool(os.environ.get('OPENAI_API_KEY')) or os.environ.get('OPENAI_AUTH', '').lower() == 'proxy'
 
 
+# Speech: the Realtime model and voice the robot talks with. Speech-to-text: fastest that got every test
+# sentence right (2026-11-11: gpt-transcribe 0.62 s, gpt-4o-mini-transcribe 0.70 s, whisper-1 1.48 s median).
+DEFAULT_TTS_MODEL = 'gpt-realtime-2.1'
+DEFAULT_TTS_VOICE = 'marin'
+DEFAULT_STT_MODEL = 'gpt-transcribe,gpt-4o-mini-transcribe,whisper-1'
+
 # A model that rejects reasoning.effort=X is tried with the next lighter-weight value, then without it.
 REASONING_FALLBACK = {'none': 'minimal', 'minimal': 'low', 'low': ''}
 
@@ -42,20 +52,25 @@ class OpenAIBackend:
     def __init__(self, model: str, tts_model: str, voice: str, tts_instructions: str = '',
                  image_detail: str = 'low', max_output_tokens: int = 400, reasoning_effort: str = '',
                  tts_speed: float = 1.0, sample_rate: int = 24000, timeout_s: float = 15.0,
-                 urgent_timeout_s: float = 4.0, base_url: str = '', client=None):
-        if client is None:
-            from openai import OpenAI  # imported here so tests and template-only runs need no SDK
-            extra = {}
-            if not os.environ.get('OPENAI_API_KEY') and os.environ.get('OPENAI_AUTH', '').lower() == 'proxy':
-                extra = {'api_key': 'injected-by-proxy'}  # never sent: see self.request_headers
-            client = OpenAI(base_url=base_url or None, timeout=timeout_s, max_retries=1, **extra)
-        self.client = client
-        # Proxy auth: omit Authorization on every request (the SDK only honours an omit per request), so the
-        # header the egress proxy injects is the only one.
+                 urgent_timeout_s: float = 4.0, base_url: str = '', client=None,
+                 stt_model: str = DEFAULT_STT_MODEL, realtime=None):
+        proxy = not os.environ.get('OPENAI_API_KEY') and os.environ.get('OPENAI_AUTH', '').lower() == 'proxy'
         self.request_headers = {}
-        if not os.environ.get('OPENAI_API_KEY') and os.environ.get('OPENAI_AUTH', '').lower() == 'proxy':
-            from openai import Omit
-            self.request_headers = {'Authorization': Omit()}
+        if client is None:
+            try:
+                from openai import OpenAI  # imported here so tests and template-only runs need no SDK
+            except ImportError:
+                from .plainclient import PlainClient  # no SDK on this machine: standard library only
+                client = PlainClient(base_url=base_url, timeout=timeout_s, max_retries=1)
+            else:
+                extra = {'api_key': 'injected-by-proxy'} if proxy else {}  # never sent: see request_headers
+                client = OpenAI(base_url=base_url or None, timeout=timeout_s, max_retries=1, **extra)
+                if proxy:
+                    # Proxy auth: omit Authorization on every request (the SDK only honours an omit per
+                    # request), so the header the egress proxy injects is the only one.
+                    from openai import Omit
+                    self.request_headers = {'Authorization': Omit()}
+        self.client = client
         # "fast-model,fallback-model,...": the first that works is kept for the rest of the run.
         self.models = [m.strip() for m in model.split(',') if m.strip()] or ['gpt-5.5']
         self.model = self.models[0]
@@ -68,6 +83,47 @@ class OpenAIBackend:
         self.tts_speed = tts_speed
         self.sample_rate = sample_rate
         self.urgent_timeout_s = urgent_timeout_s
+        self.stt_models = [m.strip() for m in stt_model.split(',') if m.strip()] or ['whisper-1']
+        self.stt_model = self.stt_models[0]
+        # tts_model gpt-realtime-* / gpt-live-*: the Realtime API speaks (WebSocket), not audio/speech.
+        self.realtime = realtime
+        if self.realtime is None:
+            from .realtime import RealtimeSpeech, is_realtime_model
+            if is_realtime_model(tts_model):
+                self.realtime = RealtimeSpeech(tts_model, voice, tts_instructions, base_url=base_url,
+                                               timeout_s=timeout_s, urgent_timeout_s=urgent_timeout_s)
+        if self.realtime is not None:
+            self.sample_rate = self.realtime.sample_rate
+
+    def warm(self):
+        """A sentence is on its way: open the speech connection now (Realtime speech only)."""
+        if self.realtime is not None:
+            self.realtime.warm()
+
+    def close(self):
+        if self.realtime is not None:
+            self.realtime.close()
+
+    def speech_signature(self) -> str:
+        """Everything that changes how a sentence sounds, for the speech cache."""
+        return '|'.join((self.tts_model, self.voice, self.tts_instructions, f'{self.tts_speed:g}'))
+
+    def transcribe(self, wav: bytes, language: str = 'ko', prompt: str = '') -> str:
+        """Speech (WAV bytes) -> text. The next stt model is used if this key cannot use one."""
+        while True:
+            fields = {'model': self.stt_model, 'file': ('speech.wav', wav, 'audio/wav'), 'response_format': 'json'}
+            if language:
+                fields['language'] = language
+            if prompt:
+                fields['prompt'] = prompt
+            try:
+                result = self.client.audio.transcriptions.create(**fields, extra_headers=self.request_headers or None)
+                return (getattr(result, 'text', '') or '').strip()
+            except Exception as error:
+                index = self.stt_models.index(self.stt_model)
+                if not model_unusable(error) or index + 1 >= len(self.stt_models):
+                    raise
+                self.stt_model = self.stt_models[index + 1]
 
     def generate(self, instructions: str, text: str, jpeg: bytes | None = None) -> str:
         content = [{'type': 'input_text', 'text': text}]
@@ -120,6 +176,9 @@ class OpenAIBackend:
 
         The first chunk comes well before the whole sentence is synthesized (measured: median 0.80 s vs 1.44 s).
         """
+        if self.realtime is not None:
+            yield from self.realtime.stream(text)
+            return
         speech = self.client.audio.speech.with_streaming_response
         with speech.create(**self._speech_request(text), extra_headers=self.request_headers or None) as response:
             yield from response.iter_bytes(chunk_size)
@@ -129,6 +188,8 @@ class OpenAIBackend:
 
         urgent (fault sentences): urgent_timeout_s and no retry instead of timeout_s with one retry.
         """
+        if self.realtime is not None:
+            return self.realtime.synthesize(text, urgent=urgent)
         request = self._speech_request(text)
         client = self.client.with_options(timeout=self.urgent_timeout_s, max_retries=0) if urgent else self.client
         response = client.audio.speech.create(**request, extra_headers=self.request_headers or None)

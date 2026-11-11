@@ -1,0 +1,25 @@
+# systemd user service: the robot talks from power-on.
+#   mkdir -p ~/.config/systemd/user && cp scripts/craft-voice.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now craft-voice.service
+#   loginctl enable-linger $USER        # start without anyone logging in
+# The folder is expected at ~/craft-voice (change ExecStart otherwise).
+[Unit]
+Description=craft voice: says what the robot is doing and answers to its name
+Wants=pipewire.service wireplumber.service
+After=pipewire.service wireplumber.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=%h/craft-voice/scripts/run_voice.sh
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=20
+Environment=ROS_DOMAIN_ID=61
+UMask=0077
+Nice=10
+NoNewPrivileges=true
+MemoryMax=900M
+
+[Install]
+WantedBy=default.target

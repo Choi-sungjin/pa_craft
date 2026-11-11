@@ -121,7 +121,7 @@ def test_new_step_when_complete_and_await_samples_are_lost():
 
 def test_context_text():
     t = StateTracker()
-    assert '데이터 없음' in t.context_text(0.0)
+    assert '지금 신호 없음' in t.context_text(0.0)
     t.update_planning('Run.Execute', 0.0)
     t.update_planning('Fault', 2.0)
     diag(t, 'Fault: Run.Execute: execution timeout', 2.5, step='base_goal', task_id='4', queued='1')
@@ -133,8 +133,8 @@ def test_context_text():
     assert 'base_goal (목표 지점 이동), task 4' in text
     assert '최근 상태 변화: Run.Execute -> Fault' in text
     assert '제어(control) 상태 플래그: ready, held, stopped' in text
-    assert '/perception/localization/state: dead_reckoning' in text
-    assert '데이터 없음' in t.context_text(60.0)                # planning stopped publishing
+    assert '위치 추정 상태 (/perception/localization/state): dead_reckoning' in text
+    assert '지금 신호 없음' in t.context_text(60.0)                # planning stopped publishing
 
 
 def test_parsers():
@@ -202,3 +202,44 @@ def test_new_fault_does_not_reuse_the_previous_reason():
 def test_copula_digits():
     expected = ['이에요', '이에요', '예요', '이에요', '예요', '예요', '이에요', '이에요', '이에요', '예요']
     assert [copula(d) for d in '0123456789'] == expected
+
+
+def test_what_is_asked_about_the_state_and_what_is_not():
+    from craft_voice.robot_state import is_status_question
+    for text in ('뭐 하는 상태야?', '지금 뭐 해?', '지금 뭐하는 상태야', '무슨 상태야', '상태 알려 줘', '뭐하고 있어?'):
+        assert is_status_question(text), text
+    for text in ('왜 멈췄어?', '왜 그 상태야?', '어디 가?', '오늘 점심 뭐 먹을까?', '', '얼마나 기다려야 돼?'):
+        assert not is_status_question(text), text
+
+
+def test_a_lost_state_signal_is_said_as_lost_and_the_last_state_is_kept_for_gpt():
+    t = StateTracker(style='cute')
+    assert t.doing(0.0) == '아직 상태 신호를 못 받았어. 주행 프로그램이 꺼져 있는 것 같아.'
+    t.update_planning('Run.Execute', 0.0)
+    assert t.doing(60.0) == '지금은 상태 신호가 안 들어와. 주행 프로그램이 꺼진 것 같아.'
+    text = t.context_text(60.0)
+    assert '지금 신호 없음' in text and '마지막으로 받은 상태: Run.Execute' in text and '60초 전' in text
+
+
+def test_more_of_the_state_machine_reaches_gpt():
+    t = StateTracker(event_topics=('/planning/mission', '/planning/command'))
+    t.update_planning('Run.Execute', 100.0)
+    t.update_diagnostics('planning/state_machine', 0, 'Run.Execute: following path',
+                         {'step': 'base_goal', 'task_id': '3', 'queued': '2', 'waiting_for': '', 'path_revision': '4',
+                          'more_segments': 'true', 'puck_graspable': 'false', 'puck_grasp_reason': ''}, 100.0)
+    t.update_context('/planning/mission', 'tour', 0.0)         # an event: still told minutes later, with its age
+    t.update_context('/planning/command', 'START', 99.0)
+    t.update_context('/planning/box_phase', 'lidar_dock', 99.5)
+    t.update_context('/planning/hold', 'true', 100.0)
+    t.update_context('/control/gripper_grasped', 'false', 100.0)
+    text = t.context_text(100.5)
+    assert '상태머신이 밝힌 사유: following path' in text
+    assert '경로를 다시 만든 횟수: 4' in text and '남은 경로 구간 있음: 예' in text
+    assert '퍽을 잡을 수 있는 위치' not in text                   # false and empty values are left out
+    assert '받은 임무 (/planning/mission): tour, 2분 전' in text
+    assert '마지막으로 받은 명령 (/planning/command): START, 방금' in text
+    assert '박스 접근 단계 (/planning/box_phase): lidar_dock' in text
+    assert '플래닝이 로봇을 붙잡아 두는 중(hold) (/planning/hold): 예' in text
+    assert 'gripper_grasped' not in text
+    assert '/planning/box_phase' not in t.context_text(200.0)   # a state topic goes stale; the mission does not
+    assert '받은 임무' in t.context_text(200.0)

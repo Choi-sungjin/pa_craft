@@ -69,7 +69,7 @@ def test_demo_runs_end_to_end(tmp_path):
     copy = f"import shutil,sys,time; shutil.copy(sys.argv[1], r'{played}/%d.wav' % time.time_ns())"
     env = dict(os.environ, OPENAI_API_KEY='dummy-not-real', PYTHONPATH=str(PACKAGE))
     result = subprocess.run(
-        [sys.executable, '-m', 'craft_voice.demo', '--camera', str(picture), '--once', '--seconds', '9',
+        [sys.executable, '-m', 'craft_voice.demo', '--tts-model', 'gpt-4o-mini-tts', '--camera', str(picture), '--once', '--seconds', '9',
          '--scenario', 'Idle:0.5, Ready:2.5, Run.PrepareTask@approach:0.3, Run.Execute@approach:2, '
                        'Fault@approach!Run.Execute: execution timeout:4',
          '--base-url', server.url, '--player', f'{sys.executable} -c "{copy}" {{file}}',
@@ -104,7 +104,7 @@ def demo(args, stdin, env_extra=None, timeout=30):
     env.pop('OPENAI_API_KEY', None)
     env.update(env_extra or {})
     started = __import__('time').monotonic()
-    result = subprocess.run([sys.executable, '-m', 'craft_voice.demo', '--player', 'none', *args], input=stdin,
+    result = subprocess.run([sys.executable, '-m', 'craft_voice.demo', '--player', 'none', '--tts-model', 'gpt-4o-mini-tts', *args], input=stdin,
                             capture_output=True, timeout=timeout, env=env)
     return result, __import__('time').monotonic() - started
 

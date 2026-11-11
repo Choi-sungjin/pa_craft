@@ -277,3 +277,76 @@ class WinsoundPlayer:
         with self._lock:
             if self._stop is not None:
                 self._stop.set()
+
+
+def read_clip(path: str, max_bytes: int = 8_000_000) -> bytes:
+    """A recorded reaction (PCM WAV file) as bytes for the player; raises if it is not a usable WAV."""
+    with open(os.path.expanduser(path), 'rb') as handle:
+        data = handle.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise ValueError(f'{path}: longer than {max_bytes} bytes')
+    with wave.open(io.BytesIO(data)) as wav:  # raises wave.Error for anything that is not PCM WAV
+        if wav.getnframes() <= 0:
+            raise ValueError(f'{path}: empty recording')
+    return data
+
+
+class SpeechCache:
+    """Synthesized sentences kept on disk, so fixed sentences play at once and without the network.
+
+    signature: everything that changes how a sentence sounds (model, voice, instructions, tempo).
+    """
+
+    def __init__(self, directory: str, signature: str, max_files: int = 500):
+        import hashlib
+        self._hash = hashlib.sha256
+        self.directory = os.path.expanduser(directory)
+        self.signature = signature
+        self.max_files = max_files
+        self._lock = threading.Lock()
+        os.makedirs(self.directory, exist_ok=True)
+
+    def path(self, text: str) -> str:
+        digest = self._hash(f'{self.signature}\n{text}'.encode('utf-8')).hexdigest()[:40]
+        return os.path.join(self.directory, digest + '.wav')
+
+    def get(self, text: str) -> bytes | None:
+        path = self.path(text)
+        try:
+            with open(path, 'rb') as handle:
+                data = handle.read()
+            wav_seconds(data)  # a truncated file is not played
+            os.utime(path)     # most recently used last: pruning removes the oldest
+            return data
+        except (OSError, wave.Error, EOFError, ZeroDivisionError):
+            return None
+
+    def put(self, text: str, wav: bytes):
+        if not wav:
+            return
+        path = self.path(text)
+        with self._lock:
+            handle, temporary = tempfile.mkstemp(dir=self.directory, suffix='.tmp')
+            try:
+                with os.fdopen(handle, 'wb') as out:
+                    out.write(wav)
+                os.replace(temporary, path)
+            except OSError:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+                return
+            self._prune()
+
+    def _prune(self):
+        try:
+            files = [os.path.join(self.directory, name) for name in os.listdir(self.directory)
+                     if name.endswith('.wav')]
+            if len(files) <= self.max_files:
+                return
+            files.sort(key=os.path.getmtime)
+            for old in files[:len(files) - self.max_files]:
+                os.unlink(old)
+        except OSError:
+            pass

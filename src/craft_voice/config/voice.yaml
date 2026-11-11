@@ -16,7 +16,11 @@ voice_node:
     planning_state_topic: /planning/state
     planning_diagnostics_topic: /planning/diagnostics
     control_status_topic: /control/status
-    context_topics: /perception/localization/state   # comma separated std_msgs/String topics, context only
+    # comma separated std_msgs/String topics, context only (box_phase: lidar_dock, camera_dock, ...)
+    context_topics: /perception/localization/state,/planning/box_phase,/planning/box_status
+    # std_msgs/String topics that are events (last command, mission, box to approach): kept 30 min, told with their age
+    event_topics: /planning/command,/planning/mission,/planning/approach_box,/planning/approach_box_near
+    flag_topics: /planning/hold,/control/gripper_grasped     # std_msgs/Bool, context only
     # What perception sees, told to GPT next to the camera picture ("" = do not subscribe)
     odom_topic: /perception/state/odom                         # moving / turning / stopped
     objects_topic: /perception/vision/d435/detections          # YOLO labels (knob, signs)
@@ -58,14 +62,47 @@ voice_node:
     api_base_url: ""              # "" = api.openai.com; any OpenAI-compatible endpoint otherwise
 
     # ---- speech ---------------------------------------------------------------------------------
-    # OpenAI announced shutdown of tts-1, tts-1-hd and gpt-4o-mini-tts(-2025-12-15) on 2027-01-06
-    # (openai SDK 3.42.1). Put the replacement model name here when it is announced.
-    tts_model: gpt-4o-mini-tts
-    tts_voice: coral              # alloy ash ballad coral echo fable onyx nova sage shimmer verse marin cedar
+    # gpt-realtime-* / gpt-live-*: the Realtime API speaks (WebSocket, sound while it arrives).
+    # Anything else (gpt-4o-mini-tts, tts-1) goes through audio/speech; those were announced to shut down
+    # on 2027-01-06 (openai SDK 3.42.1).
+    tts_model: gpt-realtime-2.1
+    tts_voice: marin              # Realtime voices: marin cedar alloy ash ballad coral echo sage shimmer verse
     tts_instructions: 밝고 또렷한 한국어 안내 로봇 목소리로, 조금 빠르게 말해.
-    tts_speed: 1.0                # 0.25 ~ 4.0
+    tts_speed: 1.0                # audio/speech models only (tts-1); gpt-4o-mini-tts and Realtime ignore it
     tts_sample_rate: 24000        # raw PCM rate of the speech endpoint (16-bit mono)
     player_command: aplay -q {file}          # or: paplay {file}  /  aplay -q -D plughw:1,0 {file}
     tts_stream: true              # play OpenAI speech while it arrives (first audio ~0.6 s sooner, measured)
     stream_player_command: aplay -q -t raw -f S16_LE -r {rate} -c 1 -   # raw 16-bit mono on stdin; paplay --raw --format=s16le --rate={rate} --channels=1
     fallback_tts_command: ""      # offline speech when OpenAI is unreachable, e.g. espeak-ng -v ko --stdout -- {text}
+
+    # ---- persona, reactions, memory -----------------------------------------------------------------
+    style: polite                 # polite | cute (short friendly 반말: "준비 끝! 출발 신호 기다리는 중이야.")
+    phrases_file: ""              # JSON {key: sentence} replacing single fixed sentences (keys: robot_state.PHRASES)
+    # Things that happen without a state change are said at once, never through GPT:
+    # replan = "path still blocked; replanning", blocked = "path blocked; waiting before replanning", clear
+    announce_situations: replan,blocked
+    notice: true                  # remarks of its own: a long compute, a path blocked for long, lost state, ...
+    # Recordings played instead of a sentence, "event=/path/file.wav, ...". Events: replan, blocked,
+    # step_done (a step ended, more queued), run_done (nothing queued behind it), done (either), ready,
+    # wake (answer to the name alone), ack (the name with a question), idle (nothing to do for 30 min)
+    # and any notice key.
+    reactions: ""
+    speech_cache_dir: ~/.cache/craft_voice/speech   # fixed sentences are synthesized once and kept ("" = off)
+
+    # ---- microphone: "크래프트" -> what it is doing; "크래프트, <question>" -> an answer ----------------
+    listen: false                 # true needs a microphone and the OpenAI key (speech-to-text)
+    mic_command: pw-record --rate 16000 --channels 1 --format s16 -   # raw 16 kHz mono PCM on stdout; or:
+                                  # arecord -q -t raw -f S16_LE -r 16000 -c 1 -   /   pw-record --target <source> ...
+    wake_words: 크래프트           # comma separated; matched by sound ("크라프트", "크레프트", "craft" count)
+    wake_tolerance: 2             # how many sound letters may differ
+    wake_mode: think              # the name alone: think (GPT, with memory) | template (fixed words, at once)
+    wake_ack: true                # a short "응!" at once while the answer is being made
+    gpt_voice_deadline_s: 5.0     # fixed words if GPT has not answered a spoken question by then
+    follow_up_s: 6.0              # after an answer the next sentence needs no name (0 = always need the name)
+    listen_tail_s: 0.6            # ignore the microphone this long after the robot stopped speaking
+    stt_model: "gpt-transcribe,gpt-4o-mini-transcribe,whisper-1"   # fastest first
+    stt_language: ko
+    stt_prompt: ""
+    max_stt_per_min: 20           # cost guard: at most this many utterances a minute go to speech-to-text
+    vad_min_rms: 150.0            # quieter than this is never speech (16-bit scale)
+    vad_loud_ratio: 2.5           # speech = this much louder than the noise floor (driving noise becomes the floor)

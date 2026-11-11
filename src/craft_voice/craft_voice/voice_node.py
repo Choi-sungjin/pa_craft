@@ -10,9 +10,11 @@ sub: /planning/state (std_msgs/String, transient local), /planning/diagnostics,
              /vision/c310/frame_meta + /dev/shm/craft_c310 (camera:=c310),
              image_topic (camera:=topic, raw or compressed), or nothing (camera:=none)
      /voice/ask (String: a question), /voice/say (String: speak as is),
-     /voice/command (String: describe | status | mute | unmute | stop)
+     /voice/command (String: describe | status | wake | mute | unmute | stop | listen | deaf)
+     microphone (listen:=true): "크래프트" -> says what it is doing; "크래프트, <question>" -> answers
 pub: /voice/utterance (String "kind: text", every sentence before it is spoken),
-     /voice/speaking (Bool), /voice/diagnostics (DiagnosticArray, 1 Hz)
+     /voice/heard (String: what was asked by voice), /voice/speaking (Bool),
+     /voice/diagnostics (DiagnosticArray, 1 Hz)
 Needs OPENAI_API_KEY in the environment; without it state changes are spoken
 from fixed templates through fallback_tts_command (or only published).
 """
@@ -31,8 +33,10 @@ from std_msgs.msg import Bool, String, UInt64MultiArray
 
 from .audio import CommandPlayer, CommandTts, StreamPlayer, split_command
 from .frames import ShmFrameReader, compressed_to_bgr, image_to_bgr
+from .gpt import DEFAULT_STT_MODEL, DEFAULT_TTS_MODEL, DEFAULT_TTS_VOICE
 from .narrator import Narrator, NarratorConfig
 from .robot_state import StateTracker, parse_list, parse_mapping
+from .wiring import DEFAULT_CACHE_DIR, DEFAULT_MIC_COMMAND, load_lines, load_reactions, make_cache, make_listener
 
 SHM_CAMERAS = {  # camera -> (shm name, has depth, frame_meta topic)
     'd435': ('/craft_vision', True, '/vision/d435/frame_meta'),
@@ -51,7 +55,10 @@ PARAMETERS = {
     'planning_state_topic': '/planning/state',
     'planning_diagnostics_topic': '/planning/diagnostics',
     'control_status_topic': '/control/status',
-    'context_topics': '/perception/localization/state',
+    'context_topics': '/perception/localization/state,/planning/box_phase,/planning/box_status',
+    # std_msgs/String topics that are events (the last command, the mission): kept for half an hour, with their age
+    'event_topics': '/planning/command,/planning/mission,/planning/approach_box,/planning/approach_box_near',
+    'flag_topics': '/planning/hold,/control/gripper_grasped',   # std_msgs/Bool, context only
     'announce_states': 'Ready,Run.Execute,Run.Complete,Run.Stopping,Fault',
     'step_names': '',
     'state_cooldown_s': 10.0,
@@ -74,8 +81,8 @@ PARAMETERS = {
     'reasoning_effort': 'none',
     'image_detail': 'low',
     'max_output_tokens': 400,
-    'tts_model': 'gpt-4o-mini-tts',
-    'tts_voice': 'coral',
+    'tts_model': DEFAULT_TTS_MODEL,
+    'tts_voice': DEFAULT_TTS_VOICE,
     'tts_instructions': '밝고 또렷한 한국어 안내 로봇 목소리로, 조금 빠르게 말해.',
     'tts_speed': 1.0,
     'tts_sample_rate': 24000,
@@ -90,6 +97,29 @@ PARAMETERS = {
     'tts_stream': True,
     'stream_player_command': 'aplay -q -t raw -f S16_LE -r {rate} -c 1 -',
     'fallback_tts_command': '',
+    # ---- persona, reactions, memory ----
+    'style': 'polite',                      # polite | cute (short friendly 반말)
+    'phrases_file': '',                     # JSON {key: sentence} replacing single fixed sentences
+    'announce_situations': 'replan,blocked',   # diagnostics waiting situations said at once ('clear' too if wanted)
+    'notice': True,                         # remarks on what it notices by itself
+    'reactions': '',                        # recordings: "replan=/p/a.wav,step_done=/p/b.wav,run_done=/p/c.wav,idle=..."
+    'speech_cache_dir': DEFAULT_CACHE_DIR,  # fixed sentences are synthesized once and kept ('' = off)
+    # ---- microphone: called by name ----
+    'listen': False,
+    'mic_command': DEFAULT_MIC_COMMAND,
+    'wake_words': '크래프트',
+    'wake_tolerance': 2,
+    'wake_mode': 'think',                   # the name alone: think (GPT) | template (fixed words)
+    'wake_ack': True,
+    'gpt_voice_deadline_s': 5.0,
+    'follow_up_s': 6.0,                     # after an answer, the next sentence needs no name (0 = off)
+    'listen_tail_s': 0.6,
+    'stt_model': DEFAULT_STT_MODEL,
+    'stt_language': 'ko',
+    'stt_prompt': '',
+    'max_stt_per_min': 20,
+    'vad_min_rms': 150.0,
+    'vad_loud_ratio': 2.5,
 }
 
 
@@ -101,9 +131,13 @@ class VoiceNode(Node):
         p = {name: self.get_parameter(name).value for name in PARAMETERS}
         log = self.get_logger()
 
+        if p['style'] not in ('polite', 'cute'):
+            raise ValueError("style must be 'polite' or 'cute'")
         tracker = StateTracker(announce=tuple(parse_list(p['announce_states'])), cooldown_s=p['state_cooldown_s'],
                                fault_reason_wait_s=p['fault_reason_wait_s'],
-                               step_names=parse_mapping(p['step_names']))
+                               step_names=parse_mapping(p['step_names']), style=p['style'],
+                               lines=load_lines(p['phrases_file'], log),
+                               announce_situations=tuple(parse_list(p['announce_situations'])))
         config = NarratorConfig(
             language=p['language'], persona=p['persona'], camera_description=p['camera_description'],
             max_chars=p['max_chars'], state_mode=p['state_mode'], narrate_period_s=p['narrate_period_s'],
@@ -113,7 +147,9 @@ class VoiceNode(Node):
             image_max_side=p['image_max_side'], jpeg_quality=p['jpeg_quality'],
             interrupt_on_fault=p['interrupt_on_fault'], fault_tts_deadline_s=p['fault_tts_timeout_s'] + 1.0,
             gpt_state_deadline_s=p['gpt_state_deadline_s'], tts_deadline_s=p['tts_deadline_s'],
-            gpt_narrate_deadline_s=p['gpt_narrate_deadline_s'], gpt_ask_deadline_s=p['gpt_ask_deadline_s'])
+            gpt_narrate_deadline_s=p['gpt_narrate_deadline_s'], gpt_ask_deadline_s=p['gpt_ask_deadline_s'],
+            wake_mode=p['wake_mode'], wake_ack=p['wake_ack'], gpt_voice_deadline_s=p['gpt_voice_deadline_s'],
+            notice=p['notice'], reactions=load_reactions(p['reactions'], log))
         if p['state_mode'] not in ('gpt', 'template'):
             raise ValueError("state_mode must be 'gpt' or 'template'")
 
@@ -128,7 +164,7 @@ class VoiceNode(Node):
                     max_output_tokens=p['max_output_tokens'], reasoning_effort=p['reasoning_effort'],
                     tts_speed=p['tts_speed'], sample_rate=p['tts_sample_rate'],
                     timeout_s=p['request_timeout_s'], urgent_timeout_s=p['fault_tts_timeout_s'],
-                    base_url=p['api_base_url'])
+                    base_url=p['api_base_url'], stt_model=p['stt_model'])
             except Exception as error:  # e.g. openai package missing
                 log.error(f'OpenAI backend unavailable ({type(error).__name__}: {error}); templates only')
         else:
@@ -137,6 +173,7 @@ class VoiceNode(Node):
         player = split_command(p['player_command'])
 
         self._utterance_pub = self.create_publisher(String, '/voice/utterance', 10)
+        self._heard_pub = self.create_publisher(String, '/voice/heard', 10)
         self._speaking_pub = self.create_publisher(Bool, '/voice/speaking', QoSProfile(
             depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self._diagnostics_pub = self.create_publisher(DiagnosticArray, '/voice/diagnostics', 10)
@@ -153,7 +190,18 @@ class VoiceNode(Node):
             stream_player=StreamPlayer(stream) if stream else None,
             frame_provider=self._frame if config.use_image else None,
             fallback_tts=CommandTts(fallback) if fallback else None,
-            on_text=self._publish_text, on_speaking=self._publish_speaking, logger=log)
+            on_text=self._publish_text, on_speaking=self._publish_speaking, logger=log,
+            speech_cache=make_cache(backend, p['speech_cache_dir']))
+        self.listener = None
+        if p['listen']:
+            self.listener = make_listener(
+                self.narrator, backend, log, mic_command=p['mic_command'], wake_words=p['wake_words'],
+                language=p['stt_language'], stt_prompt=p['stt_prompt'], follow_up_s=p['follow_up_s'],
+                tail_s=p['listen_tail_s'], max_stt_per_min=p['max_stt_per_min'], tolerance=p['wake_tolerance'],
+                min_rms=p['vad_min_rms'], loud_ratio=p['vad_loud_ratio'],
+                on_heard=lambda question: self._heard_pub.publish(String(data=question)))
+            if self.listener is not None:
+                self.listener.start()
 
         latched = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE,
                              durability=DurabilityPolicy.TRANSIENT_LOCAL)  # matches planning_master
@@ -166,8 +214,13 @@ class VoiceNode(Node):
                 m.ready, m.fault, m.held, m.stopped, m.reason), 10)
         except ImportError:
             log.warning('craft_interfaces not found: control status is left out of the context')
-        for topic in parse_list(p['context_topics']):  # volatile: matches latched and plain publishers
+        events = parse_list(p['event_topics'])
+        self.narrator.tracker.event_topics = tuple(events)
+        for topic in dict.fromkeys(parse_list(p['context_topics']) + events):  # volatile: latched and plain publishers
             self.create_subscription(String, topic, lambda m, t=topic: self.narrator.context(t, m.data), 10)
+        for topic in parse_list(p['flag_topics']):
+            self.create_subscription(Bool, topic, lambda m, t=topic: self.narrator.context(
+                t, 'true' if m.data else 'false'), 10)
         self._subscribe_perception(p)
         self.create_subscription(String, '/voice/ask', lambda m: self.narrator.ask(m.data), 10)
         self.create_subscription(String, '/voice/say', lambda m: self.narrator.say(m.data), 10)
@@ -175,8 +228,9 @@ class VoiceNode(Node):
         self.create_timer(0.1, self.narrator.tick)
         self.create_timer(1.0, self._publish_diagnostics)
         log.info(f"voice ready: camera={p['camera']} gpt={'on' if backend else 'off'} model={p['model']} "
-                 f"tts={p['tts_model']}/{p['tts_voice']} state_mode={p['state_mode']} "
-                 f"narrate every {p['narrate_period_s']}s player={' '.join(player) or 'none'}")
+                 f"tts={p['tts_model']}/{p['tts_voice']} state_mode={p['state_mode']} style={p['style']} "
+                 f"narrate every {p['narrate_period_s']}s player={' '.join(player) or 'none'} "
+                 f"microphone={'on (' + p['wake_words'] + ')' if self.listener else 'off'}")
 
     # ---- what perception sees ---------------------------------------------------------------
     def _subscribe_perception(self, p):
@@ -257,7 +311,17 @@ class VoiceNode(Node):
                                       status.message, {kv.key: kv.value for kv in status.values})
 
     def _on_command(self, msg: String):
-        self.get_logger().info(f'/voice/command: {self.narrator.command(msg.data)}')
+        command = msg.data.strip().lower()
+        if command in ('listen', 'deaf'):  # microphone on / off while running
+            if self.listener is not None:
+                self.listener.enabled = command == 'listen'
+            result = command if self.listener is not None else 'no microphone (listen:=false)'
+        elif command == 'wake':            # as if the name was called
+            self.narrator.wake('')
+            result = command
+        else:
+            result = self.narrator.command(msg.data)
+        self.get_logger().info(f'/voice/command: {result}')
 
     def _publish_text(self, kind: str, text: str):
         self._utterance_pub.publish(String(data=f'{kind}: {text}'))
@@ -270,6 +334,9 @@ class VoiceNode(Node):
         status = DiagnosticStatus(name='voice/narrator', hardware_id='voice_node',
                                   message='muted' if stats['muted'] else 'ok')
         status.level = DiagnosticStatus.OK
+        if self.listener is not None:
+            stats.update({f'mic_{key}': value for key, value in self.listener.stats.items()},
+                         mic_enabled=self.listener.enabled)
         status.values = [KeyValue(key=key, value=str(value)) for key, value in sorted(stats.items())]
         with self._frame_lock:
             age = time.monotonic() - self._latest[0] if self._latest else float('inf')
@@ -279,6 +346,8 @@ class VoiceNode(Node):
         self._diagnostics_pub.publish(msg)
 
     def destroy_node(self):
+        if self.listener is not None:
+            self.listener.close()
         self.narrator.close()
         if self._reader is not None:
             self._reader.close()
@@ -286,6 +355,8 @@ class VoiceNode(Node):
 
 
 def main(args=None):
+    from rclpy.executors import ExternalShutdownException
+
     from .envfile import load_env_file
     load_env_file()  # OPENAI_API_KEY from env/openai.env or ~/.config/craft_voice/openai.env, if not already set
     rclpy.init(args=args)
@@ -293,7 +364,7 @@ def main(args=None):
     try:
         node = VoiceNode()
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):  # Ctrl+C, or SIGTERM from systemd
         pass
     finally:
         if node is not None:

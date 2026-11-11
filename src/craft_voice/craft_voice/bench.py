@@ -25,6 +25,7 @@ import threading
 import time
 
 from .audio import CommandPlayer, CommandTts, StreamPlayer, pcm_to_wav, split_command, wav_seconds
+from .gpt import DEFAULT_TTS_MODEL, DEFAULT_TTS_VOICE
 from .narrator import Narrator, NarratorConfig
 from .robot_state import StateTracker
 
@@ -111,8 +112,8 @@ def main(argv=None) -> int:
     p.add_argument('--camera', default='', help='picture for --gpt (none = text only)')
     p.add_argument('--model', default='gpt-5.4-mini,gpt-6-luna,gpt-5.5')
     p.add_argument('--reasoning-effort', default='none')
-    p.add_argument('--tts-model', default='gpt-4o-mini-tts')
-    p.add_argument('--voice', default='coral')
+    p.add_argument('--tts-model', default=DEFAULT_TTS_MODEL)
+    p.add_argument('--voice', default=DEFAULT_TTS_VOICE)
     p.add_argument('--base-url', default='')
     p.add_argument('--compare', default='', help='comma separated GPT models to time side by side')
     p.add_argument('--efforts', default='none,low', help='reasoning efforts for --compare ("" = not sent)')
