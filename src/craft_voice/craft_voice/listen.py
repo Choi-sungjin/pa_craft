@@ -246,8 +246,14 @@ class Listener:
     def __init__(self, microphone, transcribe, on_wake, on_followup=None, names=('크래프트',), segmenter=None,
                  is_speaking=lambda: False, tail_s: float = 0.6, follow_up_s: float = 6.0,
                  max_stt_per_min: int = 20, tolerance: int = 2, logger=None, clock=time.monotonic,
-                 retry_s: float = 5.0):
+                 retry_s: float = 5.0, ready=lambda: True, words=None, on_word=None, word_tolerance: int = 0):
         self.microphone = microphone
+        # 반응 단어(이름 말고): {"젯슨": ("젯슨", "제슨", ...)} -> on_word("젯슨"). 짧은 말이라 오차 없이 맞을 때만
+        # (오차 1이면 "레슨", "잭슨"도 걸렸다, 2026-11-13). 변형은 별칭으로 받는다.
+        self.words = {key: tuple(aliases) for key, aliases in (words or {}).items() if aliases}
+        self.on_word = on_word
+        self.word_tolerance = word_tolerance
+        self.ready = ready                      # False while speech-to-text cannot work: speech is dropped
         self.transcribe = transcribe            # wav bytes -> text
         self.on_wake = on_wake                  # question ('' = only the name)
         self.on_followup = on_followup          # sentence said right after an answer, without the name
@@ -262,7 +268,7 @@ class Listener:
         self.clock = clock
         self.retry_s = retry_s
         self.stats = {'segments': 0, 'transcribed': 0, 'wakes': 0, 'followups': 0, 'ignored': 0,
-                      'stt_errors': 0, 'over_budget': 0, 'mic_restarts': 0}
+                      'stt_errors': 0, 'over_budget': 0, 'mic_restarts': 0, 'words': 0}
         self.enabled = True
         self._segments: queue.Queue = queue.Queue(maxsize=2)
         self._stt_times: deque = deque()
@@ -320,7 +326,7 @@ class Listener:
                 # the robot just finished talking to someone: the next sentence may come without the name
                 self._follow_until = now + self.tail_s + self.follow_up_s
             self._was_speaking = speaking
-        if not self.enabled or now < self._deaf_until:
+        if not self.enabled or now < self._deaf_until or not self.ready():
             if self.segmenter.active or self.segmenter._run:
                 self.segmenter.reset()
             return
@@ -371,6 +377,14 @@ class Listener:
         called, question = find_wake(text, self.names, self.tolerance)
         now = self.clock()
         seconds = len(segment) / (RATE * 2)
+        if not called and self.on_word is not None:
+            for key, aliases in self.words.items():  # "젯슨" -> its recording, not a conversation
+                if find_wake(text, aliases, self.word_tolerance)[0]:
+                    self.stats['words'] += 1
+                    self.log.info(f'heard {key!r} ({seconds:.1f} s of speech, stt {time.monotonic() - started:.2f} s): '
+                                  f'{text!r}')
+                    self.on_word(key)
+                    return
         if called:
             self.stats['wakes'] += 1
             self._conversation_until = now + 30.0

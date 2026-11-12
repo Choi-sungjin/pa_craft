@@ -18,6 +18,9 @@ from __future__ import annotations
 import math
 from collections import Counter, deque
 from dataclasses import dataclass, field
+from . import variety as _variety
+from .signals import STATE_FREE_REMARKS, Signals
+from .stops import STOP_LINES, StopMonitor, stop_reason
 
 STATE_KO = {
     'Idle': '시스템 초기화 중(센서·제어 준비 대기)',
@@ -49,6 +52,20 @@ REASON_KO = (
     ('stale control task result', '제어 결과 응답 끊김', '제어 쪽 응답이 끊겨서 멈춰 있어요.'),
     ('no progress', '진행 없음', '앞으로 나아가지 못해서 멈춰 있어요.'),
     ('module/feedback fault', '모듈 피드백 이상', '장치 응답이 이상해서 멈춰 있어요.'),
+    # why control ended the task (control_master.cpp fail / reject): planning's fault reason is
+    # "control task: <reason>"; a box stage only says "stage task failed" (see StateTracker.fault_sentence)
+    ('serial command write failed', '모터 보드로 명령 전송 실패', '모터 보드에 명령을 보내지 못해서 멈춰 있어요.'),
+    ('serial feedback or board fault', '모터 보드 응답 끊김 또는 보드 고장', '모터 보드에 문제가 생겨서 멈춰 있어요.'),
+    ('odometry timeout', '제어가 받는 위치 정보 끊김', '위치 정보가 끊겨서 멈춰 있어요.'),
+    ('camera observation timeout', '제어가 받는 카메라 관측 끊김', '카메라 정보가 끊겨서 멈춰 있어요.'),
+    ('task timeout', '제어 작업 시간 초과', '동작이 제시간에 끝나지 않아서 멈춰 있어요.'),
+    ('replayed camera update', '같은 카메라 갱신이 다시 옴', '카메라 값이 이상해서 멈춰 있어요.'),
+    ('invalid path update', '잘못된 경로 갱신', '새 경로가 이상해서 멈춰 있어요.'),
+    ('control command queue full', '제어 명령 대기열이 가득 참', '명령이 너무 밀려서 멈춰 있어요.'),
+    ('control is held or unavailable', '제어가 멈춤 지시 중이거나 준비 안 됨', '제어가 명령을 받을 수 없는 상태라서 멈춰 있어요.'),
+    ('arm disabled', '팔이 꺼져 있음', '팔이 꺼져 있어서 멈춰 있어요.'),
+    ('invalid task target/calibration', '작업 목표나 보정값 이상', '목표 값이 이상해서 멈춰 있어요.'),
+    ('control task', '제어가 작업을 끝내지 못함', '제어가 동작을 끝내지 못해서 멈춰 있어요.'),
     # box approach (planning_master.cpp box stages): specific needles before the general ones
     ('path blocked', '상자 앞 경로 막힘', '상자 앞 길이 막혀서 멈춰 있어요.'),
     ('stays blocked', '상자 앞 경로가 계속 막힘', '상자 앞 길이 계속 막혀서 멈춰 있어요.'),
@@ -76,6 +93,18 @@ FAULT_CUTE = {
     'stale control task result': '제어 쪽 응답이 끊겨서 멈췄어.',
     'no progress': '앞으로 못 나가서 멈췄어.',
     'module/feedback fault': '장치 응답이 이상해서 멈췄어.',
+    'serial command write failed': '모터 보드에 명령이 안 가서 멈췄어.',
+    'serial feedback or board fault': '모터 보드에 문제가 생겨서 멈췄어.',
+    'odometry timeout': '위치 정보가 끊겨서 멈췄어.',
+    'camera observation timeout': '카메라 정보가 끊겨서 멈췄어.',
+    'task timeout': '동작이 제시간에 안 끝나서 멈췄어.',
+    'replayed camera update': '카메라 값이 이상해서 멈췄어.',
+    'invalid path update': '새 경로가 이상해서 멈췄어.',
+    'control command queue full': '명령이 너무 밀려서 멈췄어.',
+    'control is held or unavailable': '제어가 명령을 못 받는 상태라서 멈췄어.',
+    'arm disabled': '팔이 꺼져 있어서 멈췄어.',
+    'invalid task target/calibration': '목표 값이 이상해서 멈췄어.',
+    'control task': '제어가 동작을 못 끝내서 멈췄어.',
     'path blocked': '상자 앞 길이 막혀서 멈췄어.',
     'stays blocked': '상자 앞 길이 계속 막혀서 멈췄어.',
     'replan': '다른 길을 못 찾아서 멈췄어.',
@@ -143,6 +172,7 @@ PHRASES = {
         'situation.box_settle': '상자 앞에서 잠깐 멈춰 있어요.',
         'situation.target': '목표물이 보이기를 기다리고 있어요.',
         'situation.clear': '길이 다시 열려서 계속 갈게요.',
+        'situation.rerouted': '새 길을 찾았어요. 다시 출발할게요.',
         'seen': '지금 보이는 건 {items}{copula}.',
         'cannot_answer': '지금은 그 질문에 답하기 어려워요.',
         'wake': '네!',
@@ -155,6 +185,17 @@ PHRASES = {
         'notice.state_lost': '작업 상태 신호가 끊겼어요.',
         'notice.state_back': '작업 상태가 다시 들어오고 있어요.',
         'notice.idle': '한동안 할 일이 없었어요.',
+        'notice.grasped': '물체를 잡았어요.',
+        'notice.barcode_ascending': '바코드를 읽었어요. 오름차순이에요.',
+        'notice.barcode_descending': '바코드를 읽었어요. 내림차순이에요.',
+        'notice.barcode_unknown': '바코드를 읽었는데 등록되지 않은 코드예요.',
+        'notice.box_found': '상자를 찾았어요.',
+        'notice.traffic_start': '신호등이 깜빡이기 시작했어요. 횟수를 셀게요.',
+        'notice.traffic_recount': '신호등 횟수가 맞지 않아서 처음부터 다시 셀게요.',
+        'notice.traffic_done': '신호등을 다 셌어요. 빨강 {red}번, 노랑 {yellow}번, 초록 {green}번이에요.',
+        'notice.depart': '출발할게요.',
+        'obstacle': '{dir} {d}미터쯤에 장애물이 있어요.',
+        'obstacle.near': '바로 {dir}에 장애물이 있어요.',
     },
     'cute': {
         'change.Idle': '지금은 대기 중이야!',
@@ -192,6 +233,7 @@ PHRASES = {
         'situation.box_settle': '상자 앞에서 잠깐 멈췄어.',
         'situation.target': '목표물이 보이길 기다리는 중이야.',
         'situation.clear': '길 열렸다! 계속 갈게!',
+        'situation.rerouted': '나이사!',
         'seen': '지금 {items} 보여!',
         'cannot_answer': '그건 지금 잘 모르겠어.',
         'wake': '짜스!',
@@ -204,8 +246,22 @@ PHRASES = {
         'notice.state_lost': '어? 상태 신호가 끊겼어.',
         'notice.state_back': '상태 신호 다시 들어온다!',
         'notice.idle': '한참 동안 할 일이 없었어.',
+        'notice.grasped': '잡았다!',
+        'notice.barcode_ascending': '좋아, 바코드 읽었어! 오름차순이야.',
+        'notice.barcode_descending': '좋아, 바코드 읽었어! 내림차순이야.',
+        'notice.barcode_unknown': '바코드를 읽긴 했는데 모르는 코드야.',
+        'notice.box_found': '상자 찾았다!',
+        'notice.traffic_start': '신호등 깜빡인다! 몇 번인지 세어 볼게.',
+        'notice.traffic_recount': '어? 횟수가 안 맞아. 처음부터 다시 셀게!',
+        'notice.traffic_done': '신호등 다 셌어! 빨강 {red}번, 노랑 {yellow}번, 초록 {green}번이야.',
+        'notice.depart': '출발!',
+        'obstacle': '{dir} {d}미터쯤에 뭐가 있어.',
+        'obstacle.near': '바로 {dir}에 뭐가 있어.',
     },
 }
+
+for _style in PHRASES:
+    PHRASES[_style].update({'notice.wheel_stop_' + key: text for key, text in STOP_LINES.items()})
 
 # Things that happen without a label change (a diagnostics 'waiting_for' value appears or clears).
 ANNOUNCED_SITUATIONS = ('replan', 'blocked')
@@ -227,6 +283,7 @@ TOPIC_KO = {
     '/planning/approach_box_near': '가까이 접근하라고 받은 박스',
     '/planning/hold': '플래닝이 로봇을 붙잡아 두는 중(hold)',
     '/control/gripper_grasped': '그리퍼가 물체를 잡고 있음',
+    '/control/planning_held': '제어가 플래닝의 hold를 받아 멈춰 있음',
 }
 # planning/state_machine diagnostics values worth telling GPT (key -> meaning); '' and 'false' are left out.
 DIAG_KO = (
@@ -355,9 +412,13 @@ class StateEvent:
 @dataclass(frozen=True)
 class Notice:
     """Something the robot noticed by itself (no state change): a state that lasts unusually long, ..."""
-    key: str      # 'long_compute', 'long_blocked', 'long_execute', 'many_replans', 'state_lost', 'state_back', 'idle'
+    # 'long_compute', 'long_blocked', 'long_execute', 'many_replans', 'state_lost', 'state_back', 'idle',
+    # 'wheel_stop_*', 'depart', and the remarks of signals.py ('grasped', 'barcode_*', 'traffic_*', 'box_found')
+    key: str
     facts: str    # Korean, for the GPT prompt
     generation: int
+    episode: int = 0
+    values: tuple = ()   # (name, value) pairs filled into the sentence, e.g. the traffic light counts
 
 
 @dataclass
@@ -375,6 +436,7 @@ class StateTracker:
     announce: tuple = ('Ready', 'Run.Execute', 'Run.Complete', 'Run.Stopping', 'Fault')
     cooldown_s: float = 10.0
     fault_reason_wait_s: float = 1.2
+    control_reason_s: float = 5.0          # a control failure this long before the fault is its cause
     step_name_wait_s: float = 1.2    # diagnostics (step name) are 1 Hz: wait for them before "X, 시작할게요"
     stale_s: float = 3.0
     perception_stale_s: float = 2.0
@@ -392,6 +454,9 @@ class StateTracker:
     notice_lost_s: float = 5.0
     event_topics: tuple = ()                    # context topics that are events (a command): kept event_keep_s
     event_keep_s: float = 1800.0
+    variety: bool = False                       # further wordings in turn, and drive facts (variety.py)
+    pose_stale_s: float = 1.0
+    grasp_topic: str = '/control/gripper_grasped'   # a flag topic whose rise is said ("잡았다!")
 
     def __post_init__(self):
         self.label: str | None = None
@@ -406,6 +471,7 @@ class StateTracker:
         self.fault_reason_at = -math.inf
         self.control = ControlSnapshot()
         self.context: dict[str, tuple[str, float]] = {}
+        self.wheel_stop = StopMonitor()
         self.motion: tuple[float, float, float] | None = None       # (v m/s, w rad/s, at)
         self.objects: tuple[Counter, float] | None = None           # YOLO labels seen in the last frame
         self.pucks: tuple[list, float] | None = None                # [(standing, distance m)]
@@ -427,12 +493,33 @@ class StateTracker:
         self._idle_since = -math.inf
         self._idle_noticed_at = -math.inf
         self._pending_step: StateEvent | None = None
+        self.goal: tuple[float, float, float] | None = None          # (x, y, at) of the goal pose, map frame
+        self.pose: tuple[float, float, float, float] | None = None   # (x, y, yaw, at) of the robot, map frame
+        self.goals_done = 0                      # drives to a goal completed in this run
+        self.leg: dict | None = None             # the drive that just ended: {'count', 'seconds', 'blocked', 'replanned'}
+        self._turn: Counter = Counter()          # which wording of a sentence is next
+        self._said: dict = {}                    # event -> the sentence chosen for it (asked for more than once)
+        self.signals = Signals(stale_s=self.stale_s, keep_s=self.event_keep_s)
+        self._remarks: deque = deque(maxlen=4)   # (key, at) of signals.py remarks waiting to be said
 
     # ---- sentences ----------------------------------------------------------------------
+    def phrases(self, key: str) -> list[str]:
+        """Every wording of a key that can be said (for synthesizing them beforehand)."""
+        text = (self.lines.get(key) or PHRASES.get(self.style, PHRASES['polite']).get(key)
+                or PHRASES['polite'].get(key, ''))
+        if not self.variety or not text or key in self.lines:
+            return [text]
+        return [text] + _variety.VARIANTS.get(self.style, {}).get(key, [])
+
     def phrase(self, key: str, **values) -> str:
         """Sentence for a key: phrases file, then the style's table, then the polite wording."""
         text = (self.lines.get(key) or PHRASES.get(self.style, PHRASES['polite']).get(key)
                 or PHRASES['polite'].get(key, ''))
+        if self.variety and text and key not in self.lines:
+            options = [text] + _variety.VARIANTS.get(self.style, {}).get(key, [])
+            if len(options) > 1:  # the next wording each time it is said
+                text = options[self._turn[key] % len(options)]
+                self._turn[key] += 1
         if values and '{' in text:
             try:
                 return text.format(**values)
@@ -453,10 +540,17 @@ class StateTracker:
         self.label_at = now
         if label == self.label:
             return None
+        since = self.label_since
         previous, self.label, self.label_since = self.label, label, now
         self._noticed -= {'long_compute', 'long_execute'}  # a new stretch of this state may be noticed again
         if label == 'Run.Complete':
             self.counts['done'] += 1
+            self.leg = None
+            if self.step_known() and self.diag.get('step', '') in _variety.DRIVE_STEPS:
+                self.goals_done += 1
+                self.leg = {'count': self.goals_done, 'seconds': now - since if previous == 'Run.Execute' else None,
+                            'blocked': self.step_counts['blocked'] > 0, 'replanned': self.step_counts['replan'] > 0,
+                            'generation': self.generation + 1}
             queued = self.diag.get('queued', '') if self.step_known() else ''
             self.last_done = {'step': self.diag.get('step', '') if self.step_known() else '',
                               'queued': int(queued) if queued.isdigit() else None, 'at': now}
@@ -464,6 +558,7 @@ class StateTracker:
             self.counts['fault'] += 1
         elif label == 'Ready' and previous in (None, 'Idle', 'Fault'):
             self.counts.clear()  # a fresh start: what happened before is history, not this run
+            self.goals_done = 0
         if label in ('Idle', 'Ready', 'Run.AwaitRequest'):
             if previous not in ('Idle', 'Ready', 'Run.AwaitRequest'):
                 self._idle_since = self._idle_noticed_at = now
@@ -537,9 +632,13 @@ class StateTracker:
         announced = self.announce_situations
         if previous in announced or key in announced or (not key and 'clear' in announced):
             self.generation += 1  # what the robot is doing changed, although the label did not
-        if key not in announced and not (not key and previous in ('blocked', 'replan') and 'clear' in announced):
+        # 'rerouted': the search for another path ended and the drive goes on at once (replan -> nothing to
+        # wait for, still executing). Said only when asked for; otherwise it is an ordinary 'clear'.
+        rerouted = not key and previous == 'replan' and self.label == 'Run.Execute' and 'rerouted' in announced
+        if not rerouted and key not in announced and \
+                not (not key and previous in ('blocked', 'replan') and 'clear' in announced):
             return None
-        name = key or 'clear'
+        name = key or ('rerouted' if rerouted else 'clear')
         if self.label is None or not self.label.startswith('Run.'):
             return None
         if now - self._announced_at.get('situation.' + name, -math.inf) < self.situation_cooldown_s:
@@ -567,6 +666,22 @@ class StateTracker:
             self.remember(now, '작업 상태 신호가 끊김')
             return Notice('state_lost', f'작업 상태 신호가 {now - self.label_at:.0f}초째 안 들어옴 '
                           '(플래닝 프로그램이 꺼졌을 수 있음)', self.generation)
+        while self._remarks:  # a signal just seen (a grasp, the barcode, the light, the box): said while it is news
+            key, at = self._remarks.popleft()
+            if now - at <= 5.0 and (key in STATE_FREE_REMARKS or (fresh and self.label.startswith('Run.'))):
+                values = tuple(self.signals.traffic_values().items()) if key == 'traffic_done' else ()
+                return Notice(key, self.phrase('notice.' + key, **dict(values)), self.generation, values=values)
+        departed, self.wheel_stop.departed = self.wheel_stop.departed, False
+        if departed and not fresh:
+            # No state machine says "출발!": the wheels starting after standing still say it (a demo or a test
+            # drive without planning_master). With planning the state announcement already does.
+            self.remember(now, '멈춰 있다가 바퀴가 움직이기 시작함')
+            return Notice('depart', self.phrase('notice.depart'), self.generation)
+        reason = stop_reason(self, now)
+        if reason and not self.wheel_stop.notified:
+            self.wheel_stop.notified = True
+            self.wheel_stop.armed = False
+            return Notice('wheel_stop_' + reason, STOP_LINES[reason], self.generation, self.wheel_stop.epoch)
         if not fresh:
             return None
         held = now - self.label_since
@@ -600,10 +715,60 @@ class StateTracker:
 
     def update_context(self, topic: str, value: str, now: float):
         self.context[topic] = (value.strip(), now)
+        if topic == self.grasp_topic:
+            self._remark(self.signals.gripper(value.strip() == 'true', now), now, '그리퍼가 물체를 잡음')
+
+    # ---- further signals (signals.py) ----------------------------------------------------
+    def _remark(self, key: str, now: float, memory: str = ''):
+        if key:
+            self.remember(now, memory)
+            self._remarks.append((key, now))
+
+    def update_task_result(self, task_id: int, status: int, controllers, reason: str, now: float):
+        self.remember(now, self.signals.task_result(task_id, status, controllers, reason, now))
+
+    def update_task_command(self, task_id: int, operation: int, kind: int, duration_s: float, clock_slot: int,
+                            close: bool, now: float):
+        self.remember(now, self.signals.task_command(task_id, operation, kind, duration_s, clock_slot, close, now))
+
+    def update_barcode(self, text: str, now: float, quiet: bool = False):
+        self._remark(self.signals.read_barcode(text, now, quiet), now, f'바코드를 읽음: {text.strip()}')
+
+    def update_traffic_light(self, red: int, yellow: int, green: int, blinks: int, complete: bool, valid: bool,
+                             discarded: int, now: float, quiet: bool = False):
+        key = self.signals.traffic_light(red, yellow, green, blinks, complete, valid, discarded, now, quiet)
+        memory = {'traffic_start': '신호등이 깜빡이기 시작함',
+                  'traffic_recount': '신호등 횟수가 맞지 않아 다시 셈',
+                  'traffic_done': f'신호등 12번을 다 셈: 빨강 {red}, 노랑 {yellow}, 초록 {green}'}.get(key, '')
+        self._remark(key, now, memory)
+
+    def update_obstacles(self, points, now: float, in_map: bool = True):
+        """points [(x, y)]: in the map frame (needs a fresh pose) or already seen from the robot."""
+        if not in_map:
+            self.signals.obstacles(points, now)
+        elif self.pose is not None and now - self.pose[3] <= self.pose_stale_s:
+            self.signals.obstacles(points, now, self.pose[:3])
+
+    def update_box(self, valid: bool, source: str, reason: str, gap_m: float, lateral_m: float, yaw_rad: float,
+                   now: float):
+        self._remark(self.signals.box_observation(valid, source, reason, gap_m, lateral_m, yaw_rad, now), now,
+                     '상자를 관측함')
+
+    def obstacle_sentence(self, now: float) -> str:
+        """'앞쪽 1미터쯤에 뭐가 있어.' for the nearest LiDAR obstacle; '' when none is known."""
+        words = self.signals.obstacle_words(now)
+        if words is None:
+            return ''
+        return self.phrase('obstacle' if words[1] else 'obstacle.near', dir=words[0], d=words[1])
 
     # ---- what perception sees ------------------------------------------------------------
     def update_motion(self, linear_x: float, angular_z: float, now: float):
         self.motion = (float(linear_x), float(angular_z), now)
+        self.wheel_stop.update(float(linear_x), float(angular_z), now)
+
+    def wheel_stop_label(self, now):
+        reason = stop_reason(self, now)
+        return f'wheel_stop_{reason}:{self.wheel_stop.epoch}' if reason else ''
 
     def update_objects(self, labels, now: float):
         self.objects = (Counter(label for label in labels if label), now)
@@ -659,13 +824,81 @@ class StateTracker:
     def planning_fresh(self, now: float) -> bool:
         return now - self.label_at <= self.stale_s
 
+    def fault_sentence(self, reason: str, now: float) -> str:
+        """Why the robot stopped. Planning's reason says it, except where planning names no cause of its own
+        (none, an unknown one, a box stage's "stage task failed"): then what control gave for the task it
+        failed or rejected within the last control_reason_s is said."""
+        lowered = reason.lower()
+        named = next((needle for needle, _, _ in REASON_KO if needle in lowered), '')
+        failure = self.signals.failure
+        if named in ('', 'stage task failed') and failure and failure['reason'] and \
+                0.0 <= now - failure['at'] <= self.control_reason_s and \
+                any(needle in failure['reason'].lower() for needle, _, _ in REASON_KO):
+            reason = 'control task: ' + failure['reason']
+        return fault_situation(reason, self.style, self.lines)
+
     def template(self, event: StateEvent) -> str:
         """Spoken sentence for a change (no GPT): the action that starts or ends, or the situation."""
         if event.label == 'Fault':
-            return fault_situation(event.reason, self.style, self.lines)
-        if event.situation:
-            return self.phrase('situation.' + event.situation) or self.phrase('change.other')
-        return self._state_phrase('change', event.label, event.step)
+            return self.fault_sentence(event.reason, event.stamp + self.fault_reason_wait_s)
+        if not self.variety:
+            if event.situation:
+                return self.phrase('situation.' + event.situation) or self.phrase('change.other')
+            return self._state_phrase('change', event.label, event.step)
+        chosen = (event.generation, event.label, event.situation, event.stamp)
+        if chosen not in self._said:  # the same event is asked for again (fallback, retry): the same sentence
+            if len(self._said) > 32:
+                self._said.clear()
+            if event.situation:
+                text = self.phrase('situation.' + event.situation) or self.phrase('change.other')
+            else:
+                text = self._drive_phrase(event) or self._state_phrase('change', event.label, event.step)
+            self._said[chosen] = text
+        return self._said[chosen]
+
+    def _drive_phrase(self, event: StateEvent) -> str:
+        """A drive to a goal that starts or ends, said with what is known about it; '' = say it plainly.
+        Every other time the plain wording is used, so the facts do not become a refrain either."""
+        if not self.step_known() or self.diag.get('step', '') not in _variety.DRIVE_STEPS:
+            return ''
+        if event.label == 'Run.Execute':
+            # said up to step_name_wait_s after the change: the pose may be newer than the event
+            offset = self.goal_offset(max(event.stamp, self.pose[3]) if self.pose else event.stamp)
+            lines = _variety.start_lines(self.style, *offset) if offset else []
+        elif event.label == 'Run.Complete' and self.leg and self.leg['generation'] == event.generation:
+            lines = _variety.done_lines(self.style, self.leg['count'], self.leg['seconds'], self.leg['blocked'],
+                                        self.leg['replanned'])
+        else:
+            return ''
+        turn = self._turn['drive.' + event.label]
+        self._turn['drive.' + event.label] += 1
+        if lines and turn % 2 == 0:
+            return lines[(turn // 2) % len(lines)]
+        # without numbers: the step's usual sentence first, then the drive's own plain wordings
+        plain = [''] + _variety.plain_lines(self.style, event.label == 'Run.Complete')
+        turn = self._turn['plain.' + event.label]
+        self._turn['plain.' + event.label] += 1
+        return plain[turn % len(plain)]
+
+    # ---- where the goal is ---------------------------------------------------------------
+    def update_goal(self, x: float, y: float, now: float):
+        if math.isfinite(x) and math.isfinite(y):
+            self.goal = (float(x), float(y), now)
+
+    def update_pose(self, x: float, y: float, yaw: float, now: float):
+        if math.isfinite(x) and math.isfinite(y) and math.isfinite(yaw):
+            self.pose = (float(x), float(y), float(yaw), now)
+
+    def goal_offset(self, now: float) -> tuple[float, float] | None:
+        """(distance m, bearing rad counter-clockwise from the heading) to the goal of this drive; None when the
+        robot's pose is old or the goal was given before the last arrival (it is the previous one)."""
+        if self.goal is None or self.pose is None or not 0 <= now - self.pose[3] <= self.pose_stale_s:
+            return None
+        if self.last_done and self.goal[2] <= self.last_done['at']:
+            return None
+        dx, dy = self.goal[0] - self.pose[0], self.goal[1] - self.pose[1]
+        bearing = math.atan2(dy, dx) - self.pose[2]
+        return math.hypot(dx, dy), math.atan2(math.sin(bearing), math.cos(bearing))
 
     def _state_phrase(self, group: str, label: str, step: str) -> str:
         key = f'{group}.{label}'
@@ -682,13 +915,21 @@ class StateTracker:
         if not self.planning_fresh(now):
             return self.phrase('doing.lost') or self.phrase('doing.none')
         if self.label == 'Fault':
-            return fault_situation(self.fault_reason, self.style, self.lines)
+            return self.fault_sentence(self.fault_reason, self.label_since + self.fault_reason_wait_s)
         situation = self.current_situation(now)
         if situation and self.label.startswith('Run.'):
             text = self.phrase('situation.' + situation)
             if text:
-                return text
-        return self._state_phrase('doing', self.label, self.step_name())
+                where = self.obstacle_sentence(now) if situation in ('blocked', 'replan', 'no_route') else ''
+                return text + (' ' + where if where else '')
+        text = self._state_phrase('doing', self.label, self.step_name())
+        if (self.variety and self.label == 'Run.Execute' and self.step_known() and
+                self.diag.get('step', '') in _variety.DRIVE_STEPS):
+            offset = self.goal_offset(now)
+            left = _variety.left_line(self.style, offset[0]) if offset else ''
+            if left:
+                text += ' ' + left
+        return text
 
     def current_template(self, now: float) -> str:
         """What I am doing, plus what my sensors see (no GPT)."""
@@ -808,6 +1049,7 @@ class StateTracker:
             name = f'{TOPIC_KO[topic]} ({topic})' if topic in TOPIC_KO else topic
             shown = '예' if value == 'true' else value
             lines.append(f'- {name}: {shown}' + (f', {ago(now - at)}' if event else ''))
+        lines += self.signals.lines(now, ago)
         return '\n'.join(lines)
 
     def memory_text(self, now: float, limit: int = 12) -> str:

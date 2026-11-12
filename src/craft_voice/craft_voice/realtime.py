@@ -23,6 +23,7 @@ import time
 import urllib.parse
 
 from .audio import pcm_to_wav
+from .clock import NOT_SET, clock_unset
 
 GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
 REALTIME_PREFIXES = ('gpt-realtime', 'gpt-live')  # tts_model names served by the Realtime API
@@ -46,6 +47,8 @@ class WebSocket:
         secure = parts.scheme == 'wss'
         host = parts.hostname or ''
         port = parts.port or (443 if secure else 80)
+        if secure and clock_unset():  # the certificate would be refused as not yet valid
+            raise RealtimeError(NOT_SET)
         raw = socket.create_connection((host, port), timeout=timeout)
         try:
             raw.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)

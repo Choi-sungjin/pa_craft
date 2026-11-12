@@ -1,0 +1,33 @@
+#!/bin/sh
+# Put the system clock back after the battery-less clock chip reset it.
+#
+# On power-on systemd-timesyncd restores the clock to the last time it saved, and a moment later the kernel
+# reads the clock chip (rtc0, no battery) and sets 1970 over it. Certificates are then "not yet valid" and ROS
+# stamps, logs and bags are dated 1970 until the network time arrives, about a minute after power-on.
+# This looks every half second for a minute: when the clock is earlier than the saved time it is set to the
+# saved time. It only ever moves the clock forward, and stops once the network time has arrived.
+#
+#   CRAFT_CLOCK_STAMP    file whose modification time is the saved time (systemd-timesyncd's)
+#   CRAFT_CLOCK_SYNCED   file that exists once the network time has arrived
+#   CRAFT_CLOCK_SECONDS  how long to keep looking (60)
+#   CRAFT_CLOCK_DRY=1    say what would be set, set nothing (for trying it without root)
+STAMP="${CRAFT_CLOCK_STAMP:-/var/lib/systemd/timesync/clock}"
+SYNCED="${CRAFT_CLOCK_SYNCED:-/run/systemd/timesync/synchronized}"
+LOOKS=$(( ${CRAFT_CLOCK_SECONDS:-60} * 2 ))
+
+i=0
+while [ "$i" -lt "$LOOKS" ]; do
+  [ -e "$SYNCED" ] && exit 0
+  saved="$(stat -c %Y "$STAMP" 2>/dev/null || echo 0)"
+  now="$(date +%s)"
+  if [ "$now" -lt "$saved" ]; then
+    if [ "${CRAFT_CLOCK_DRY:-0}" = "1" ]; then
+      echo "craft-clock-restore: would set the clock from $(date -d "@$now" '+%F %T') to $(date -d "@$saved" '+%F %T')"
+      exit 0
+    fi
+    date -s "@$saved" >/dev/null && echo "craft-clock-restore: clock was $(date -d "@$now" '+%F %T'), set to the saved time $(date '+%F %T')"
+  fi
+  sleep 0.5
+  i=$((i + 1))
+done
+exit 0

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 
 from .audio import SpeechCache, read_clip, split_command
+from .clock import clock_unset
 from .robot_state import load_phrases, parse_list, parse_mapping
 
 DEFAULT_MIC_COMMAND = 'pw-record --rate 16000 --channels 1 --format s16 -'   # raw 16 kHz mono PCM on stdout
@@ -47,8 +48,10 @@ def load_reactions(text: str, log) -> dict:
 def make_listener(narrator, backend, log, mic_command: str = DEFAULT_MIC_COMMAND, wake_words: str = '크래프트',
                   language: str = 'ko', stt_prompt: str = '', follow_up_s: float = 6.0, tail_s: float = 0.6,
                   max_stt_per_min: int = 20, tolerance: int = 2, min_rms: float = 150.0, loud_ratio: float = 2.5,
-                  on_heard=None):
-    """Microphone listener that calls narrator.wake(question); None when it cannot work (no key, no command)."""
+                  on_heard=None, words=None):
+    """Microphone listener that calls narrator.wake(question); None when it cannot work (no key, no command).
+
+    words: 반응 단어 {'젯슨': ('젯슨', '제슨', ...)} -> narrator.word('젯슨') (녹음 재생)."""
     from .listen import Listener, Microphone, Segmenter, webrtc_vad
     command = split_command(mic_command)
     if backend is None or not hasattr(backend, 'transcribe'):
@@ -71,4 +74,6 @@ def make_listener(narrator, backend, log, mic_command: str = DEFAULT_MIC_COMMAND
                     names=tuple(parse_list(wake_words)) or ('크래프트',),
                     segmenter=Segmenter(vad=vad, min_rms=min_rms, loud_ratio=loud_ratio),
                     is_speaking=lambda: narrator.audible, tail_s=tail_s, follow_up_s=follow_up_s,
-                    max_stt_per_min=max_stt_per_min, tolerance=tolerance, logger=log)
+                    max_stt_per_min=max_stt_per_min, tolerance=tolerance, logger=log,
+                    ready=lambda: not clock_unset(), words=words or {},
+                    on_word=narrator.word if words else None)

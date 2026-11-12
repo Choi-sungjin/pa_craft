@@ -8,21 +8,37 @@ voice_node:
     use_image: false
     state_mode: template          # state changes in fixed words, at once (GPT thinks when asked and when it notices)
     announce_states: Ready,Run.Execute,Run.Complete,Run.Stopping,Fault
+    odom_topic: /control/wheel/odom   # wheel motion; no inferred standstill from missing data
     state_cooldown_s: 8.0
     narrate_period_s: 0.0         # no periodic narration: it speaks when something changes or when called
     style: cute
+    menu_file: ~/craft-voice/config/menu.yaml   # "크래프트, 오늘 점심 메뉴 뭐야?" (replace the file every week)
+    variety: true                 # further wordings in turn; drives said with distance, count, time
     persona: 귀엽고 발랄한 로봇 친구처럼 짧은 반말 한 문장으로 말해. 이름은 크래프트야. 미션 소개는 하지 마.
     max_chars: 60
     tts_model: gpt-realtime-2.1
-    tts_voice: marin
-    tts_instructions: 귀엽고 발랄한 로봇 친구 목소리로, 밝고 살짝 신난 억양으로 짧고 또렷하게 말해. 오류와 멈춤은 차분하게 말해.
-    player_command: pw-play {file}
-    stream_player_command: aplay -q -t raw -f S16_LE -r {rate} -c 1 -   # ALSA default = PipeWire on the Jetson
+    tts_voice: cedar
+    # 2026-11-13 사용자 선택(샘플 B): 외국인 억양처럼 들려서 한국 사람 발음·억양을 지시. 바꾸면 캐시 전체를 다시 합성하고
+    # SCV 원본 음성은 ~/craft-voice-sandbox/recordings/scv_original/scv_recache.py 로 다시 넣어야 한다.
+    tts_instructions: 한국에서 나고 자란 사람처럼 자연스러운 서울 표준어 발음과 억양으로 말해. 외국어 억양이나 영어식 끝 올림 없이, 받침과 된소리를 또렷하게. 귀엽고 발랄한 로봇 친구처럼 밝게, 짧고 또렷하게 말해. 오류와 멈춤은 차분하게 말해.
+    player_command: pw-play --target bluez_output.2C_85_ED_C6_6F_90.1 --volume 1.0 {file}
+    stream_player_command: pw-play --target bluez_output.2C_85_ED_C6_6F_90.1 --volume 1.0 --rate {rate} --channels 1 --format s16 -
     listen: true
-    mic_command: pw-record --rate 16000 --channels 1 --format s16 -
+    mic_command: pw-record --target bluez_input.2C_85_ED_C6_6F_90.0 --rate 16000 --channels 1 --format s16 -
     wake_words: 크래프트
+    # "젯슨"이라고 하면 대화 대신 "예압? 따따라라따라 따라라라따라~" 녹음(스타1 시즈탱크 원본, 영상 rs7MkPOeCRc 41.03~44.24초, 오차 없이 별칭과 맞을 때만).
+    word_reactions: "젯슨|제슨|제트슨|젯선|jetson=~/craft-voice-sandbox/recordings/jetson_yeap.wav"
+    # 블루투스 통화 마이크는 목소리가 작고 흐려서, 힌트 없이는 글자 변환이 비었다(2026-11-13 시험: 5번 중 0).
+    # gpt-transcribe + 힌트 "크래프트": 5번 중 3, 잡음 10개 오인식 0. gpt-4o-mini-transcribe 는 힌트를 주면 잡음도
+    # 전부 "크래프트"로 적어서(10개 중 10) 예비 목록에서 뺐다.
+    stt_model: "gpt-transcribe,whisper-1"
+    stt_prompt: 크래프트
     follow_up_s: 6.0
     notice: true
+    # 혼잣말(NPC처럼): 일하지 않고 서 있을 때 평균 5분(±40%)마다 정해 둔 한마디. 0 = 끔. 문장은 craft_voice/chatter.py.
+    chatter_period_s: 300.0
+    # rerouted: another path was found after an obstacle and the drive goes on at once ("나이사~").
+    announce_situations: replan,blocked,rerouted
     # Recordings made earlier (craft-voice-sandbox): the path search reaction, the step cheer, the finale.
     # wake = the answer to the name alone ("짜스!").
-    reactions: "wake=~/craft-voice-sandbox/recordings/jjasseu.wav,replan=~/craft-voice-sandbox/recordings/replanning.wav,step_done=~/craft-voice-sandbox/recordings/jjasseu.wav,run_done=~/craft-voice-sandbox/recordings/mission_complete.angry.wav,idle=~/craft-voice-sandbox/recordings/mission_complete.angry.wav"
+    reactions: "wake=~/craft-voice-sandbox/recordings/jjasseu.wav,replan=~/craft-voice-sandbox/recordings/replanning.cedar.wav,rerouted=~/craft-voice-sandbox/recordings/naisa.wav,step_done=~/craft-voice-sandbox/recordings/jjasseu.wav,run_done=~/craft-voice-sandbox/recordings/mission_complete.angry.wav,idle=~/craft-voice-sandbox/recordings/mission_complete.angry.wav"

@@ -25,6 +25,11 @@ voice_node:
     # comma separated std_msgs/String topics, context only (box_phase: lidar_dock, camera_dock, ...)
     context_topics: /perception/localization/state,/planning/box_phase,/planning/box_status
     # std_msgs/String topics that are events (last command, mission, box to approach): kept 30 min, told with their age
+    menu_file: ""                 # cafeteria menu file (config/menu.yaml): menu questions are answered from it, not by GPT
+    menu_items: 4                 # dishes named in an answer ("전부 알려 줘" names all)
+    variety: false                # true: further wordings in turn, drives said with distance / count / time (variety.py)
+    goal_topic: /planning/target_base_pose   # geometry_msgs/PoseStamped, map frame (read when variety is true)
+    pose_topic: /planning/odom               # nav_msgs/Odometry, map frame
     event_topics: /planning/command,/planning/mission,/planning/approach_box,/planning/approach_box_near
     flag_topics: /planning/hold,/control/gripper_grasped     # std_msgs/Bool, context only
     # What perception sees, told to GPT next to the camera picture ("" = do not subscribe)

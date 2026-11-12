@@ -279,3 +279,30 @@ def test_threads_run_a_real_command_and_stop(tmp_path):
     started = time.monotonic()
     lst.close()
     assert woke == ['지금 뭐 해'] and time.monotonic() - started < 4.0
+
+
+JETSON = {'젯슨': ('젯슨', '제슨', '제트슨', '젯선', 'jetson')}
+
+
+def test_a_reaction_word_plays_its_recording_not_a_conversation():
+    words = []
+    lst, heard, clock, _ = listener(['젯슨!', 'Jetson', '레슨 몇 시야?', '잭슨', '크래프트, 젯슨이 뭐야?'],
+                                    words=JETSON, on_word=words.append)
+    for _ in range(5):
+        say(lst, clock)
+    assert words == ['젯슨', '젯슨']                       # 레슨, 잭슨: not the word
+    assert heard['wake'] == ['젯슨이 뭐야']                  # called by name: a conversation, as before
+    assert lst.stats['words'] == 2
+
+
+def test_the_word_reaction_is_spoken_as_its_recording(tmp_path):
+    import wave
+    from test_narrator import make, run
+    clip = tmp_path / 'yeap.wav'
+    with wave.open(str(clip), 'wb') as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000); w.writeframes(b'\x00\x01' * 2400)
+    narrator, texts = make(reactions={'word.젯슨': str(clip)})
+    narrator.word('젯슨')
+    narrator.word('없는단어')                                # no recording: nothing (a warning)
+    run(narrator)
+    assert texts == [('ack', '젯슨')] and len(narrator.player.played) == 1

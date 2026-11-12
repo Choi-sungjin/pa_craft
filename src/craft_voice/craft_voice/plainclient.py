@@ -19,6 +19,8 @@ import urllib.error
 import urllib.request
 import uuid
 
+from .clock import NOT_SET, clock_unset
+
 DEFAULT_BASE_URL = 'https://api.openai.com/v1'
 
 
@@ -134,6 +136,8 @@ class PlainClient:
         headers = {'Content-Type': content_type, 'User-Agent': 'craft-voice'}
         if self.api_key:
             headers['Authorization'] = 'Bearer ' + self.api_key
+        if clock_unset():  # the certificate would be refused as not yet valid
+            raise ApiError(None, NOT_SET)
         attempt = 0
         while True:
             request = urllib.request.Request(self.base_url + path, data=body, headers=headers, method='POST')

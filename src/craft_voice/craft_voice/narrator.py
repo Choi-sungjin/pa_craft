@@ -30,8 +30,10 @@ from collections import deque
 from dataclasses import dataclass, field
 
 from .audio import pcm_to_wav, read_clip
+from .chatter import Chatter
 from .frames import encode_jpeg
 from .robot_state import STATE_KO, Notice, StateEvent, StateTracker, is_status_question
+from .signals import REMARKS
 
 # speaking order; 'ack' (the "응!" when called by name) is older than its answer, so it goes first
 PRIORITY = {'scene': 0, 'thought': 0, 'state': 1, 'status': 2, 'ask': 2, 'say': 2, 'ack': 2, 'fault': 3}
@@ -75,6 +77,10 @@ class NarratorConfig:
     # ---- things of its own ----
     notice: bool = False                  # remarks on what it notices (a long compute, a blocked path, lost state)
     thought_max_age_s: float = 10.0
+    # 혼잣말(chatter.py): 작업 중이 아니고 바퀴가 서 있고 chatter_quiet_s 동안 조용했을 때, 평균 이 간격으로 한마디.
+    chatter_period_s: float = 0.0         # 0 = off
+    chatter_jitter: float = 0.4           # 간격을 이 비율만큼 들쭉날쭉하게
+    chatter_quiet_s: float = 60.0
     # event -> recorded WAV played instead of a spoken sentence: replan, blocked, step_done, run_done, done,
     # ready, wake (the name alone), ack (the name with a question), idle (and any notice key).
     # A missing or broken file falls back to the sentence.
@@ -135,7 +141,8 @@ def clean_text(text: str, max_chars: int) -> str:
 class Narrator:
     def __init__(self, config: NarratorConfig, tracker: StateTracker, backend=None, player=None,
                  frame_provider=None, fallback_tts=None, on_text=None, on_speaking=None, logger=None,
-                 clock=time.monotonic, start: bool = True, stream_player=None, speech_cache=None):
+                 clock=time.monotonic, start: bool = True, stream_player=None, speech_cache=None,
+                 quick_answer=None):
         self.config = config
         self.tracker = tracker
         self.backend = backend
@@ -154,6 +161,10 @@ class Narrator:
             self._frame_takes_time = False
         self.fallback_tts = fallback_tts
         self.speech_cache = speech_cache   # fixed sentences already synthesized: at once, also offline
+        # quick_answer(question, follow) -> sentence | None: answers that come from a file, not from GPT
+        # (the cafeteria menu). follow: said right after such an answer, without the name.
+        self.quick_answer = quick_answer
+        self._quick_at = -math.inf
         self.audible = False               # sound is coming out of the speaker (the microphone ignores it)
         self._dialogue: deque = deque(maxlen=6)   # (time, question, answer)
         self.on_text = on_text
@@ -178,6 +189,8 @@ class Narrator:
         self._last_activity = -math.inf
         self._last_scene_at = -math.inf
         self._closed = False
+        self.chatter = Chatter(self.config.chatter_period_s, style=self.tracker.style,
+                               jitter=self.config.chatter_jitter)
         self._threads = []
         if start:
             for target, name in ((self._think_loop, 'voice-think'), (self._speak_loop, 'voice-speak')):
@@ -230,18 +243,86 @@ class Narrator:
         with self._lock:
             self.tracker.update_tags(ids, self.clock())
 
+    def goal(self, x: float, y: float):
+        with self._lock:
+            self.tracker.update_goal(x, y, self.clock())
+
+    def pose(self, x: float, y: float, yaw: float):
+        with self._lock:
+            self.tracker.update_pose(x, y, yaw, self.clock())
+
     def context(self, topic: str, value: str):
         with self._lock:
             self.tracker.update_context(topic, value, self.clock())
 
+    def task_result(self, task_id: int, status: int, controllers, reason: str):
+        with self._lock:
+            self.tracker.update_task_result(task_id, status, controllers, reason, self.clock())
+
+    def task_command(self, task_id: int, operation: int, kind: int, duration_s: float, clock_slot: int, close: bool):
+        with self._lock:
+            self.tracker.update_task_command(task_id, operation, kind, duration_s, clock_slot, close, self.clock())
+
+    def barcode(self, text: str, quiet: bool = False):
+        with self._lock:
+            self.tracker.update_barcode(text, self.clock(), quiet)
+
+    def traffic_light(self, red: int, yellow: int, green: int, blinks: int, complete: bool, valid: bool,
+                      discarded: int, quiet: bool = False):
+        with self._lock:
+            self.tracker.update_traffic_light(red, yellow, green, blinks, complete, valid, discarded, self.clock(),
+                                              quiet)
+
+    def obstacles(self, points, in_map: bool = True):
+        with self._lock:
+            self.tracker.update_obstacles(points, self.clock(), in_map)
+
+    def box(self, valid: bool, source: str, reason: str, gap_m: float, lateral_m: float, yaw_rad: float):
+        with self._lock:
+            self.tracker.update_box(valid, source, reason, gap_m, lateral_m, yaw_rad, self.clock())
+
     def ask(self, question: str):
         question = question.strip()
-        if question:
+        if question and not self._answer_quickly(question):
             self._submit(Job('ask', self.clock(), text=question))
+
+    def _answer_quickly(self, question: str, follow: bool = False) -> bool:
+        """Said from a file (the menu) instead of asking GPT. False: not that kind of question."""
+        if self.quick_answer is None:
+            return False
+        try:
+            text = self.quick_answer(question, follow)
+        except Exception as error:  # a broken file or parser must not lose the question: GPT answers
+            self.log.error(f'quick answer failed: {type(error).__name__}: {error}')
+            return False
+        if not text:
+            return False
+        now = self.clock()
+        with self._lock:
+            if self._closed or self.muted:
+                return True
+            self._quick_at = now
+            self._enqueue(Utterance('ask', text, now, self.tracker.generation, fixed=True, question=question))
+        return True
+
+    def word(self, key: str):
+        """반응 단어를 들었다("젯슨"): 그 단어의 녹음(reactions 의 'word.<단어>')을 바로 튼다. 대화는 아니다."""
+        now = self.clock()
+        with self._lock:
+            if self._closed or self.muted:
+                return
+            clip = self.config.reactions.get('word.' + key, '')
+            if not clip:
+                self.log.warning(f'heard {key!r} but no recording is set (reactions word.{key}=...)')
+                return
+            self._enqueue(Utterance('ack', key, now, self.tracker.generation, fixed=True, clip=clip,
+                                    label='word.' + key))
 
     def wake(self, question: str = ''):
         """Called by name (the microphone heard "크래프트 ..."). '' = the name alone: say what I am doing."""
         question = question.strip()
+        if question and self._answer_quickly(question):
+            return
         now = self.clock()
         with self._lock:
             if self._closed or self.muted:
@@ -274,6 +355,8 @@ class Narrator:
         """A sentence heard right after an answer, without the name. Answered only if GPT takes it as
         meant for the robot (other people's talk gets no answer)."""
         text = text.strip()
+        if text and self.clock() - self._quick_at <= 30.0 and self._answer_quickly(text, follow=True):
+            return  # "내일은?" right after a menu answer
         if text and self.backend is not None:
             self._submit(Job('ask', self.clock(), text=text, voice=True, followup=True))
 
@@ -341,6 +424,24 @@ class Narrator:
                                             self.tracker.generation))
                 else:
                     self._submit(Job('scene', now))
+            self._chatter(now, idle, label)
+
+    def _chatter(self, now: float, idle: bool, label: str | None):
+        """Lock held. 혼잣말: 일하는 중, 움직이는 중, 누가 말했거나 로봇이 말한 지 얼마 안 됐을 때는 미룬다."""
+        chatter = self.chatter
+        if not chatter.enabled or self.muted:
+            return
+        chatter.style = self.tracker.style
+        motion = self.tracker.motion
+        moving = motion is not None and now - motion[2] <= 1.0 and (abs(motion[0]) > 0.006 or abs(motion[1]) > 0.04)
+        working = bool(label) and label.startswith('Run.')
+        if working or moving or not idle or now - self._last_activity < self.config.chatter_quiet_s:
+            if working or moving:
+                chatter.postpone(now)   # 일이 끝나고 나서 한 간격을 다 채운 뒤에
+            return
+        if chatter.due(now):
+            line = chatter.next_line(now)
+            self._enqueue(Utterance('thought', line, now, self.tracker.generation, fixed=True))
 
     def close(self):
         with self._lock:
@@ -382,12 +483,15 @@ class Narrator:
         if self.muted or self._closed:
             return
         clip = self.config.reactions.get(noticed.key, '')
-        fixed = self.tracker.phrase('notice.' + noticed.key)
+        # A remark's sentence was chosen (and filled in, e.g. the light's counts) when it was noticed.
+        fixed = noticed.facts if noticed.key in REMARKS else self.tracker.phrase('notice.' + noticed.key)
         if clip or self.backend is None or self.config.state_mode == 'template' or \
-                noticed.key in ('state_lost', 'state_back'):
+                noticed.key in ('state_lost', 'state_back') or noticed.key in REMARKS or \
+                noticed.key.startswith('wheel_stop_'):
             if clip or fixed:
                 self._enqueue(Utterance('thought', fixed or noticed.key, now, noticed.generation, fixed=True,
-                                        clip=clip))
+                                        clip=clip, label=(f'{noticed.key}:{noticed.episode}'
+                                            if noticed.key.startswith('wheel_stop_') else '')))
         else:
             self._submit(Job('thought', now, notice=noticed))
 
@@ -695,6 +799,8 @@ class Narrator:
         if u.kind == 'scene' and not after_tts and now - u.created > cfg.scene_max_age_s:
             return 'too late'
         if u.kind == 'thought':
+            if u.label.startswith('wheel_stop_') and self.tracker.wheel_stop_label(now) != u.label:
+                return 'stop ended or reason changed'
             if self.tracker.generation != u.generation:
                 return 'state moved on'  # what it noticed is over
             if not after_tts and now - u.created > cfg.thought_max_age_s:
@@ -741,6 +847,11 @@ class Narrator:
     def _drop(self, u: Utterance, why: str):
         """Lock held. A stale status answer is replaced once by the current state's template."""
         self.stats['dropped'] += 1
+        if (u.label.startswith('wheel_stop_') and
+                u.label.rsplit(':', 1)[-1] == str(self.tracker.wheel_stop.epoch) and
+                self.tracker.wheel_stop_label(self.clock())):
+            # A reason changed while queued: let the next tick describe the current reason.
+            self.tracker.wheel_stop.notified = False
         self.log.debug(f'dropped {u.kind} ({why}): {u.text}')
         if (u.kind == 'status' or (u.kind == 'scene' and u.requested)) and not u.retried and \
                 not u.cancelled and not self._closed and not self.muted:

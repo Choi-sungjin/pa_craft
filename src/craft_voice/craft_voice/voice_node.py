@@ -24,15 +24,19 @@ from fixed templates through fallback_tts_command (or only published).
 from __future__ import annotations
 
 import math
+import time
 
 import rclpy
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from rclpy.node import Node
+from rclpy.type_support import check_for_type_support
+from rosidl_generator_py.import_type_support_impl import UnsupportedTypeSupport
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from std_msgs.msg import Bool, String, UInt64MultiArray
 
 from .audio import CommandPlayer, CommandTts, StreamPlayer, split_command, stream_command_for
 from .camera import CameraFrames, stamp_ns
+from .clock import clock_unset
 from .frames import ShmFrameReader
 from .gpt import DEFAULT_STT_MODEL, DEFAULT_TTS_MODEL, DEFAULT_TTS_VOICE
 from .mission import MISSION_CONTEXT, STEP_NAMES
@@ -62,7 +66,16 @@ PARAMETERS = {
     'context_topics': '/perception/localization/state,/planning/box_phase,/planning/box_status',
     # std_msgs/String topics that are events (the last command, the mission): kept for half an hour, with their age
     'event_topics': '/planning/command,/planning/mission,/planning/approach_box,/planning/approach_box_near',
-    'flag_topics': '/planning/hold,/control/gripper_grasped',   # std_msgs/Bool, context only
+    # std_msgs/Bool, context; a grasp (gripper_grasped false -> true) is also said
+    'flag_topics': '/planning/hold,/control/planning_held,/control/gripper_grasped',
+    # ---- further signals ('' = not read): facts for answers, a few said at once (signals.py) ----
+    'task_result_topic': '/control/task_result',            # craft_interfaces/TaskResult: what control did with the task
+    'task_command_topic': '/planning/task_command',         # craft_interfaces/TaskCommand: what planning commanded
+    'barcode_topic': '/perception/vision/uppercam/barcode',  # std_msgs/String, latched: "바코드 읽었어!"
+    # craft_perception/TrafficLight, latched: "신호등 깜빡인다!", "신호등 다 셌어! 빨강 n번, ..."
+    'traffic_light_topic': '/perception/vision/uppercam/traffic_light',
+    'obstacles_topic': '/perception/lidar/obstacle',        # geometry_msgs/PoseArray: the nearest obstacle
+    'box_topic': '/perception/box/observation',             # craft_interfaces/BoxObservation: "상자 찾았다!"
     'announce_states': 'Ready,Run.Execute,Run.Complete,Run.Stopping,Fault',
     'step_names': STEP_NAMES,
     'mission_context': MISSION_CONTEXT,
@@ -104,15 +117,28 @@ PARAMETERS = {
     'fallback_tts_command': '',
     # ---- persona, reactions, memory ----
     'style': 'polite',                      # polite | cute (short friendly 반말)
+    'variety': False,                       # further wordings in turn, drives said with distance / count / time
+    'menu_file': '',                        # cafeteria menu (config/menu.yaml): "오늘 점심 메뉴 뭐야?" ('' = off)
+    'menu_items': 4,                        # dishes named in an answer
+    'goal_topic': '/planning/target_base_pose',   # geometry_msgs/PoseStamped, map frame ('' = not read)
+    'pose_topic': '/planning/odom',               # nav_msgs/Odometry, map frame ('' = not read)
     'phrases_file': '',                     # JSON {key: sentence} replacing single fixed sentences
-    'announce_situations': 'replan,blocked',   # diagnostics waiting situations said at once ('clear' too if wanted)
+    'announce_situations': 'replan,blocked',   # diagnostics waiting situations said at once ('clear', 'rerouted' too if wanted)
     'notice': True,                         # remarks on what it notices by itself
+    # 혼잣말(chatter.py): 일하지 않고 서 있을 때 평균 이 간격으로 정해 둔 한마디(0 = 끔), 간격 흔들림 비율,
+    # 마지막으로 말하거나 들은 뒤 이만큼은 조용히
+    'chatter_period_s': 0.0,
+    'chatter_jitter': 0.4,
+    'chatter_quiet_s': 60.0,
     'reactions': '',                        # recordings: "replan=/p/a.wav,step_done=/p/b.wav,run_done=/p/c.wav,idle=..."
     'speech_cache_dir': DEFAULT_CACHE_DIR,  # fixed sentences are synthesized once and kept ('' = off)
     # ---- microphone: called by name ----
     'listen': False,
     'mic_command': DEFAULT_MIC_COMMAND,
     'wake_words': '크래프트',
+    # 반응 단어: 들으면 대화 대신 녹음을 바로 튼다. "단어|별칭|별칭=녹음.wav;단어2=..."
+    # 예) "젯슨|제슨|제트슨|jetson=~/craft-voice-sandbox/recordings/jetson_yeap.wav"
+    'word_reactions': '',
     'wake_tolerance': 2,
     'wake_mode': 'think',                   # the name alone: think (GPT) | template (fixed words)
     'wake_ack': True,
@@ -142,7 +168,8 @@ class VoiceNode(Node):
                                fault_reason_wait_s=p['fault_reason_wait_s'],
                                step_names=parse_mapping(p['step_names']), style=p['style'],
                                lines=load_lines(p['phrases_file'], log),
-                               announce_situations=tuple(parse_list(p['announce_situations'])))
+                               announce_situations=tuple(parse_list(p['announce_situations'])),
+                               variety=p['variety'])
         config = NarratorConfig(
             language=p['language'], persona=p['persona'], camera_description=p['camera_description'],
             mission_context=p['mission_context'],
@@ -155,7 +182,9 @@ class VoiceNode(Node):
             gpt_state_deadline_s=p['gpt_state_deadline_s'], tts_deadline_s=p['tts_deadline_s'],
             gpt_narrate_deadline_s=p['gpt_narrate_deadline_s'], gpt_ask_deadline_s=p['gpt_ask_deadline_s'],
             wake_mode=p['wake_mode'], wake_ack=p['wake_ack'], gpt_voice_deadline_s=p['gpt_voice_deadline_s'],
-            notice=p['notice'], reactions=load_reactions(p['reactions'], log))
+            notice=p['notice'], reactions=load_reactions(p['reactions'], log),
+            chatter_period_s=p['chatter_period_s'], chatter_jitter=p['chatter_jitter'],
+            chatter_quiet_s=p['chatter_quiet_s'])
         if p['state_mode'] not in ('gpt', 'template'):
             raise ValueError("state_mode must be 'gpt' or 'template'")
 
@@ -198,7 +227,8 @@ class VoiceNode(Node):
             frame_provider=self._frames.pick if config.use_image and self._frames else None,
             fallback_tts=CommandTts(fallback) if fallback else None,
             on_text=self._publish_text, on_speaking=self._publish_speaking, logger=log,
-            speech_cache=make_cache(backend, p['speech_cache_dir']))
+            speech_cache=make_cache(backend, p['speech_cache_dir']),
+            quick_answer=self._menu(p))
         self.listener = None
         if p['listen']:
             self.listener = make_listener(
@@ -206,7 +236,8 @@ class VoiceNode(Node):
                 language=p['stt_language'], stt_prompt=p['stt_prompt'], follow_up_s=p['follow_up_s'],
                 tail_s=p['listen_tail_s'], max_stt_per_min=p['max_stt_per_min'], tolerance=p['wake_tolerance'],
                 min_rms=p['vad_min_rms'], loud_ratio=p['vad_loud_ratio'],
-                on_heard=lambda question: self._heard_pub.publish(String(data=question)))
+                on_heard=lambda question: self._heard_pub.publish(String(data=question)),
+                words=self._word_reactions(p['word_reactions'], log))
             if self.listener is not None:
                 self.listener.start()
 
@@ -217,10 +248,11 @@ class VoiceNode(Node):
         self.create_subscription(DiagnosticArray, p['planning_diagnostics_topic'], self._on_diagnostics, 10)
         try:
             from craft_interfaces.msg import ControlStatus
+            check_for_type_support(ControlStatus)
             self.create_subscription(ControlStatus, p['control_status_topic'], lambda m: self.narrator.control_status(
                 m.ready, m.fault, m.held, m.stopped, m.reason), 10)
-        except ImportError:
-            log.warning('craft_interfaces not found: control status is left out of the context')
+        except (ImportError, UnsupportedTypeSupport):
+            log.warning('craft_interfaces type support unavailable: control status is left out of the context')
         events = parse_list(p['event_topics'])
         self.narrator.tracker.event_topics = tuple(events)
         for topic in dict.fromkeys(parse_list(p['context_topics']) + events):  # volatile: latched and plain publishers
@@ -229,6 +261,9 @@ class VoiceNode(Node):
             self.create_subscription(Bool, topic, lambda m, t=topic: self.narrator.context(
                 t, 'true' if m.data else 'false'), 10)
         self._subscribe_perception(p)
+        if p['variety'] or p['obstacles_topic']:
+            self._subscribe_goal(p)   # the obstacles are in the map frame: the robot's pose places them
+        self._subscribe_signals(p, latched)
         self.create_subscription(String, '/voice/ask', lambda m: self.narrator.ask(m.data), 10)
         self.create_subscription(String, '/voice/say', lambda m: self.narrator.say(m.data), 10)
         self.create_subscription(String, '/voice/command', self._on_command, 10)
@@ -239,6 +274,18 @@ class VoiceNode(Node):
                  f"narrate every {p['narrate_period_s']}s player={' '.join(player) or 'none'} "
                  f"stream={' '.join(stream) or 'off'} "
                  f"microphone={'on (' + p['wake_words'] + ')' if self.listener else 'off'}")
+        self._clock_unset = clock_unset()
+        if self._clock_unset:
+            log.warning('the system clock is not set yet (no clock battery): fixed sentences are spoken, '
+                        'the microphone and GPT wait until it is set')
+
+    def _menu(self, p):
+        if not p['menu_file'].strip():
+            return None
+        from .menu import Menu
+        menu = Menu(p['menu_file'], style=p['style'], items=p['menu_items'], logger=self.get_logger())
+        self.get_logger().info(f"menu: {len(menu.days())} days from {menu.path}")
+        return menu.answer
 
     # ---- what perception sees ---------------------------------------------------------------
     def _subscribe_perception(self, p):
@@ -246,8 +293,7 @@ class VoiceNode(Node):
         if p['odom_topic']:
             try:
                 from nav_msgs.msg import Odometry
-                self.create_subscription(Odometry, p['odom_topic'], lambda m: self.narrator.motion(
-                    m.twist.twist.linear.x, m.twist.twist.angular.z), qos_profile_sensor_data)
+                self.create_subscription(Odometry, p['odom_topic'], self._on_odometry, qos_profile_sensor_data)
             except ImportError:
                 log.warning('nav_msgs not found: motion is left out')
         if p['tags_topic']:
@@ -258,8 +304,12 @@ class VoiceNode(Node):
             return
         try:
             from craft_perception.msg import DetectionArray, PuckObservationArray
-        except ImportError:
-            log.warning('craft_perception messages not found: YOLO objects and pucks are left out')
+            if p['objects_topic']:
+                check_for_type_support(DetectionArray)
+            if p['pucks_topic']:
+                check_for_type_support(PuckObservationArray)
+        except (ImportError, UnsupportedTypeSupport):
+            log.warning('craft_perception type support unavailable: YOLO objects and pucks are left out')
             return
         if p['objects_topic']:
             def on_objects(m, topic=p['objects_topic']):
@@ -273,6 +323,103 @@ class VoiceNode(Node):
                 self.narrator.pucks([(o.standing, math.sqrt(o.center.x ** 2 + o.center.y ** 2 + o.center.z ** 2))
                                      if o.axis_valid else (None, None) for o in m.observations])
             self.create_subscription(PuckObservationArray, p['pucks_topic'], on_pucks, qos_profile_sensor_data)
+
+    def _word_reactions(self, spec: str, log) -> dict:
+        """'젯슨|제슨|jetson=~/a.wav;단어2=~/b.wav' -> {'젯슨': ('젯슨', '제슨', 'jetson')}, 녹음은 reactions 의
+        'word.젯슨' 으로. 읽을 수 없는 녹음의 단어는 빼고 경고한다."""
+        words = {}
+        for entry in (spec or '').split(';'):
+            names, _, path = entry.partition('=')
+            aliases = tuple(a.strip() for a in names.split('|') if a.strip())
+            if not aliases or not path.strip():
+                continue
+            loaded = load_reactions(f'word.{aliases[0]}={path.strip()}', log)
+            if loaded:
+                self.narrator.config.reactions.update(loaded)
+                words[aliases[0]] = aliases
+                log.info(f'word {aliases[0]!r} ({", ".join(aliases)}) -> {path.strip()}')
+        return words
+
+    def _subscribe_signals(self, p, latched):
+        """Control's task, planning's command, the barcode, the LiDAR obstacles, the box observation."""
+        log = self.get_logger()
+        try:
+            from craft_interfaces.msg import BoxObservation, TaskCommand, TaskResult
+            for kind in (BoxObservation, TaskCommand, TaskResult):
+                check_for_type_support(kind)
+        except (ImportError, UnsupportedTypeSupport):
+            log.warning('craft_interfaces type support unavailable: task result, task command and box are left out')
+        else:
+            if p['task_result_topic']:
+                last = {}
+
+                def on_result(m):  # every control cycle: only a change, or one a second, goes further
+                    key, now = (m.task_id, m.status, bytes(m.controllers), m.reason), time.monotonic()
+                    if key != last.get('key') or now - last.get('at', 0.0) >= 1.0:
+                        last.update(key=key, at=now)
+                        self.narrator.task_result(m.task_id, m.status, list(m.controllers), m.reason)
+                self.create_subscription(TaskResult, p['task_result_topic'], on_result, 10)
+            if p['task_command_topic']:
+                self.create_subscription(TaskCommand, p['task_command_topic'], lambda m: self.narrator.task_command(
+                    m.task_id, m.operation, m.kind, m.duration_s, m.clock_slot, m.close), 10)
+            if p['box_topic']:
+                self.create_subscription(BoxObservation, p['box_topic'], lambda m: self.narrator.box(
+                    m.valid, m.source, m.reason, m.gap_m, m.lateral_m, m.yaw_rad), 10)
+        if p['barcode_topic']:
+            started = time.monotonic()  # a barcode read before the voice started is known, not announced
+            self.create_subscription(String, p['barcode_topic'], lambda m: self.narrator.barcode(
+                m.data, quiet=time.monotonic() - started < 3.0), latched)
+        if p['traffic_light_topic']:
+            try:
+                from craft_perception.msg import TrafficLight
+                check_for_type_support(TrafficLight)
+            except (ImportError, UnsupportedTypeSupport):
+                log.warning('craft_perception TrafficLight unavailable: the traffic light is left out')
+            else:
+                light_started = time.monotonic()  # a count finished before the voice started is known, not said
+                self.create_subscription(TrafficLight, p['traffic_light_topic'], lambda m: self.narrator.traffic_light(
+                    m.red, m.yellow, m.green, len(m.sequence), m.complete, m.valid, m.discarded_cycles,
+                    quiet=time.monotonic() - light_started < 3.0), latched)
+        if p['obstacles_topic']:
+            try:
+                from geometry_msgs.msg import PoseArray
+            except ImportError:
+                log.warning('geometry_msgs not found: LiDAR obstacles are left out')
+                return
+            seen = {'at': 0.0}
+
+            def on_obstacles(m):  # 10 Hz scans: three a second are enough for "what is near"
+                now = time.monotonic()
+                if now - seen['at'] < 0.3:
+                    return
+                seen['at'] = now
+                self.narrator.obstacles([(q.position.x, q.position.y) for q in m.poses],
+                                        in_map=m.header.frame_id.lstrip('/') == 'map')
+            self.create_subscription(PoseArray, p['obstacles_topic'], on_obstacles, qos_profile_sensor_data)
+
+    def _subscribe_goal(self, p):
+        """Where the goal is and where the robot is, for 'N미터 앞으로 갈게' and 'N미터쯤 남았어'."""
+        try:
+            from geometry_msgs.msg import PoseStamped
+            from nav_msgs.msg import Odometry
+        except ImportError:
+            self.get_logger().warning('geometry_msgs / nav_msgs not found: drives are said without distance')
+            return
+        if p['goal_topic']:
+            self.create_subscription(PoseStamped, p['goal_topic'], lambda m: self.narrator.goal(
+                m.pose.position.x, m.pose.position.y), 10)
+        if p['pose_topic']:
+            def on_pose(m):
+                q = m.pose.pose.orientation
+                yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+                self.narrator.pose(m.pose.pose.position.x, m.pose.pose.position.y, yaw)
+            self.create_subscription(Odometry, p['pose_topic'], on_pose, qos_profile_sensor_data)
+
+    def _on_odometry(self, msg):
+        stamp = msg.header.stamp.sec * 1_000_000_000 + msg.header.stamp.nanosec
+        age = (self.get_clock().now().nanoseconds - stamp) / 1e9
+        if 0 <= age <= .6:
+            self.narrator.motion(msg.twist.twist.linear.x, msg.twist.twist.angular.z)
 
     def _input_frame(self, header, topic: str):
         """planning_master acts on these same messages; their stamp is the camera frame they came from."""
@@ -332,7 +479,11 @@ class VoiceNode(Node):
         self._speaking_pub.publish(Bool(data=speaking))
 
     def _publish_diagnostics(self):
+        if self._clock_unset and not clock_unset():
+            self._clock_unset = False
+            self.get_logger().info('the system clock is set: listening and GPT are on')
         stats = self.narrator.status()
+        stats['clock_set'] = not self._clock_unset
         status = DiagnosticStatus(name='voice/narrator', hardware_id='voice_node',
                                   message='muted' if stats['muted'] else 'ok')
         status.level = DiagnosticStatus.OK
@@ -370,6 +521,9 @@ def main(args=None):
         rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException):  # Ctrl+C, or SIGTERM from systemd
         pass
+    except Exception:
+        if rclpy.ok():  # after SIGTERM the wait set can fail before ExternalShutdownException is raised
+            raise
     finally:
         if node is not None:
             node.destroy_node()

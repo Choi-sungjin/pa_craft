@@ -38,7 +38,8 @@ if [ "${CRAFT_VOICE_PREPARE:-1}" = "1" ]; then
   # Fixed sentences (state changes, blocked path, faults, "응!") are synthesized once and kept, so they
   # play at once and also without the network. Already kept sentences are skipped; a failure is not fatal.
   STYLE="$(value style)"; MODEL="$(value tts_model)"; VOICE="$(value tts_voice)"; HOW="$(value tts_instructions)"
-  "$PY" -m craft_voice.prepare --style "${STYLE:-polite}" ${MODEL:+--tts-model "$MODEL"} ${VOICE:+--voice "$VOICE"} \
+  [ "$(value variety)" = "true" ] && VARIETY=--variety || VARIETY=
+  "$PY" -m craft_voice.prepare --style "${STYLE:-polite}" $VARIETY ${MODEL:+--tts-model "$MODEL"} ${VOICE:+--voice "$VOICE"} \
       ${HOW:+--tts-instructions "$HOW"} --step-names "$(value step_names)" || echo "prepare: some sentences were not synthesized" >&2
 fi
 exec "$PY" -m craft_voice.voice_node --ros-args --params-file "$PARAMS" "$@"
