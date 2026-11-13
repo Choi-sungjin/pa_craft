@@ -27,8 +27,17 @@ import box_range as br  # noqa: E402
 import puck_locate as pl  # noqa: E402
 
 LATERAL_SIGN = +1.0   # verified 2026-11-13: two grasps, the gripper cam showed the puck between the jaws
-MIN_GAP = 0.080       # [m] centre to centre: closer pucks are not picked (the full-open jaws may hit the other)
+MIN_GAP = 0.060       # [m] centre to centre: closer pucks are not picked (2026-11-14, user: 60, open the gripper less; was
+                      # 0.070, 0.080). From the model, not measured: jaw inner face from the puck centre + ~10 mm jaw
+                      # thickness (assumed) + 15 mm the other puck's half width + 10 mm the gripper-cam check lets through.
+                      # Full open (94 deg, inner face 34 mm) needs 69 -> FULL_OPEN_GAP; nearer than that the jaws open
+                      # only to NARROW_OPEN_DEG (inner face 25 mm: 10 mm free each side of the 30 mm puck) -> 60.
+FULL_OPEN_GAP = 0.070
+# Gripper motor angle for a 50 mm jaw gap: 94 deg = 68.4 mm (URDF full open), 168.4 deg = 30 mm (reading with a puck
+# held, 2026-11-06), linear between (0.516 mm/deg). Not checked with a ruler.
+NARROW_OPEN_DEG = 130.0
 PUCK_H = 0.060
+MAX_AHEAD = 0.150     # [m] LiDAR face -> puck centre: further out the wrist motor 4 cut out (2026-11-13, 182 mm)
 GRIP_MM = 20          # jaws cover 20 mm from the puck top (2026-11-14, user: still too deep, the jaws hit the box and
                       # moved it; was 30, 45, before that plan.py 52). Model: fingertips 40 mm over the box top
 OUT = 'plan_cam.yaml'
@@ -52,8 +61,14 @@ def puck_centres(prefix):
         x0, y0, x1, y1 = max(int(x), 0), max(int(y), 0), int(x + w), int(y + h)
         vv, uu = np.mgrid[y0:y1, x0:x1]; zz = d[y0:y1, x0:x1]; ok = zz > 0.1
         B = ((np.stack([uu[ok], vv[ok], np.ones(ok.sum())], 1) @ np.linalg.inv(K).T) * zz[ok][:, None]) @ R.T + t
-        top = float(np.percentile(B[:, 2], 95)) - z_floor
-        out.append((p, pl.CLASSES[c], surf + hz * pl.PUCK_RADIUS, top))
+        cen = surf + hz * pl.PUCK_RADIUS
+        # Only the points within 22 mm of the puck axis: the box also holds whatever stands in front of or over the
+        # puck in the image (2026-11-14: the gripper over a puck near the centre line gave a 337 mm top).
+        own = np.hypot(B[:, 0] - cen[0], B[:, 1] - cen[1]) < 0.022
+        if own.sum() < 30:
+            continue
+        top = float(np.percentile(B[own, 2], 95)) - z_floor
+        out.append((p, pl.CLASSES[c], cen, top))
     return sorted(out, key=lambda o: -o[0]), laser
 
 
@@ -75,32 +90,54 @@ def main():
         pucks = sorted(pucks, key=lambda o: o[2][0])
     for i, (sc, nm, c, tp) in enumerate(pucks):
         print(f'  puck {i + 1}: {nm} {sc:.2f} at x {c[0] * 1000:.0f} y {c[1] * 1000:+.0f} mm, top {tp * 1000:.0f} mm' + ('  <- picked' if i == 0 else ''))
+    # --count N: up to N pucks, nearest first, only the ones that are sure (2026-11-14, user: pick what can be picked,
+    # the robot is re-parked for the rest). A puck is skipped, with the reason, when it stands beyond MAX_AHEAD, when
+    # another puck still on the box is within MIN_GAP of it (pucks planned before it are gone by then), or when
+    # plan.py finds no pose inside the limits (LM rail: about -60 .. +37 mm sideways).
     count = int(sys.argv[sys.argv.index('--count') + 1]) if '--count' in sys.argv else 1
-    if len(pucks) < count:
-        print(f'STOP: {len(pucks)} puck(s) detected, {count} wanted'); return 1
-    for i in range(count):  # every picked puck needs MIN_GAP to every other puck
-        near = [float(np.hypot(*(c[:2] - pucks[i][2][:2]))) for j, (_, _, c, _) in enumerate(pucks) if j != i]
-        if near and min(near) < MIN_GAP:
-            print(f'STOP: a puck is {min(near) * 1000:.0f} mm from picked puck {i + 1} (< {MIN_GAP * 1000:.0f} mm): move them apart')
-            return 3
     face_x = laser[0] + br.LIDAR_FACE_TO_CENTRE
-    outs = []
-    for i in range(count):
-        score, name, cen, top = pucks[i]
-        out = OUT if i == 0 else OUT.replace('.yaml', f'{i + 1}.yaml')
+    outs, picked, gone = [], [], set()
+    for i, (score, name, cen, top) in enumerate(pucks):
+        if len(outs) == count:
+            break
+        tag = f'puck {i + 1} ({name})'
         ahead = float(cen[0] - face_x)
         x_off = float(LATERAL_SIGN * (cen[1] - laser[1]))
-        print(f'puck {i + 1} {name} {score:.2f}: base_link x {cen[0] * 1000:.0f} y {cen[1] * 1000:+.0f} mm'
+        if ahead > MAX_AHEAD:
+            print(f'SKIP {tag}: {ahead * 1000:.0f} mm ahead of the LiDAR face (> {MAX_AHEAD * 1000:.0f}: wrist motor 4 cut out at 182): park closer'); continue
+        near = [float(np.hypot(*(c[:2] - cen[:2]))) for j, (_, _, c, _) in enumerate(pucks) if j != i and j not in gone]
+        if near and min(near) < MIN_GAP:
+            print(f'SKIP {tag}: another puck is {min(near) * 1000:.0f} mm from it (< {MIN_GAP * 1000:.0f} mm, the open jaws may hit it)'); continue
+        if top - PUCK_H < 0.03 or top - PUCK_H > 0.12:
+            print(f'SKIP {tag}: its top reads {top * 1000:.0f} mm (shelf {1000 * (top - PUCK_H):.0f} mm, expected 30-120): something over it (the arm?) or a bad depth'); continue
+        open_deg = NARROW_OPEN_DEG if near and min(near) < FULL_OPEN_GAP else None
+        if open_deg:
+            print(f'  another puck {min(near) * 1000:.0f} mm away: the jaws open only to {open_deg:g} deg (50 mm) for this one')
+        out = OUT if not outs else OUT.replace('.yaml', f'{len(outs) + 1}.yaml')
+        print(f'{tag} {score:.2f}: base_link x {cen[0] * 1000:.0f} y {cen[1] * 1000:+.0f} mm'
               f' -> puck_ahead {ahead * 1000:.0f} mm, puck_x_offset {x_off * 1000:+.0f} mm (LATERAL_SIGN {LATERAL_SIGN:+.0f})')
         shelf = top - PUCK_H
         print(f'  shelf under it {shelf * 1000:.0f} mm (puck top {top * 1000:.0f} - {PUCK_H * 1000:.0f}), grip {GRIP_MM} mm from the top')
         r = subprocess.run([sys.executable, str(HERE / 'plan.py'), '--puck-ahead', f'{ahead:.4f}', '--puck-x', f'{x_off:.4f}',
                             '--shelf-height', f'{shelf:.4f}', '--grip-mm', str(GRIP_MM), '--out', out], capture_output=True, text=True)
-        lines = (r.stdout + r.stderr).strip().splitlines()
-        print('\n'.join(l for l in lines if '!!' in l or 'written' in l or 'FAILED' in l) or '\n'.join(lines[-5:]))
         if r.returncode != 0:
-            return r.returncode
-        outs.append(out)
+            if "'LM'" in r.stdout:  # the LM rail carries the arm sideways: about -60 .. +37 mm of puck_x_offset
+                side, lim = ('left', 37) if x_off > 0 else ('right', 60)
+                print(f'SKIP {tag}: {abs(x_off) * 1000:.0f} mm to the {side} of the LiDAR centre, the LM rail reaches {lim} mm: '
+                      f'{abs(x_off) * 1000 - lim + 5:.0f} mm closer to the centre needed')
+            else:
+                print(f'SKIP {tag}: no arm pose inside the joint limits')
+            continue
+        print(f'  {out} written; all waypoints within limits')
+        outs.append(out); gone.add(i)
+        picked.append({'plan': out, 'open_deg': open_deg, 'class': name, 'score': round(float(score), 2),
+                       'x_mm': round(float(cen[0]) * 1000), 'y_mm': round(float(cen[1]) * 1000)})
+    # What each plan's puck is (colour + shape from the detector): execute.py writes it into carousel.yaml per slot.
+    import json
+    json.dump(picked, open(HERE / 'plan_cam_pucks.json', 'w'), indent=1)
+    if not outs:
+        print('STOP: no puck here can be picked for sure: re-park'); return 3
+    print(f'{len(outs)} of {len(pucks)} puck(s) planned')
     print(f'next: bigbro --plan {",".join(outs)} [--slot N[,N]]')
     return 0
 

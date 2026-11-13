@@ -23,6 +23,11 @@ struct PathPlannerConfig
   // r_robot: padding while driving (half diagonal). r_approach: the padding of the whole map for the box dock, the
   // straight second path after the turn at the stage point (plan_box's face/dock line checks, dock = true). 0 = r_robot.
   double res = 0.05, block_size = 0.05, r_robot = 0.21, margin = 0.03, r_approach = 0.0;
+  // r_robot pads the map's walls; r_obstacle pads the LiDAR obstacle points (people, robots, walls seen off the map)
+  // and r_turn is the clearance a turn in place needs (corners sweep ~253 mm): checked at the stage points (plan_box)
+  // and reported by planning at a drive's start and after a leave (user 2026-11-14). 0 = r_robot. The dock data
+  // (r_approach) pads walls and obstacles alike with r_approach, as before.
+  double r_obstacle = 0.0, r_turn = 0.0;
   double lam = 0.6, w_prox = 1.0, prox_band = 0.15, arc_sample = 0.02;
   // A*+arc corner fillets: PASS needs R >= r_min (else STOP_TURN); R <= r_hi_global; bisection to r_tol.
   double r_min = 0.08, r_hi_global = 0.40, r_tol = 0.01;
@@ -156,6 +161,14 @@ public:
     const nav_msgs::msg::Path & path,
     const geometry_msgs::msg::PoseArray & map_obstacles = geometry_msgs::msg::PoseArray(),
     const BoxApproach * approach = nullptr, bool dock = false) const;
+  // Distance [m] from each point to the nearest wall or obstacle point (the driving map, not the dock one), exact up
+  // to the widest padding + prox_band; 0 outside the map. For the turn-in-place check against r_turn.
+  std::vector<double> clearance(
+    const std::vector<geometry_msgs::msg::Point> & points,
+    const geometry_msgs::msg::PoseArray & map_obstacles = geometry_msgs::msg::PoseArray()) const;
+  // r_turn + margin (r_robot when r_turn is 0) and r_obstacle + margin (r_robot when 0) of the configured planner.
+  double turn_padding() const;
+  double obstacle_padding() const;
 
   struct Data;
 

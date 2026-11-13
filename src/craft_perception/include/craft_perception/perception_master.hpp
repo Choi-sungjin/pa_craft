@@ -26,6 +26,7 @@
 #include <tf2_ros/transform_listener.h>
 #include <std_msgs/msg/empty.hpp>
 #include <std_msgs/msg/int32_multi_array.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <std_msgs/msg/u_int64_multi_array.hpp>
 #include <array>
@@ -324,7 +325,19 @@ private:
   // Task and reset subscription share the counter and the barcode reader (same mutex).
   std::mutex traffic_light_mutex_;
   BarcodeReader barcode_;  // Code 128 next to the light, read on the same upper-cam frames
+  BarcodeLocatorConfig barcode_locator_;  // uppercam.barcode: decode only where bars are (place not fixed)
+  int barcode_full_frame_every_ = 15;     // also the whole frame every N frames while nothing was read
+  int barcode_frames_ = 0;
+  bool barcode_decode_ = false;  // uppercam.barcode.decode: ZXing as well as the pattern vote
+  struct BarcodeMatch {  // uppercam.barcode.match: vote over the mission codes when nothing decodes
+    bool enabled = false;
+    std::vector<std::string> codes;
+    int regions = 3, votes = 15;
+    double min_score = 0.6, min_margin = 0.03, min_share = 0.7;
+  } barcode_match_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr barcode_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr hires_pub_;  // /perception/uppercam/hires for the bridge
+  void publish_hires(bool on);
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr mission_event_pub_;
   TrafficLightCounter traffic_light_;
   rclcpp::Publisher<msg::TrafficLight>::SharedPtr traffic_light_pub_;

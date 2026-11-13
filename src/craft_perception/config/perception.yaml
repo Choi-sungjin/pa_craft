@@ -212,6 +212,33 @@ perception_master:
         nms_iou: 0.45
         max_detections: 100
         ncnn_threads: 1
+      # Mission barcode (Code 128) on the same frames until confirmed. Its place is not fixed (user 2026-11-14):
+      # the whole frame is decoded every full_frame_every frames (0 = never), and bar-like regions found on a
+      # work_width copy are decoded at full size (x2 when small) on every frame.
+      # Bags 2026-11-11 (640x360): the symbol was a top-3 region in 311/311 frames, but ~40 px wide = unreadable.
+      # PC D435 1080p, flat sheet (flat_261114_012646, 284 frames): whole frame 40%, regions only 23% (missed a
+      # symbol touching the paper edge), both together = barcode_offline default. Wavy label: 2/423 (too small).
+      barcode:
+        # false (user 2026-11-14: the label is always one of match.codes, no unregistered code): the pattern vote
+        # alone, no ZXing. true: ZXing on full_frame_every + the regions, the vote only on frames it reads nothing.
+        decode: false
+        work_width: 640
+        min_gradient: 120.0
+        max_regions: 6
+        full_frame_every: 1    # every frame (PC 1080p ~7 ms)
+        # Nothing decoded on a frame: compare the bar profile with these codes (Code 128) and vote (user 2026-11-14).
+        # Confirmed when one code has `votes` frames and >= min_share of all votes. Robot bag barcode_1114_024006
+        # (start pose, ZXing 0/200): P2-02 15/15 votes, confirmed at frame 16; PC near_* (bent label, ZXing 2/423):
+        # P2-04 15/15; no barcode / 640x360 bags: 0 votes. It can only answer one of `codes`: an unregistered label
+        # is not caught here (min_score keeps weak matches out).
+        match:
+          enabled: true
+          codes: [P2-01, P2-02, P2-03, P2-04]
+          regions: 3        # best candidate regions tried
+          min_score: 0.6    # normalized correlation of the best code
+          min_margin: 0.03  # over the second best
+          votes: 15
+          min_share: 0.7
       # Traffic light (발제 04): 12 blinks, 1 s on / 1 s off (sign_off ignored). A blink counts only if lit
       # >= min_on_s and its majority color >= min_vote_ratio of its lit frames; dropouts shorter than
       # max_gap_s are bridged. Bag 2026-11-11 (traffic_light_1111_1152, ~9 Hz): 12/12, lit 0.77-0.94 s,
@@ -408,7 +435,9 @@ perception_master:
       # or a map wall seen 4 cm off made planning replan). Without map TF the raw points go out.
       filter:
         enabled: true
-        wall_margin_m: 0.06      # within this of an occupied/unknown map cell: a wall the map already has
+        # 0.10 (user 2026-11-14, was 0.06): bag mission_1114_0302 go_home, walls seen ~7 cm off the map (localization)
+        # became obstacles, padded again and closed the 13 cm lane under the x 1.1 wall end for 136 s.
+        wall_margin_m: 0.10      # within this of an occupied/unknown map cell: a wall the map already has
         cell_m: 0.05
         persist_frames: 3        # the cell (or neighbor_cells around it) seen in this many frames in a row
         neighbor_cells: 2        # 2 x 5 cm per frame at 10 Hz: movers up to ~1 m/s still persist

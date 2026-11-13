@@ -171,14 +171,38 @@ TEST(MissionFsm, ConfigIsChecked) {
   EXPECT_THROW(MissionFsm{d}, std::invalid_argument);
 }
 
-TEST(MissionFsm, DriveOnlySkipsBarcodeAndArm) {
+TEST(MissionFsm, DrivesToBarcodeViewOnlyWhenNotReadYet) {
+  MissionConfig c; c.drive_only = true; c.view_barcode = true;
+  MissionInputs in;
+  in.signal_complete = in.signal_valid = true;
+  in.sequence = {0, 2, 0, 0, 2, 0, 2, 2, 1, 2, 1, 2}; in.counts = {4, 2, 6};
+  MissionFsm f(c); ASSERT_TRUE(f.start(0));
+  EXPECT_EQ(f.tick({}, 0.1).kind, Kind::ResetPerception); f.action_done(true);
+  const auto view = f.tick(in, 0.2);  // signal complete, no barcode -> drive to the view pose
+  EXPECT_EQ(view.kind, Kind::ViewBarcode); EXPECT_EQ(f.state(), MissionState::ReadBarcode);
+  EXPECT_EQ(f.tick(in, 0.3).kind, Kind::None);  // still driving
+  f.action_done(true);
+  EXPECT_EQ(f.tick(in, 0.4).kind, Kind::None); EXPECT_EQ(f.state(), MissionState::ReadBarcode);  // waits there
+  in.barcode = "P2-01";
+  EXPECT_EQ(f.tick(in, 0.5).kind, Kind::ApproachBox);
+  ASSERT_TRUE(f.order()); EXPECT_EQ(*f.order(), SortOrder::Ascending);
+  // Already read before the signal completed: no drive.
+  MissionFsm g(c); g.start(0); g.tick({}, 0.1); g.action_done(true);
+  EXPECT_EQ(g.tick(in, 0.2).kind, Kind::ApproachBox);
+}
+
+TEST(MissionFsm, DriveOnlyReadsBarcodeSkipsArm) {
   MissionConfig c; c.drive_only = true;
   MissionFsm f(c); ASSERT_TRUE(f.start(0));
   EXPECT_EQ(f.tick({}, 0.1).kind, Kind::ResetPerception); f.action_done(true);
-  MissionInputs in;  // no barcode at all
+  MissionInputs in;
   EXPECT_EQ(f.tick(in, 0.2).kind, Kind::None); EXPECT_EQ(f.state(), MissionState::WatchSignal);
   in.signal_complete = in.signal_valid = true;
   in.sequence = {0, 2, 0, 0, 2, 0, 2, 2, 1, 2, 1, 2}; in.counts = {4, 2, 6};
+  // The upper-cam barcode is still waited for (user 2026-11-14).
+  EXPECT_EQ(f.tick(in, 0.3).kind, Kind::None); EXPECT_EQ(f.state(), MissionState::ReadBarcode);
+  EXPECT_EQ(f.tick(in, 0.4).kind, Kind::None); EXPECT_EQ(f.state(), MissionState::ReadBarcode);
+  in.barcode = "P2-02";
   const auto done = run(f, in, [](int) {return -1;});
   EXPECT_EQ(f.state(), MissionState::Done) << f.reason();
   std::vector<std::string> boxes;
@@ -190,6 +214,7 @@ TEST(MissionFsm, DriveOnlySkipsBarcodeAndArm) {
   EXPECT_EQ(boxes, (std::vector<std::string>{"S1", "S2", "S3", "S4", "S5", "S6", "L1", "L2", "L3"}));
   EXPECT_EQ(done[done.size() - 2].kind, Kind::GoHome);
   EXPECT_EQ(f.counts().green, 6);
+  ASSERT_TRUE(f.order()); EXPECT_EQ(*f.order(), SortOrder::Descending);
   // Every drive after a dock starts by backing out of that dock: 9 docks, 9 leaves, each right before the next drive.
   int leaves = 0;
   for (std::size_t i = 0; i < done.size(); ++i) {
@@ -205,4 +230,9 @@ TEST(MissionFsm, DriveOnlySkipsBarcodeAndArm) {
   in.counts = {7, 1, 4}; in.sequence = {0, 0, 0, 0, 0, 0, 0, 1, 2, 2, 2, 2};
   g.tick(in, 0.2);
   EXPECT_EQ(g.state(), MissionState::Fault);
+  // An unregistered barcode faults too.
+  MissionFsm h(c); h.start(0); h.tick({}, 0.1); h.action_done(true);
+  in.counts = {4, 2, 6}; in.sequence = {0, 2, 0, 0, 2, 0, 2, 2, 1, 2, 1, 2}; in.barcode = "P9-99";
+  h.tick(in, 0.2); h.tick(in, 0.3);
+  EXPECT_EQ(h.state(), MissionState::Fault);
 }

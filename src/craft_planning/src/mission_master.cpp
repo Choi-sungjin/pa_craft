@@ -61,6 +61,16 @@ public:
     c.action_timeout_s[name(Kind::ApproachBox)] = declare_parameter<double>("approach_timeout_s");
     c.action_timeout_s[name(Kind::GoHome)] = declare_parameter<double>("go_home_timeout_s");
     c.action_timeout_s[name(Kind::LeaveBox)] = declare_parameter<double>("leave_timeout_s");
+    // Before the FSM is built: it copies the config. [x, y, yaw_deg] where the upper cam reads the barcode; [] = read it where the robot stands.
+    // Default []: a ROS params file cannot give an empty list a type ("[]" -> "Contains no value", node dies);
+    // leave barcode_view out of mission.yaml to read the barcode where the robot stands (2026-11-14).
+    barcode_view_ = declare_parameter<std::vector<double>>("barcode_view", std::vector<double>{});
+    if (!barcode_view_.empty() && (barcode_view_.size() != 3 || !std::isfinite(barcode_view_[0]) ||
+        !std::isfinite(barcode_view_[1]) || !std::isfinite(barcode_view_[2]))) {
+      throw std::invalid_argument("barcode_view must be [] or [x, y, yaw_deg] in the map frame");
+    }
+    c.view_barcode = !barcode_view_.empty();
+    c.action_timeout_s[name(Kind::ViewBarcode)] = c.action_timeout_s[name(Kind::GoHome)];  // go_home_timeout_s
     config_ = c;
     fsm_ = MissionFsm(config_);  // validates
     home_ = declare_parameter<std::vector<double>>("home");
@@ -164,7 +174,8 @@ private:
     switch (a.kind) {
       case Kind::ResetPerception: return true;
       case Kind::HoldStill: return now - action_at_ >= a.seconds;
-      case Kind::ApproachBox: case Kind::LeaveBox: case Kind::GoHome: return run_drive(a, now, ok, reason);
+      case Kind::ApproachBox: case Kind::LeaveBox: case Kind::GoHome: case Kind::ViewBarcode:
+        return run_drive(a, now, ok, reason);
       case Kind::ObservePucks: case Kind::PickPuck: case Kind::PlacePuck: case Kind::VerifyLocation:
         return run_skeleton(a, now, ok, reason);
       case Kind::None: return true;
@@ -191,8 +202,9 @@ private:
       } else {
         geometry_msgs::msg::PoseStamped goal;
         goal.header.frame_id = map_frame_; goal.header.stamp = this->now();
-        goal.pose.position.x = home_[0]; goal.pose.position.y = home_[1];
-        const double yaw = home_[2] * M_PI / 180.0;
+        const auto &pose = a.kind == Kind::ViewBarcode ? barcode_view_ : home_;
+        goal.pose.position.x = pose[0]; goal.pose.position.y = pose[1];
+        const double yaw = pose[2] * M_PI / 180.0;
         goal.pose.orientation.z = std::sin(yaw / 2); goal.pose.orientation.w = std::cos(yaw / 2);
         goal_pub_->publish(goal);
       }
@@ -314,7 +326,7 @@ private:
   MissionConfig config_;
   MissionFsm fsm_;
   MissionInputs inputs_;
-  std::vector<double> home_;
+  std::vector<double> home_, barcode_view_;
   std::string map_frame_, log_dir_, run_dir_, planning_state_, last_state_;
   bool reset_perception_ = true, fault_handled_ = false, gripper_grasped_ = false;
   bool wait_localization_ = false, localized_ = false;

@@ -648,6 +648,13 @@ def unload_steps(current_slide=None, start=None):
 
 
 
+# bigbro: LM at the clock slot, relative to the sis2 slot poses [m], + = toward the LM motor. 2026-11-14 (user, bag
+# sis_1114_0145): the front-picked cylinder came in ~5 mm off the slot mouth with the LM exactly on its target (7.19 mm,
+# 0.01 mm error), so the slot poses move 3 mm away from the motor (user: ~3 mm would have gone in; first set to 5). sis2 / dice keep their taught LM. --slot-lm-mm N
+# overrides it for one run.
+BIGBRO_SLOT_LM = (float(sys.argv[sys.argv.index('--slot-lm-mm') + 1]) if '--slot-lm-mm' in sys.argv else -3.0) / 1000
+
+
 def bigbro_steps(current_slide=None, start=None):
     """One bigbro_one per --plan file / --slot pair, in one run (2026-11-14, user: after loading a puck the arm goes
     straight on to the next one, not back to the nominal pose). All plans come from one upper-cam frame taken at the
@@ -681,13 +688,24 @@ def bigbro_one(current_slide=None, start=None, home=True):
     via = via_pose()[:5]
     over = teach.raw_to_target(PICK_DESCEND_FROM_RAW_DEG + [0.0])[:5]
     mid = teach.raw_to_target(PICK_MID_RAW_DEG + [0.0])[:5]
+    over[0] += BIGBRO_SLOT_LM; mid[0] += BIGBRO_SLOT_LM
     # Release height: PICK_MID is the sis2 grasp + 20 mm, fine for a 45 mm grip. A shallower grip leaves the puck that
     # much lower under the jaws, so the release goes up by the difference (toward the 40 mm over pose, joint blend).
     a = yaml.safe_load(open(HERE / PLAN_FILE)).get('assume', {})
     grip_mm = 1000 * a.get('puck_height', 0.06) * a.get('grasp_coverage', 0.75)
     f = min(max((45.0 - grip_mm) / 20.0, 0.0), 1.0)
-    release = [m_ + (o_ - m_) * f for m_, o_ in zip(mid, teach.raw_to_target(PICK_DESCEND_FROM_RAW_DEG + [0.0])[:5])]
+    release = [m_ + (o_ - m_) * f for m_, o_ in zip(mid, over)]
     lift = pick[-1][2][-1]  # the ascend pose
+    # A puck with a neighbour nearer than the full-open jaws allow: cam_pick.py gives a smaller opening (open_deg).
+    try:
+        import json
+        narrow = next(p for p in json.load(open(HERE / 'plan_cam_pucks.json')) if p['plan'] == PLAN_FILE).get('open_deg')
+    except (OSError, StopIteration, ValueError):
+        narrow = None
+    if narrow:
+        n0, k0, a0 = pick[0]  # move 1: [[LM, shoulder, elbow, wrist_pitch, tool_roll, gripper]]
+        pick[0] = (n0.replace('gripper full open', f'gripper open to {narrow:g} deg (a puck close by)'), k0,
+                   [a0[0][:5] + [math.radians(narrow)]])
     # In: fold the wrist to the slot angle first (as sis1 load 1, TCP up to 501 mm), then straight over the slot
     # (420 mm). Through the carry via instead the TCP rises to 570 mm (FK), past where a puck hit the gripper rest.
     fold = lift[:3] + [over[3]] + lift[4:5]
@@ -858,8 +876,32 @@ def seconds_text(name):
 # Start check: the LM this far from the nominal pose means the arm was put down elsewhere (--lm-tol-mm N widens it
 # for one run, e.g. after a power cut left the carriage 10 mm off with its turn count read right).
 LM_START_TOL = float(sys.argv[sys.argv.index('--lm-tol-mm') + 1]) / 1000 if '--lm-tol-mm' in sys.argv else 0.010
+# Carousel memory (2026-11-14, user: the task loads 12 pucks, two per stop, and must remember what sits in every
+# slot). carousel.yaml: slot -> class (red/green + cylinder/prism, from cam_pick.py's plan_cam_pucks.json). A slot is
+# written when its release step (bigbro 5) succeeded. carousel.py shows / resets it and gives the next free slots.
+CAROUSEL = HERE / 'carousel.yaml'
+
+
+def record_loaded(name, grasped):
+    """After a succeeded 'bigbro 5' (release in the slot): write that puck's class into its slot in carousel.yaml."""
+    import json
+    import re
+    k = int(m.group(1)) - 1 if (m := re.search(r'\[puck (\d+)\]', name)) else 0
+    plan_file, slot = PLAN_FILES[k], BIGBRO_SLOTS[k]
+    try:
+        info = next(p for p in json.load(open(HERE / 'plan_cam_pucks.json')) if p['plan'] == plan_file)
+    except (OSError, StopIteration, ValueError):
+        info = {'class': 'unknown'}  # a plan not from cam_pick.py (plan.yaml)
+    data = (yaml.safe_load(open(CAROUSEL)) if CAROUSEL.exists() else None) or {}
+    data[slot] = {'class': info['class'], 'score': info.get('score'), 'time': time.strftime('%m-%d %H:%M:%S'),
+                  'grasped': bool(grasped)}
+    yaml.safe_dump(data, open(CAROUSEL, 'w'), sort_keys=True)
+    print(f'   carousel: slot {slot} = {info["class"]}' + ('' if grasped else '  (!! gripper did not report a grasp: check the slot)'))
+
+
 GRIPCHECK = 'gripcheck'   # pseudo step kind: gripper-cam look at the puck before going down (bigbro)
 GRIPCHECK_MM = 10.0       # stop when the puck sits further than this from the lined-up reference (camera x / y)
+LEARN_REF = None         # capture prefix of a check passed without a reference, stored as the reference after a grasp
 GRIP_LOCATE = Path.home() / 'craft' / 'tools' / 'realsense_check' / 'grip_locate.py'
 
 
@@ -873,8 +915,17 @@ def grip_check():
     m = re.search(r'dx ([+-]\d+) dy ([+-]\d+) dz ([+-]\d+) mm', text)
     line = next((l for l in text.splitlines() if 'camera x' in l or 'no puck' in l), text.strip()[-200:])
     print('   ' + line)
+    global LEARN_REF
+    LEARN_REF = None
+    seen = re.search(r'^(\S+): \w+ [\d.]+ px', text, re.M)
+    if seen and not m:
+        # The puck is seen but there is no reference at this height (new grip depth, first run). Not a stop
+        # (2026-11-14, user: no hand calibration, handle it inside the run): go down on the upper-cam plan, and when the
+        # gripper then reports a grasp this frame becomes the reference for its shape (run_steps).
+        LEARN_REF = seen.group(1)
+        return True, 'gripper cam sees the puck; no reference at this height yet, this frame becomes it if the grasp holds'
     if not m:
-        return False, 'gripper cam: no puck or no reference'
+        return False, 'gripper cam: no puck'
     dx, dy = int(m.group(1)), int(m.group(2))
     if max(abs(dx), abs(dy)) > GRIPCHECK_MM:
         return False, f'gripper cam: puck {dx:+d} / {dy:+d} mm off the lined-up spot (limit {GRIPCHECK_MM:g})'
@@ -885,6 +936,7 @@ def run_steps(node, steps):
     """Run steps one Enter at a time ('bro' runs the rest without asking; 'choi' / --auto on the command line: all of
     them from the start); False if the user quit or a step did not succeed."""
     auto = AUTO
+    grasped_at_close = None
     for name, kind, arg in steps:
         if auto:
             print(f'>> {name}')
@@ -924,6 +976,14 @@ def run_steps(node, steps):
                     flag = '  <-- off' if (abs(err) > 0.00006 if n == 'slide_joint' else abs(err) > math.radians(0.5)) else ''
                     print(f'     {n:18s} target {t:+.4f} actual {now[n]:+.4f}  error {unit}{flag}')
             return False
+        if name.startswith('bigbro 5:'):
+            record_loaded(name, grasped_at_close)
+        if kind == TaskCommand.GRIPPER and arg is True:
+            grasped_at_close = node.grasped
+            if LEARN_REF and node.grasped:
+                import subprocess
+                r = subprocess.run(['/usr/bin/python3', str(GRIP_LOCATE), '--set-ref', LEARN_REF], capture_output=True, text=True)
+                print('   gripper cam: ' + (r.stdout.strip().splitlines() or ['reference not stored'])[-1])
     return True
 
 
@@ -970,10 +1030,11 @@ def main():
                   else lying_steps_from_plan if lying else steps_from_plan)
     goto = sys.argv[sys.argv.index('--goto') + 1] if '--goto' in sys.argv else None
     if goto is not None:
-        if goto not in ('nominal', 'via'):
-            print('--goto nominal|via'); return 1
+        if goto not in ('nominal', 'via', 'basic'):
+            print('--goto nominal|via|basic'); return 1
         make_steps = lambda *a: ([('to the nominal pose', TaskCommand.MANIPULATOR, nominal_pose())]
-                                 if goto == 'nominal' else out_to_via(nominal_pose()))
+                                 if goto == 'nominal' else out_to_via(nominal_pose()) + (
+                                     [('to the nominal pose', TaskCommand.MANIPULATOR, nominal_pose())] if goto == 'basic' else []))
     steps = make_steps() if make_steps is steps_from_plan else stage(make_steps(), None)
     for name, kind, arg in steps:
         print(f'  {name:45s}', describe(kind, arg), seconds_text(name))
@@ -1009,8 +1070,12 @@ def main():
         start = nominal_pose()
         # Wherever it was put down, the first move takes it to the nominal pose; a joint 90 deg off (LM 10 mm)
         # means it was put down somewhere else entirely (e.g. tool_roll a half turn away).
+        # via / nom / basic bring the arm back from wherever a stopped run left it (2026-11-14: a bigbro stopped over
+        # the puck left the LM 10.6 mm off and basic refused): any LM inside the calibrated range checked above is
+        # accepted there. A work flow still has to start at the nominal pose.
+        lm_tol = LM_START_TOL if goto is None or '--lm-tol-mm' in sys.argv else 1.0
         off = [f'{n} {(now[n] - t) * 1000:+.1f} mm' if n == 'slide_joint' else f'{n} {math.degrees(now[n] - t):+.1f} deg'
-               for n, t in zip(ARM, start) if abs(now[n] - t) > (LM_START_TOL if n == 'slide_joint' else math.radians(90.0))]
+               for n, t in zip(ARM, start) if abs(now[n] - t) > (lm_tol if n == 'slide_joint' else math.radians(90.0))]
         if off:
             print(f'!! too far from the nominal pose ({", ".join(off)}): move it closer by hand; aborting'); return 1
         steps = make_steps(via_pose()[0], start)
@@ -1026,6 +1091,11 @@ def main():
                 steps = [wrist_first([now[n] for n in ARM], start, 'the nominal pose')] + steps
         else:  # from where it was put down: shoulder, elbow, wrist_pitch
             steps = out_to_via([now[n] for n in ARM])
+            if goto == 'basic':  # via, then nom, in one run (2026-11-14, user): the via pose, then into the nominal pose
+                via = via_pose()
+                if not close_but_shoulder(via, start):
+                    steps.append(wrist_first(via, start, 'the nominal pose'))
+                steps.append(('to the nominal pose', TaskCommand.MANIPULATOR, start))
         if make_steps is not steps_from_plan:  # sis1 sets its own move order
             steps = stage(steps, [slide] + [now[n] for n in ARM[1:]])
         # Moves to / from the via and nominal pose: slow and eased (time-based), not at the speed caps (a 40 degree
@@ -1060,10 +1130,25 @@ def main():
             print(f'  {name:45s}', describe(kind, arg), seconds_text(name) if kind == TaskCommand.MANIPULATOR else '')
         if AUTO:
             print('\nAUTO (choi): every step runs without asking. Keep a hand on the 12 V power; Ctrl+C = STOP + hold.')
-            for k in (3, 2, 1):
+            for k in (3, 2, 1) if goto is None else ():  # via / nom / basic start at once (2026-11-14, user)
                 print(f'  starting in {k} s ...'); time.sleep(1)
         else:
             print('\nKeep a hand on the 12 V power. Enter = run step, q + Enter = quit.\n')
+        # Control must have been out of hold for a moment before the first task: a task sent while the heartbeat was
+        # still settling was accepted and stopped at once (2026-11-14, basic without the 3 s countdown: STOPPED, the
+        # shoulder never moved). Wait for held = False for 0.5 s in a row, 5 s at most.
+        others = node.count_publishers('/planning/hold') - 1
+        if others > 0:
+            print(f'!! {others} other program(s) publish /planning/hold (an earlier puckload / bigbro still open in another '
+                  'terminal?): Ctrl+C it first; nothing sent'); return 1
+        t0, free_since = time.time(), None
+        while time.time() - t0 < 5.0:
+            free_since = (free_since or time.time()) if not node.status.held else None
+            if free_since and time.time() - free_since >= 0.5:
+                break
+            time.sleep(0.05)
+        else:
+            print('control stays held (hold heartbeat / a stop not finished): nothing sent'); return 1
         if not run_steps(node, steps):
             if goto is None and not unload:
                 go_home(node, start, lying)
@@ -1072,9 +1157,10 @@ def main():
         if goto is not None:  # via / nom: done, control (and the board) keep holding the pose
             print('done: control keeps holding the pose.')
             return 0
-        print('done. control keeps holding the last pose; Ctrl+C to exit this script.')
-        while True:
-            time.sleep(1)
+        # The script ends here (2026-11-14: a stopped bigbro left waiting for Ctrl+C kept publishing hold = True, and
+        # every later basic / via was stopped at once). Control holds the pose by itself once the heartbeat is gone.
+        print('done: control keeps holding the last pose.')
+        return 0
     except KeyboardInterrupt:
         print('\nCtrl+C: sending STOP + hold'); node.stop(); time.sleep(0.5)
     finally:

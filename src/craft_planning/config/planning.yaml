@@ -194,9 +194,11 @@ planning_master:
       S5_faces: ["N", "W"]
       S6: [3.670, 3.886, 90.0]
       S6_faces: ["W"]
-      L1: [3.670, 0.950, 90.0]
+      # L1, L2: LiDAR box centre (median of the dock scans that saw both face ends, bag mission_1114_0302, user 2026-11-14);
+      # brief: L1 (3.670, 0.950), L2 (2.202, 3.700). Moved in brief_arena1cm.pgm too.
+      L1: [3.735, 0.997, 90.0]
       L1_faces: ["W", "S", "E"]
-      L2: [2.202, 3.700, 90.0]
+      L2: [2.300, 3.722, 90.0]
       L2_faces: ["E", "W", "S", "N"]
       L3: [3.670, 5.354, 90.0]
       L3_faces: ["N", "S"]
@@ -227,7 +229,13 @@ planning_master:
       # User 2026-11-12: the chassis is ~310 mm wide (half 155 mm), padding 0.16 is fine: the S2 south lane leaves
       # 0.192 m between its face normal and the wall (arena5 noboxes), which 0.23 closed. Was 0.23 (2026-11-10), 0.243.
       # The half diagonal above (~243 mm) is not covered any more: a turn in place right at a wall can touch it.
-      r_robot: 0.25  # [m] (user 2026-11-13: 0.16 left 5 mm per side, 0.20 still let a turn in place sweep its corners (~253 mm) into walls)
+      # 2026-11-14 (user): walls 0.20 for driving (lanes: go_home under the x 1.1 wall end had 13 cm left at 0.25),
+      # obstacle points r_obstacle 0.25, and r_turn 0.25 where it turns in place (stage points are rejected below it;
+      # a drive start / leave end below it is reported in /planning/box_status). Was 0.25 for everything (2026-11-13:
+      # 0.16 left 5 mm per side, 0.20 let a turn in place sweep its corners (~253 mm) into walls).
+      r_robot: 0.20     # [m] map walls, every drive except the dock (r_approach)
+      r_obstacle: 0.25  # [m] LiDAR obstacle points (people, robots, walls seen off the map)
+      r_turn: 0.25      # [m] clearance a turn in place needs
       # Padding of the whole map for the box dock: the second path, made after reaching the stage point and turning
       # there (and plan_box's face / dock line checks): half the chassis width (310 mm) + 5 mm, a straight drive
       # sweeps only the width (user, 2026-11-10). Everything else, the drive to the stage point included: r_robot.

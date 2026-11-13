@@ -34,6 +34,7 @@ const char *name(MissionAction::Kind k) {
     case Kind::PlacePuck: return "place_puck";
     case Kind::VerifyLocation: return "verify_location";
     case Kind::GoHome: return "go_home";
+    case Kind::ViewBarcode: return "view_barcode";
     case Kind::HoldStill: return "hold_still";
   }
   return "none";
@@ -170,12 +171,8 @@ MissionAction MissionFsm::tick(const MissionInputs &inputs, double now) {
         if (error.empty() && (!counted || counted->red != counts_.red || counted->yellow != counts_.yellow ||
                               counted->green != counts_.green)) error = "signal sequence and counts disagree";
         if (!error.empty()) {fail(error); return {};}
-        if (config_.drive_only) {
-          for (const auto &box : config_.start_boxes) push(MissionAction::Kind::ApproachBox, box);
-          enter(MissionState::Collect, now);
-        } else {
-          enter(MissionState::ReadBarcode, now);
-        }
+        enter(MissionState::ReadBarcode, now);  // user 2026-11-14: the upper cam reads it even in drive_only
+        if (config_.view_barcode && inputs.barcode.empty()) push(MissionAction::Kind::ViewBarcode);
         break;
       }
       case MissionState::ReadBarcode:
@@ -186,7 +183,11 @@ MissionAction MissionFsm::tick(const MissionInputs &inputs, double now) {
         barcode_ = inputs.barcode; order_ = order_from_barcode(barcode_);
         if (!order_) {fail("unregistered barcode '" + barcode_ + "'"); return {};}
         groups_ = location_groups(counts_, *order_);
-        plan_collect();
+        if (config_.drive_only) {
+          for (const auto &box : config_.start_boxes) push(MissionAction::Kind::ApproachBox, box);
+        } else {
+          plan_collect();
+        }
         enter(MissionState::Collect, now);
         break;
       case MissionState::Collect: enter(MissionState::Allocate, now); break;

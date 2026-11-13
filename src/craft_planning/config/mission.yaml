@@ -12,7 +12,19 @@ mission_master:
     locations: [L1, L2, L3]
     # Where the robot goes back to [x m, y m, yaw deg], map frame. TODO(user): confirm. (0.56, 0.98) is the marked
     # start of demo/corner/run_tour.py; 180 deg = looking at the traffic light (-x), as at the start.
-    home: [0.743, 0.950, 180.0]  # brief start/return zone centre (x 440-1046, y 658-1261 mm; user 2026-11-13: arena set to the brief)
+    home: [0.600, 1.000, 180.0]  # the robot start pose, facing -x (user 2026-11-14; was the brief zone centre 0.743, 0.950)
+    # Where the upper cam reads the barcode, [x m, y m, yaw deg] map frame; [] = read it where the robot stands.
+    # Brief (mission.pdf, 2026-11-14 user): the barcode is 0.40 m high anywhere on the 3rd wall panel from (0,0)
+    # along +y (the traffic light's panel; posts every 0.394 m -> y 0.818..1.152, centre 0.985), facing +x, wall
+    # face x ~0.08. The traffic light (0.08, 0.95) stands right in front of that panel and is an obstacle.
+    # Upper cam (URDF: base -0.062 x, -0.0325 y, 0.593 high, 43.6 deg down, 42 deg vertical FOV): an 8 cm label
+    # reads from <= ~0.6 m (PC D435 bags, 2026-11-14); a 0.40 m high one stays in view up to ~0.46 m horizontal.
+    # x 0.48: robot front (r 0.20) 0.28 m from the light centre (~0.2 m from its stand), camera 0.46 m from the
+    # wall = at the top edge of the view by the URDF pitch. y 0.95: camera on the panel centre. Facing -x.
+    # TODO(user): on the robot, check the label is inside the upper-cam view here and the planner accepts the pose.
+    # user 2026-11-14: the start pose is moved so the barcode is read from there (no view drive): barcode_view left
+    # out = [] (mission_master default). Do not write "barcode_view: []": an empty list has no type and the node dies.
+    # barcode_view: [0.48, 0.95, 180.0]
     home_still_s: 3.0          # stand still in the start zone this long (brief: 3 s)
     # START clears the blink counter, the barcode and the puck survey of perception, so START comes before the
     # operator starts the light. false: keep what perception already holds.
@@ -27,8 +39,8 @@ mission_master:
     # true: all three locations are placed first, then each is visited again and verified (the brief's order).
     # false: a location is verified right after its pucks are placed, before leaving it.
     verify_after_all: true
-    # true (user 2026-11-12, no arm for now): skip the barcode and every arm action. After the signal is complete the
-    # robot drives up to S1..S6, then L1..L3, then home. false = the full mission (barcode, pick, place, verify).
+    # true (user 2026-11-12, no arm for now): skip every arm action. The upper-cam barcode is still read (2026-11-14), then the
+    # robot drives up to S1..S6, then L1..L3, then home. false = the full mission (pick, place, verify).
     drive_only: true
     # --- skeleton parts (observe / pick / place / verify are not connected yet) ---
     skeleton_action_s: 0.5     # a skeleton action reports done after this long

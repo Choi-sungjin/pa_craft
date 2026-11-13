@@ -219,6 +219,8 @@ PlanningConfig load_planning_config(rclcpp::Node &node, const std::string &share
   config.path.block_size = p.positive_param("path_planner.block_size");
   config.path.r_robot = p.positive_param("path_planner.r_robot");
   config.path.r_approach = p.positive_param("path_planner.r_approach");
+  config.path.r_obstacle = p.positive_param("path_planner.r_obstacle");
+  config.path.r_turn = p.positive_param("path_planner.r_turn");
   config.path.margin = p.nonnegative("path_planner.margin");
   config.path.lam = p.nonnegative("path_planner.lam");
   config.path.w_prox = p.nonnegative("path_planner.w_prox");

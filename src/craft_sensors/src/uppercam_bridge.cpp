@@ -7,6 +7,8 @@
 //        /perception/uppercam/observation (every camera frame, base_link frame, request_id 0)
 //        /perception/uppercam/diagnostics (JSON per camera result while a camera request runs)
 //        /perception/uppercam/image_raw/compressed (JPEG preview at preview_hz, only with a subscriber)
+//   in : /perception/uppercam/hires (std_msgs/Bool, transient local; 2026-11-14): true = colour at hires_size (the
+//        mission barcode, read only at 1080p), false = color_size. The pipeline restarts on a change (~1 s gap).
 // Differences: the geometry runs in this process on the camera thread (C++ is ~4x faster than the Python workers, so
 // no worker pool); the Python file-hash manifest check is gone (it pinned the Python files; this port was checked
 // against them on boxgap_1108_1236 instead: same detections, holdout MAE 1.41 vs 1.43 mm); box_depth reproject and
@@ -23,6 +25,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/compressed_image.hpp>
 #include <sensor_msgs/msg/laser_scan.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <tf2/exceptions.hpp>
 #include <tf2_ros/buffer.hpp>
@@ -129,13 +132,17 @@ public:
     color_size_ = parse_size(declare_parameter<std::string>("color_size", "640x360"), "color size");
     const auto box = declare_parameter<std::string>("box_size", "");  // estimator grid, same aspect; default colour size
     box_size_ = box.empty() ? color_size_ : parse_size(box, "box size");
+    // Colour size while /perception/uppercam/hires is true; "" = no switching (color_size always).
+    const auto hires = declare_parameter<std::string>("hires_size", "");
+    hires_size_ = hires.empty() ? color_size_ : parse_size(hires, "hires size");
     const double preview_hz = declare_parameter<double>("preview_hz", 2.0);
     if (!(camera_timeout_ > 0 && camera_timeout_ <= 0.5)) throw std::runtime_error("camera timeout must be >0 and <=0.5 s");
     if (!std::isfinite(camera_front_face_x_) || camera_front_face_x_ < 0 || !std::isfinite(camera_box_side_) || camera_box_side_ <= 0)
       throw std::runtime_error("invalid camera reference geometry");
-    if (!(box_size_.width <= color_size_.width && box_size_.height <= color_size_.height) ||
-        std::abs(box_size_.width * color_size_.height - box_size_.height * color_size_.width) > std::max(color_size_.width, color_size_.height))
-      throw std::runtime_error("box size must be <= colour size with the same aspect");
+    for (const auto & cs : {color_size_, hires_size_})
+      if (!(box_size_.width <= cs.width && box_size_.height <= cs.height) ||
+          std::abs(box_size_.width * cs.height - box_size_.height * cs.width) > std::max(cs.width, cs.height))
+        throw std::runtime_error("box size must be <= colour and hires size with the same aspect");
     preview_period_ = 1.0 / preview_hz;
     if (!(std::isfinite(preview_period_) && 1.0 / 30 <= preview_period_ && preview_period_ <= 10.0)) throw std::runtime_error("preview hz must be 0.1..30");
     {
@@ -174,6 +181,11 @@ public:
       });
     obstacle_sub_ = create_subscription<geometry_msgs::msg::PoseArray>(
       "/perception/lidar/obstacle", 10, [this](geometry_msgs::msg::PoseArray::ConstSharedPtr m) { find_box(*m); });
+    hires_sub_ = create_subscription<std_msgs::msg::Bool>(
+      "/perception/uppercam/hires", rclcpp::QoS(1).transient_local(), [this](std_msgs::msg::Bool::ConstSharedPtr m) {
+        if (m->data != want_hires_.exchange(m->data))
+          RCLCPP_INFO(get_logger(), "colour %s requested", m->data ? "hires" : "normal");
+      });
     drain_timer_ = create_wall_timer(std::chrono::milliseconds(10), [this] { drain(); });
     lidar_timer_ = create_wall_timer(std::chrono::milliseconds(5), [this] { retry_lidar(); });
     preview_thread_ = std::thread([this] { preview_worker(); });
@@ -479,12 +491,15 @@ private:
         cfg.enable_device(serial_);
         // Depth is aligned to colour, so the estimator's input grid is the colour size (or box_size below it).
         cfg.enable_stream(RS2_STREAM_DEPTH, depth_size_.width, depth_size_.height, RS2_FORMAT_Z16, 30);
-        cfg.enable_stream(RS2_STREAM_COLOR, color_size_.width, color_size_.height, RS2_FORMAT_BGR8, 30);
+        const bool hires = want_hires_.load();
+        const cv::Size cs = hires ? hires_size_ : color_size_;
+        cfg.enable_stream(RS2_STREAM_COLOR, cs.width, cs.height, RS2_FORMAT_BGR8, 30);
         const auto profile = pipe->start(cfg);
+        RCLCPP_INFO(get_logger(), "upper cam colour %dx%d", cs.width, cs.height);
         const double scale = profile.get_device().first<rs2::depth_sensor>().get_depth_scale();
         rs2::align align(RS2_STREAM_COLOR);
         estimator_->reset();
-        while (!quit_) {
+        while (!quit_ && want_hires_.load() == hires) {
           rs2::frameset frames;
           if (!pipe->try_wait_for_frames(&frames, 100)) continue;
           const rs2::video_frame colour = frames.get_color_frame();
@@ -497,6 +512,10 @@ private:
             continue;
           }
           offer_preview(colour);
+          // Hires (barcode) frames: no depth align / box estimate. Aligning depth to 1080p on every frame made the
+          // frames too old for the 0.3 s preview check: no preview at all (robot 2026-11-14). The box is not
+          // observed while the barcode is read.
+          if (hires) continue;
           const long index = static_cast<long>(depth.get_frame_number());
           const auto aligned = align.process(frames);
           const rs2::depth_frame d = aligned.get_depth_frame();
@@ -757,7 +776,9 @@ private:
   std::string urdf_, serial_;
   bool square_enabled_{false};
   double camera_timeout_{}, camera_front_face_x_{}, camera_box_side_{}, preview_period_{}, lidar_min_{}, lidar_max_{};
-  cv::Size depth_size_, color_size_, box_size_;
+  cv::Size depth_size_, color_size_, box_size_, hires_size_;
+  std::atomic<bool> want_hires_{false};
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr hires_sub_;
   uppercam::CameraMount mount_;
   std::unique_ptr<uppercam::SquareFar20Estimator> estimator_;  // camera thread only
 

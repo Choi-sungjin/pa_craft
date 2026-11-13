@@ -36,6 +36,7 @@ struct MissionAction {
     PlacePuck,        // at location `box`: take puck `puck_id` out of clock slot `slot` onto grid spot `spot`
     VerifyLocation,   // at location `box`: look and record the pucks standing there
     GoHome,           // drive back into the start zone
+    ViewBarcode,      // drive to the barcode view pose (mission.yaml barcode_view) and stop there to read it
     HoldStill,        // stand still for `seconds`
   };
   Kind kind = Kind::None;
@@ -61,10 +62,13 @@ struct MissionConfig {
   // The pick does not report which puck it took (PickPuck is a skeleton): hand the surveyed ids out to the unknown
   // slots, lowest first, so the rest of the mission can be walked through. false: an unknown slot is a fault.
   bool assume_unknown_picks = false;
-  // Drive-only run (no arm, no barcode; user 2026-11-12): start -> WatchSignal, and once the signal is complete
+  // Drive-only run (no arm; the barcode is still read, 2026-11-14; user 2026-11-12): start -> WatchSignal, and once the signal is complete
   // drive up to every start box, then every location, then home. No ObservePucks / PickPuck / PlacePuck /
   // VerifyLocation, no allocation; the signal is still recorded and checked.
   bool drive_only = false;
+  // ReadBarcode first drives to the barcode view pose when the code is not read yet (user 2026-11-14: the upper cam
+  // reads it only from ~0.4 m, not from the start). false: wait where the robot stands.
+  bool view_barcode = false;
 };
 
 // What the mission sees of the world; copied in on every tick.

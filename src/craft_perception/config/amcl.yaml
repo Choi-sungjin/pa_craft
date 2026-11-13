@@ -46,6 +46,6 @@ amcl:
     save_pose_rate: 0.5
     # Placeholder start (start zone centre, facing the light); global_localize.py corrects it on /initialpose.
     set_initial_pose: true
-    initial_pose: {x: 0.743, y: 0.950, z: 0.0, yaw: 3.14159}
+    initial_pose: {x: 0.600, y: 1.000, z: 0.0, yaw: 3.14159}  # start pose (user 2026-11-14)
     always_reset_initial_pose: false
     first_map_only: true

@@ -449,8 +449,8 @@ struct PlanningMaster::Impl
     }
     // What blocks a line: the nearest obstacle point within the padding, else the map (a wall's padding).
     std::string blocker(const Path &path, double now) const {
-      const double pad = config.path.r_robot + config.path.margin;
-      double best = pad; std::string what = "the map padding (a wall within " + std::to_string(pad).substr(0, 5) + " m)";
+      const double wall = config.path.r_robot + config.path.margin, pad = path_planner.obstacle_padding();
+      double best = pad; std::string what = "the map padding (a wall within " + std::to_string(wall).substr(0, 5) + " m)";
       for (const auto &o : obstacles(now).poses) {
         for (std::size_t i = 1; i < path.poses.size(); ++i) {
           const auto &a = path.poses[i - 1].pose.position, &b = path.poses[i].pose.position;
@@ -836,14 +836,29 @@ struct PlanningMaster::Impl
     }
     // /planning/leave_box: straight back along the robot's own heading. Only the end pose is checked against the map
     // and the LiDAR obstacles: the start is inside the padding of the box just docked at, and the line back is the
-    // one the dock came in on.
+    // one the dock came in on. Of the free ends (reverse_min_distance..reverse_distance, 5 cm steps) the one farthest
+    // from every wall and obstacle (the middle of the lane along the line back), where the next drive turns in place
+    // (user 2026-11-14; was the longest free one). A straight back cannot move sideways: off-centre lanes keep their offset.
     Computation leave_path() {
       Computation out; out.generation = fsm.generation();
       if (!odom.fresh(seconds(), config.odom_timeout_s)) {out.retryable = true; out.error = "leave: no fresh odom"; return out;}
       const auto &pose = odom.value.pose.pose;
       const double yaw = 2 * std::atan2(pose.orientation.z, pose.orientation.w), ux = std::cos(yaw), uy = std::sin(yaw);
       const auto points = obstacles(seconds());
+      std::vector<double> lengths;
+      std::vector<geometry_msgs::msg::Point> ends;
       for (double d = config.box.reverse_distance; d >= config.box.reverse_min_distance - 1e-9; d -= 0.05) {
+        geometry_msgs::msg::Point e; e.x = pose.position.x - ux * d; e.y = pose.position.y - uy * d;
+        Path end; end.header.frame_id = config.path.map_frame;
+        Pose p; p.header = end.header; p.pose.position = e; p.pose.orientation = pose.orientation; end.poses.push_back(p);
+        if (!path_planner.collision_free(end, points)) continue;
+        lengths.push_back(d); ends.push_back(e);
+      }
+      if (!ends.empty()) {
+        const auto room = path_planner.clearance(ends, points);
+        std::size_t best = 0;  // the longest among equals (1 cm): more room to straighten out
+        for (std::size_t i = 1; i < room.size(); ++i) {if (room[i] > room[best] + 0.01) best = i;}
+        const double d = lengths[best];
         const int n = std::max(1, static_cast<int>(std::ceil(d / 0.02)));
         Path path; path.header.frame_id = config.path.map_frame; path.header.stamp = node.now();
         std::vector<double> speeds;
@@ -855,11 +870,12 @@ struct PlanningMaster::Impl
           const double left = d * (n - i) / n;
           speeds.push_back(std::clamp(std::sqrt(2 * config.path.a_lon_max * left), config.path.v_min, config.box.reverse_speed));
         }
-        Path end = path; end.poses.erase(end.poses.begin(), end.poses.end() - 1);
-        if (!path_planner.collision_free(end, points)) continue;
         out.ok = true; out.path = std::move(path); out.speed_limit = std::move(speeds);
-        say("[leave " + step->leave_from + "] back out " + std::to_string(d).substr(0, 4) + " m at " +
-            std::to_string(config.box.reverse_speed).substr(0, 4) + " m/s");
+        char t[200];
+        std::snprintf(t, sizeof(t), "[leave %s] back out %.2f m at %.2f m/s: the widest point on the line back, %.3f m to "
+                      "the nearest wall/obstacle%s", step->leave_from.c_str(), d, config.box.reverse_speed, room[best],
+                      room[best] < path_planner.turn_padding() - 1e-9 ? " (less than a turn in place needs)" : "");
+        say(t);
         return out;
       }
       out.retryable = true;
@@ -869,6 +885,27 @@ struct PlanningMaster::Impl
     }
     // Past the drive to the stage point (turned there, the dock path): the map padded with r_approach.
     bool docking() const {return approach.has_value() && box_phase != BoxPhase::Stage;}
+    // A new drive whose path leaves more than 30 deg off the robot's heading starts with a turn in place (control):
+    // reported when the robot stands closer than r_turn to a wall or obstacle there (the driving padding r_robot
+    // is smaller; user 2026-11-14). Report only: the robot is already there.
+    void report_start_turn(const Path &path, double now) {
+      if (path.poses.size() < 2 || !odom.valid) return;
+      const auto &o = odom.value.pose.pose;
+      const auto &a = path.poses.front().pose.position;
+      std::size_t i = 1;
+      while (i + 1 < path.poses.size() &&
+             std::hypot(path.poses[i].pose.position.x - a.x, path.poses[i].pose.position.y - a.y) < 0.10) ++i;
+      const auto &b = path.poses[i].pose.position;
+      const double yaw = 2 * std::atan2(o.orientation.z, o.orientation.w);
+      const double turn = std::abs(std::remainder(std::atan2(b.y - a.y, b.x - a.x) - yaw, 2 * M_PI));
+      if (turn < 30.0 * M_PI / 180) return;
+      const double room = path_planner.clearance({o.position}, obstacles(now)).front(), need = path_planner.turn_padding();
+      if (room >= need - 1e-9) return;
+      char t[200];
+      std::snprintf(t, sizeof(t), "turn in place at the start (%.0f deg) %.3f m from the nearest wall/obstacle, "
+                    "a turn needs %.3f m: the corners may touch", turn * 180 / M_PI, room, need);
+      say(t);
+    }
     void command(double now, bool update = false) {
       if (step->box_near_entry && !update) {
         result.reset(); command_at = now; dispatched = false;
@@ -890,6 +927,7 @@ struct PlanningMaster::Impl
                 box_request.source != "lidar") request_box_observation("lidar", now);
           } else if (step->box.empty() || !update) {approach.reset();}
           c.path = result->path; c.path.header.stamp = node.now(); c.speed = drive_speed();
+          if (!update && !step->leave && !docking()) report_start_turn(c.path, now);
           {
             // A STOP_TURN within min_segment_m of the start is skipped (control turns in place first anyway): a
             // segment shorter than the arrival tolerance would "arrive" at once, forever (2026-11-01 bags).

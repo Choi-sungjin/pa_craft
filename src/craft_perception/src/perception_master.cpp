@@ -318,6 +318,28 @@ void PerceptionMaster::configure() {
     if (!barcode_decoder_available()) {
       mission_event("ERROR", "BARCODE_DECODER_MISSING", "built without zxing-cpp (libzxing-dev): the barcode will not be read");
     }
+    barcode_locator_.work_width = param<int64_t>("uppercam.barcode.work_width");
+    barcode_locator_.min_gradient = static_cast<float>(param<double>("uppercam.barcode.min_gradient"));
+    barcode_locator_.max_regions = param<int64_t>("uppercam.barcode.max_regions");
+    barcode_decode_ = param<bool>("uppercam.barcode.decode");
+    barcode_full_frame_every_ = param<int64_t>("uppercam.barcode.full_frame_every");
+    barcode_match_.enabled = param<bool>("uppercam.barcode.match.enabled");
+    barcode_match_.codes = param<std::vector<std::string>>("uppercam.barcode.match.codes");
+    barcode_match_.regions = param<int64_t>("uppercam.barcode.match.regions");
+    barcode_match_.min_score = param<double>("uppercam.barcode.match.min_score");
+    barcode_match_.min_margin = param<double>("uppercam.barcode.match.min_margin");
+    barcode_match_.votes = param<int64_t>("uppercam.barcode.match.votes");
+    barcode_match_.min_share = param<double>("uppercam.barcode.match.min_share");
+    if (!barcode_decode_ && !barcode_match_.enabled) {
+      throw std::invalid_argument("uppercam.barcode: decode and match.enabled are both off, the barcode is never read");
+    }
+    if (barcode_match_.enabled && (barcode_match_.codes.size() < 2 || barcode_match_.regions < 1 ||
+        barcode_match_.votes < 1 || barcode_match_.min_share <= 0.5 || barcode_match_.min_share > 1.0)) {
+      throw std::invalid_argument("invalid uppercam.barcode.match configuration in perception.yaml");
+    }
+    if (!barcode_locator_.valid() || barcode_full_frame_every_ < 0) {
+      throw std::invalid_argument("invalid uppercam.barcode configuration in perception.yaml");
+    }
     const auto yolo = yolo_param("uppercam.yolo", uppercam_labels_);
     if (!uppercam_yolo_.configure(yolo)) {
       throw std::invalid_argument("cannot load the " + yolo.backend + " model for uppercam.yolo (see stderr)");
@@ -524,12 +546,17 @@ void PerceptionMaster::connect() {
   // Confirmed Code 128 text (P2-01..04; anything else = unregistered -> mission error). Latched.
   barcode_pub_ = create_publisher<std_msgs::msg::String>("/perception/vision/uppercam/barcode",
     rclcpp::QoS(1).transient_local());
+  // Upper-cam colour size for the bridge (2026-11-14): the light is counted at the normal size (640x360, full rate);
+  // only after SIGNAL_COMPLETE, while the barcode is not confirmed, 1080p (the barcode is unreadable below it). Latched.
+  hires_pub_ = create_publisher<std_msgs::msg::Bool>("/perception/uppercam/hires", rclcpp::QoS(1).transient_local());
+  publish_hires(false);
   traffic_light_reset_sub_ = create_subscription<std_msgs::msg::Empty>("/perception/traffic_light/reset", 10,
     [this](std_msgs::msg::Empty::ConstSharedPtr) {
       std::lock_guard<std::mutex> lock(traffic_light_mutex_);
       traffic_light_.reset();
       barcode_.reset();
       barcode_pub_->publish(std_msgs::msg::String());  // empty = not read yet
+      publish_hires(false);
       std_msgs::msg::Header header;
       header.stamp = now();
       header.frame_id = uppercam_frame_;
@@ -1099,7 +1126,7 @@ bool PerceptionMaster::uppercam_traffic_light(Task &task) {
   {
     std::lock_guard<std::mutex> lock(traffic_light_mutex_);
     need_signal = !traffic_light_.complete();
-    need_barcode = !barcode_.confirmed();
+    need_barcode = !need_signal && !barcode_.confirmed();  // after the light: frames are 1080p only then
   }
   if (!need_signal && !need_barcode) return false;
   if (!is_fresh_input(image->header.stamp)) return false;
@@ -1107,11 +1134,37 @@ bool PerceptionMaster::uppercam_traffic_light(Task &task) {
     const_cast<uint8_t *>(image->data.data())), cv::IMREAD_COLOR);
   if (!uppercam_yolo_.is_valid_input(bgr)) return false;
   if (need_barcode) {
-    const auto texts = decode_code128(bgr);
+    // Whole frame every full_frame_every frames, plus the candidate regions (upscaled when small) every frame.
+    // uppercam.barcode.decode false (user 2026-11-14: the label is always one of the mission codes): no decoder, the
+    // pattern vote alone.
+    std::vector<std::string> texts;
+    const auto regions = find_barcode_regions(bgr, barcode_locator_);
+    if (barcode_decode_) {
+      if (barcode_full_frame_every_ > 0 && barcode_frames_++ % barcode_full_frame_every_ == 0) texts = decode_code128(bgr);
+      for (auto &t : decode_code128_regions(bgr, regions)) {
+        if (std::find(texts.begin(), texts.end(), t) == texts.end()) texts.push_back(std::move(t));
+      }
+    }
+    // Nothing decoded: pattern-match the four mission codes on the best regions (too small / bent to decode).
+    std::optional<KnownCodeMatch> match;
+    if (texts.empty() && barcode_match_.enabled) {
+      const std::vector<cv::Rect> top(regions.begin(),
+        regions.begin() + std::min<std::size_t>(barcode_match_.regions, regions.size()));
+      match = match_known_code128(bgr, top, barcode_match_.codes);
+      if (match && (match->score < barcode_match_.min_score || match->margin < barcode_match_.min_margin)) match.reset();
+    }
     std::lock_guard<std::mutex> lock(traffic_light_mutex_);
-    if (barcode_.update(texts)) {
+    const bool confirmed = barcode_.update(texts) ||
+      (match && barcode_.vote(match->text, barcode_match_.votes, barcode_match_.min_share));
+    if (confirmed) {
+      publish_hires(false);
       std_msgs::msg::String output;
       output.data = *barcode_.text();
+      if (barcode_.confirmed_by_vote()) {
+        const auto &v = barcode_.votes();
+        mission_event("INFO", "BARCODE_PATTERN_VOTE", "code=%s votes=%d (not decoded: pattern match of %zu codes)",
+          output.data.c_str(), v.at(output.data), barcode_match_.codes.size());
+      }
       barcode_pub_->publish(output);
       const auto order = barcode_.order();
       if (order) {
@@ -1145,6 +1198,7 @@ bool PerceptionMaster::uppercam_traffic_light(Task &task) {
   if (traffic_light_.complete()) {  // the light stayed dark for end_off_s after a valid 12
     mission_event("INFO", "SIGNAL_COMPLETE", "(%d/%d) total R=%d Y=%d G=%d",
       counts.total(), traffic_light_.expected_blinks(), counts.red(), counts.yellow(), counts.green());
+    if (!barcode_.confirmed()) publish_hires(true);  // now the barcode: 1080p until it is confirmed
   }
   if (blink || traffic_light_.complete()) publish_traffic_light(header);
   return true;
@@ -1744,3 +1798,11 @@ int main(int argc, char **argv) {
   }
   rclcpp::shutdown(); return result;
 }
+
+namespace craft_perception {
+void PerceptionMaster::publish_hires(bool on) {
+  std_msgs::msg::Bool m;
+  m.data = on;
+  hires_pub_->publish(m);
+}
+}  // namespace craft_perception

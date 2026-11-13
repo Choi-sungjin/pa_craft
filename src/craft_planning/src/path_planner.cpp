@@ -64,6 +64,11 @@ void require(bool valid, const std::string & error)
   if (!valid) {throw std::invalid_argument(error);}
 }
 
+// Paddings [m] (margin included): walls (inflate), LiDAR obstacle points, a turn in place. 0 = r_robot.
+double wall_pad(const PathPlannerConfig & c) {return c.r_robot + c.margin;}
+double obstacle_pad(const PathPlannerConfig & c) {return (c.r_obstacle > 0 ? c.r_obstacle : c.r_robot) + c.margin;}
+double turn_pad(const PathPlannerConfig & c) {return (c.r_turn > 0 ? c.r_turn : c.r_robot) + c.margin;}
+
 void allocate(Grid & g, double width, double height, const PathPlannerConfig & config)
 {
   require(std::isfinite(width) && std::isfinite(height) && width >= 1 && height >= 1 &&
@@ -288,7 +293,9 @@ Grid obstacle_snapshot(const Grid & original, const geometry_msgs::msg::PoseArra
   // Each new obstacle cell lowers the clearance around it out to the widest band any check reads (padding +
   // prox_band): the values of inflating the whole grid again (a min of distances) without a distance transform
   // over the whole map on every check (1 cm map: ~0.5 M cells, ~0.1 s; the box retries starved the odom input).
-  const double pad = config.r_robot + config.margin, reach = pad + config.prox_band + grid.res;
+  // Obstacle points pad with r_obstacle (walls already carry r_robot from inflate); the clearance reaches r_turn too.
+  const double pad = obstacle_pad(config);
+  const double reach = std::max({wall_pad(config), pad, turn_pad(config)}) + config.prox_band + grid.res;
   const int k = static_cast<int>(std::ceil(reach / grid.res));
   for (const auto & p : obstacles.poses) {
     require(std::isfinite(p.position.x) && std::isfinite(p.position.y) && std::isfinite(p.position.z), "Obstacle position is not finite");
@@ -301,7 +308,8 @@ Grid obstacle_snapshot(const Grid & original, const geometry_msgs::msg::PoseArra
         const double d = std::max(std::hypot(dx, dy) * grid.res - 0.5 * grid.res, 0.0);
         if (d > reach || !grid.contains(cx + dx, cy + dy)) {continue;}
         const int i = grid.index(cx + dx, cy + dy);
-        if (d < grid.clearance[i]) {grid.clearance[i] = d; grid.blocked[i] = grid.occupied[i] || d < pad;}
+        if (d < pad) {grid.blocked[i] = 1;}  // also where a wall is nearer (its own padding is r_robot)
+        if (d < grid.clearance[i]) {grid.clearance[i] = d;}
       }
     }
     grid.blocked[cell] = 1;
@@ -841,7 +849,9 @@ std::vector<Point> smooth_global(
   const auto clip = [&](Point p) {
       const auto q = project(global, arc, p);
       return q.distance <= c.local_max_dev ? p : q.p + (p - q.p) * (c.local_max_dev / q.distance);};
-  const double pad = c.r_robot + c.margin, target = pad + kClearBand;
+  // Pushed out to the wider padding + kClearBand where it can (as before the wall/obstacle split); in a lane too
+  // narrow for that the points stay where they are free (the walls only block within r_robot).
+  const double pad = std::max(wall_pad(c), obstacle_pad(c)), target = pad + kClearBand;
   const double kmax = std::min(c.a_lat_max / (c.v_ref * c.v_ref), c.w_max / c.v_ref);
   const std::size_t n = P.size();
   std::vector<Point> upd(n);
@@ -988,7 +998,8 @@ constexpr double kBoxTolerance = 0.08;  // [m] map box outline vs the box_approa
 // reaches every band a check reads (padding + prox_band) past the corridor, not on the whole map.
 void open_approach(Grid & g, const PathPlannerConfig & c, const BoxTarget & box, Point goal, double heading)
 {
-  const double pad = c.r_robot + c.margin;
+  // The crop is inflated without telling walls from obstacle points: the wider padding, as before the split.
+  const double pad = std::max(wall_pad(c), obstacle_pad(c));
   const Point entry = goal - Point{std::cos(heading), std::sin(heading)} * (c.approach_len + g.res);
   const Point seg = goal - entry;
   const double len2 = squared(seg), m = 2 * pad + c.prox_band + 2 * g.res;
@@ -1048,6 +1059,8 @@ void PathPlanner::configure(const PathPlannerConfig & config)
     require(!config.map_file.empty() && !config.map_frame.empty(), "map_file and map_frame are required");
     for (const double p : {config.res, config.block_size, config.prox_band, config.arc_sample}) {require(std::isfinite(p) && p > 0, "Planner lengths must be positive and finite");}
     require(std::isfinite(config.r_approach) && config.r_approach >= 0, "r_approach must be nonnegative");
+    require(std::isfinite(config.r_obstacle) && config.r_obstacle >= 0 && std::isfinite(config.r_turn) &&
+      config.r_turn >= 0, "r_obstacle and r_turn must be nonnegative");
     for (const double p : {config.r_robot, config.margin, config.lam, config.w_prox}) {require(std::isfinite(p) && p >= 0, "Planner costs and footprint must be nonnegative and finite");}
     for (const double p : {config.r_hi_global, config.r_tol, config.v_ref, config.w_max, config.a_lat_max,
          config.a_lon_max, config.approach_len, config.wheel_radius, config.wheel_separation, config.max_wheel, config.v_min}) {require(std::isfinite(p) && p > 0, "Planner fillet/speed parameters must be positive and finite");}
@@ -1081,6 +1094,7 @@ void PathPlanner::configure(const PathPlannerConfig & config)
     if (config.r_approach > 0 && config.r_approach != config.r_robot) {
       auto approach = std::make_shared<Data>(*data);
       approach->config.r_robot = config.r_approach;
+      approach->config.r_obstacle = config.r_approach;  // the dock pads walls and obstacles alike, as before
       inflate(approach->grid, config.r_approach + config.margin);
       data->approach = approach;
     }
@@ -1286,6 +1300,9 @@ PathPlan PathPlanner::plan_box(
     require(std::isfinite(box.x) && std::isfinite(box.y) && std::isfinite(box.yaw) && box.side > 0 && box.standoff > 0,
       "Invalid box target");
     const double reach = box.side / 2 + box.standoff;  // box centre -> goal
+    // The robot turns in place at the stage point (square to the face): it needs r_turn there, more than the
+    // driving padding (user 2026-11-14).
+    const auto turn_grid = stage_lead > 0 ? obstacle_snapshot(data->grid, map_obstacles, config) : Grid{};
     for (int k = 0; k < 4; ++k) {
       const double normal = box.yaw + k * kPi / 2, heading = normal + kPi;
       if (face_normal && std::abs(std::remainder(normal - *face_normal, 2 * kPi)) > kPi / 4) {continue;}
@@ -1315,6 +1332,15 @@ PathPlan PathPlanner::plan_box(
           line.poses = {stage, goal};
           const BoxApproach dock{box, goal.pose};
           if (!collision_free_on(dock_data, line, map_obstacles, &dock)) {stage_why = "dock line in the padding"; continue;}
+          {
+            const double room = clearance_at(turn_grid, turn_grid.local(stage.pose.position));
+            if (room < turn_pad(config) - 1e-9) {
+              char t[96];
+              std::snprintf(t, sizeof(t), "stage point %.3f m from a wall/obstacle, a turn there needs %.3f m", room,
+                turn_pad(config));
+              stage_why = t; continue;
+            }
+          }
           // Into the stage point straight along the face normal (approach_len), so the tracking error is steered
           // out before it stops there: control's arrival takes any side offset up to wheel_goal_tolerance and the
           // dock starts from it (2026-11-10: arriving from the side left 48 mm, the dock swung to -16 deg and
@@ -1532,5 +1558,33 @@ double PathPlanner::clear_length_on(
     }
     return std::numeric_limits<double>::infinity();
   } catch (const std::exception &) {return 0.0;}
+}
+
+std::vector<double> PathPlanner::clearance(
+  const std::vector<geometry_msgs::msg::Point> & points, const geometry_msgs::msg::PoseArray & map_obstacles) const
+{
+  std::vector<double> out(points.size(), 0.0);
+  const auto data = std::atomic_load(&data_);
+  if (!data) {return out;}
+  try {
+    const auto grid = obstacle_snapshot(data->grid, map_obstacles, data->config);
+    for (std::size_t i = 0; i < points.size(); ++i) {
+      const int cell = grid.cell(grid.local(points[i]));
+      out[i] = cell < 0 ? 0.0 : grid.clearance[cell];
+    }
+  } catch (const std::exception &) {std::fill(out.begin(), out.end(), 0.0);}
+  return out;
+}
+
+double PathPlanner::turn_padding() const
+{
+  const auto data = std::atomic_load(&data_);
+  return data ? turn_pad(data->config) : 0.0;
+}
+
+double PathPlanner::obstacle_padding() const
+{
+  const auto data = std::atomic_load(&data_);
+  return data ? obstacle_pad(data->config) : 0.0;
 }
 }  // namespace craft_planning

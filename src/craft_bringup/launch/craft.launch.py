@@ -166,7 +166,8 @@ def generate_launch_description():
         cmd=['/usr/bin/python3', os.path.join(repo_root(), 'demo', 'corner', 'global_localize.py'),
              '--map', PythonExpression(["'", LaunchConfiguration('map_file'), "' if '", LaunchConfiguration('localization'),
                                         "' == 'amcl' else '", LaunchConfiguration('slam_map'), ".yaml'"]),
-             '--near', LaunchConfiguration('initial_x'), LaunchConfiguration('initial_y')],
+             '--near', LaunchConfiguration('initial_x'), LaunchConfiguration('initial_y'),
+             '--yaw', LaunchConfiguration('initial_yaw')],
         name='global_localize', output='screen',
         condition=IfCondition(PythonExpression(find_start))))
     nodes.append(GroupAction([slam,
@@ -222,9 +223,11 @@ def generate_launch_description():
         DeclareLaunchArgument('global_localize', default_value='true', choices=['true', 'false'],
                               description='with slam_map:=, find the robot over the whole map at start-up '
                                           '(demo/corner/global_localize.py -> /initialpose)'),
-        DeclareLaunchArgument('initial_x', default_value='0.743',
+        DeclareLaunchArgument('initial_x', default_value='0.600',  # user 2026-11-14: start (0.6, 1.0), facing -x
                               description='rough start position x [m, map]: global_localize searches within 0.5 m'),
-        DeclareLaunchArgument('initial_y', default_value='0.950',
+        DeclareLaunchArgument('initial_yaw', default_value='180.0',
+                              description='start heading [deg, map]: global_localize searches within 20 deg of it'),
+        DeclareLaunchArgument('initial_y', default_value='1.000',
                               description='rough start position y [m, map] (start zone, user 2026-11-12)'),
         DeclareLaunchArgument('slam_search', default_value='wide', choices=['narrow', 'wide'],
                               description='scan-match position search: narrow +-5 cm (slam.yaml) or wide '

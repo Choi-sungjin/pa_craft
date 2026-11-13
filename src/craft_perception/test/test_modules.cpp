@@ -1440,6 +1440,81 @@ TEST(Barcode, DecodesRenderedCode128) {
   }
   EXPECT_TRUE(decode_code128(cv::Mat(360, 640, CV_8UC3, cv::Scalar(90, 90, 90))).empty());
 }
+
+TEST(Barcode, LocatesSmallSymbolAnywhereIn1080p) {
+  // 1080p frame, carpet-like noise, the symbol small (2 px per module) at an unknown place, upright or turned 90°.
+  const auto bits = ZXing::MultiFormatWriter(ZXing::BarcodeFormat::Code128).setMargin(0).encode("P2-03", 0, 0);
+  cv::Mat module(1, bits.width(), CV_8U);
+  for (int x = 0; x < bits.width(); ++x) module.at<uint8_t>(0, x) = bits.get(x, 0) ? 20 : 235;
+  cv::Mat symbol;
+  cv::resize(module, symbol, cv::Size(bits.width() * 2, 36), 0, 0, cv::INTER_NEAREST);
+  cv::copyMakeBorder(symbol, symbol, 8, 8, 16, 16, cv::BORDER_CONSTANT, cv::Scalar(235));
+  cv::RNG rng(7);
+  for (const auto &[at, turn] : std::vector<std::pair<cv::Point, bool>>{{{1500, 140}, false}, {{300, 700}, true}}) {
+    cv::Mat scene(1080, 1920, CV_8UC3);
+    rng.fill(scene, cv::RNG::NORMAL, cv::Scalar(120, 125, 130), cv::Scalar(18, 18, 18));
+    cv::GaussianBlur(scene, scene, cv::Size(3, 3), 0);
+    cv::rectangle(scene, cv::Rect(0, 0, 1920, 500), cv::Scalar(150, 120, 90), cv::FILLED);  // plain wall
+    cv::Mat s = symbol.clone();
+    if (turn) cv::rotate(s, s, cv::ROTATE_90_CLOCKWISE);
+    cv::Mat colour;
+    cv::cvtColor(s, colour, cv::COLOR_GRAY2BGR);
+    const cv::Rect where(at, colour.size());
+    colour.copyTo(scene(where));
+    const auto regions = find_barcode_regions(scene);
+    ASSERT_FALSE(regions.empty());
+    bool covered = false;
+    for (const auto &r : regions) covered |= (r & where).area() > 0.8 * where.area();
+    EXPECT_TRUE(covered) << "turn=" << turn;
+    const auto texts = decode_code128_regions(scene, regions);
+    ASSERT_EQ(texts.size(), 1u) << "turn=" << turn;
+    EXPECT_EQ(texts[0], "P2-03");
+  }
+  EXPECT_TRUE(find_barcode_regions(cv::Mat(1080, 1920, CV_8UC3, cv::Scalar(90, 90, 90))).empty());
+}
+
+TEST(Barcode, PatternMatchPicksMissionCodeTooSmallToDecode) {
+  // 1.3 px per module, blurred, turned 15 deg: the decoder gives up, the pattern match still picks the code.
+  const std::vector<std::string> codes{"P2-01", "P2-02", "P2-03", "P2-04"};
+  for (const auto &truth : codes) {
+    const auto bits = ZXing::MultiFormatWriter(ZXing::BarcodeFormat::Code128).setMargin(0).encode(truth, 0, 0);
+    cv::Mat module(1, bits.width(), CV_8U);
+    for (int x = 0; x < bits.width(); ++x) module.at<uint8_t>(0, x) = bits.get(x, 0) ? 30 : 225;
+    cv::Mat big, symbol;
+    cv::resize(module, big, cv::Size(bits.width() * 10, 300), 0, 0, cv::INTER_NEAREST);
+    cv::copyMakeBorder(big, big, 60, 60, 60, 60, cv::BORDER_CONSTANT, cv::Scalar(225));
+    cv::resize(big, symbol, cv::Size(), 0.13, 0.13, cv::INTER_AREA);  // 1.3 px per module
+    cv::GaussianBlur(symbol, symbol, cv::Size(0, 0), 0.8);
+    cv::Mat scene(1080, 1920, CV_8U, cv::Scalar(110));
+    const cv::Rect where(cv::Point(800, 300), symbol.size());
+    symbol.copyTo(scene(where));
+    const cv::Mat turn = cv::getRotationMatrix2D(cv::Point2f(800 + where.width / 2.0f, 300 + where.height / 2.0f), 15, 1.0);
+    cv::warpAffine(scene, scene, turn, scene.size(), cv::INTER_LINEAR, cv::BORDER_REPLICATE);
+    cv::Mat colour;
+    cv::cvtColor(scene, colour, cv::COLOR_GRAY2BGR);
+    const std::vector<cv::Rect> region{cv::Rect(760, 240, where.width + 80, where.height + 120)};
+    EXPECT_TRUE(decode_code128_regions(colour, region).empty()) << truth;
+    const auto m = match_known_code128(colour, region, codes);
+    ASSERT_TRUE(m.has_value()) << truth;
+    EXPECT_EQ(m->text, truth);
+    EXPECT_GT(m->score, 0.6) << truth;
+    EXPECT_GT(m->margin, 0.03) << truth;
+  }
+  EXPECT_FALSE(match_known_code128(cv::Mat(1080, 1920, CV_8UC3, cv::Scalar(90, 90, 90)), {cv::Rect(100, 100, 200, 80)},
+    codes).has_value());
+  BarcodeReader reader;
+  for (int i = 0; i < 14; ++i) EXPECT_FALSE(reader.vote("P2-02", 15, 0.7));
+  for (int i = 0; i < 5; ++i) EXPECT_FALSE(reader.vote("P2-03", 15, 0.7));
+  EXPECT_TRUE(reader.vote("P2-02", 15, 0.7));  // 15 votes, 15 of 20 >= 70 %
+  EXPECT_TRUE(reader.confirmed_by_vote());
+  EXPECT_EQ(reader.order(), SortOrder::kDescending);
+  BarcodeReader split;
+  for (int i = 0; i < 15; ++i) split.vote("P2-01", 15, 0.7);
+  EXPECT_TRUE(split.confirmed());
+  BarcodeReader torn;  // 14 vs 14: 15th vote for one is only 15 of 29 < 70 %
+  for (int i = 0; i < 14; ++i) {torn.vote("P2-01", 15, 0.7); torn.vote("P2-04", 15, 0.7);}
+  EXPECT_FALSE(torn.vote("P2-01", 15, 0.7));
+}
 #endif
 
 TEST(TrafficLightPuzzle, AssociatesTagsWithPuckBoxes) {

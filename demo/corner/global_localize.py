@@ -38,9 +38,9 @@ def yaw_of(q):
 
 
 class GlobalLocalize:
-    def __init__(self, node, matcher, retry_s, near=None, radius=0.5):
+    def __init__(self, node, matcher, retry_s, near=None, radius=0.5, yaw=None):
         self.n, self.matcher, self.retry_s = node, matcher, retry_s
-        self.near, self.radius = near, radius
+        self.near, self.radius, self.yaw = near, radius, yaw
         self.scans = []
         self.tf = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf, node)
@@ -111,7 +111,7 @@ class GlobalLocalize:
         if pts is None or len(pts) < 60:
             return 'too few scan points'
         t0 = time.time()
-        res = self.matcher.localize(pts, near=self.near, radius=self.radius)
+        res = self.matcher.localize(pts, near=self.near, radius=self.radius, yaw=self.yaw)
         pose = res['pose']
         if pose is None:
             return f'no fit within {self.radius} m of {self.near}' if self.near else 'no fit'
@@ -156,12 +156,14 @@ def main():
     ap.add_argument('--retry_s', type=float, default=3.0)
     ap.add_argument('--near', type=float, nargs=2, metavar=('X', 'Y'), help='rough start position (map frame)')
     ap.add_argument('--radius', type=float, default=0.5, help='[m] search radius around --near')
+    ap.add_argument('--yaw', type=float, help='[deg] start heading: only headings within 20 deg of it')
     args, _ros = ap.parse_known_args()
     grid = MapGrid(str(Path(args.map).expanduser()))
     rclpy.init()
     node = rclpy.create_node('global_localize')
     try:
-        GlobalLocalize(node, ScanMatcher(grid), args.retry_s, tuple(args.near) if args.near else None, args.radius).run()
+        GlobalLocalize(node, ScanMatcher(grid), args.retry_s, tuple(args.near) if args.near else None, args.radius,
+                       math.radians(args.yaw) if args.yaw is not None else None).run()
     except KeyboardInterrupt:
         pass
     finally:
