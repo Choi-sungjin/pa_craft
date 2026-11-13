@@ -1,11 +1,10 @@
 #include "craft_perception/yolo_detector.hpp"
 #include "craft_perception/object_detector.hpp"
+#include <random>
 #include "craft_perception/puck_axis.hpp"
+#include "craft_perception/puck_tag_axis.hpp"
 #include "craft_perception/d435_perception.hpp"
-#include "craft_perception/c310_perception.hpp"
 #include "craft_perception/apriltag_reader.hpp"
-#include "craft_perception/knob_depth.hpp"
-#include "craft_perception/knob_lever.hpp"
 #include "craft_perception/shared_frame.hpp"
 #include "craft_perception/state_estimator.hpp"
 #include "craft_perception/imu_processor.hpp"
@@ -16,6 +15,12 @@
 #include "craft_perception/lidar_obstacle_detector.hpp"
 #include "craft_perception/lidar_obstacle_filter.hpp"
 #include "craft_perception/lidar_perception.hpp"
+#include "craft_perception/traffic_light.hpp"
+#include "craft_perception/barcode_reader.hpp"
+#ifdef CRAFT_WITH_ZXING
+#include <ZXing/BitMatrix.h>
+#include <ZXing/MultiFormatWriter.h>
+#endif
 #include <fcntl.h>
 #include <sys/file.h>
 #include <sys/mman.h>
@@ -30,10 +35,6 @@ using namespace craft_perception;
 TEST(ModuleContract, RejectsInvalidConfigurationWithoutThrowing) {
   AprilTagReader apriltag;
   EXPECT_FALSE(apriltag.configure("DICT_4X4_50"));
-  KnobDepth depth;
-  EXPECT_FALSE(depth.configure(1.0, 0.03, 50));
-  EXPECT_FALSE(depth.configure(2.0, std::numeric_limits<double>::quiet_NaN(), 50));
-  EXPECT_FALSE(depth.configure(2.0, 0.03, 2));
   LidarObstacleDetector obstacle;
   EXPECT_FALSE(obstacle.configure(3.0, 0));
   YoloDetector detector;
@@ -47,17 +48,13 @@ TEST(ModuleContract, RejectsInvalidConfigurationWithoutThrowing) {
   PuckAxisConfig puck;
   puck.min_height_m = puck.max_height_m;
   EXPECT_FALSE(PuckAxis().configure(puck));
-  D435Config d435;  // knob id outside the class list, nothing to load
+  D435Config d435;  // nonpositive puck tag box scale, nothing to load
   d435.use_yolo = d435.use_apriltag = d435.use_puck = false;
   d435.obstacle_class_ids = {1};
-  d435.knob_class_id = 5;
+  d435.puck_tag_box_scale = 0;
   EXPECT_FALSE(D435Perception().configure(d435));
-  d435.knob_class_id = 0;
+  d435.puck_tag_box_scale = 1;
   EXPECT_TRUE(D435Perception().configure(d435));
-  C310Config c310;
-  c310.use_knob_lever = false;
-  c310.knob_class_id = -1;
-  EXPECT_FALSE(C310Perception().configure(c310));
 }
 
 TEST(ModuleContract, SeparatesInvalidInputsFromValidEmptyObservations) {
@@ -66,11 +63,8 @@ TEST(ModuleContract, SeparatesInvalidInputsFromValidEmptyObservations) {
   AprilTagReader apriltag;
   EXPECT_FALSE(detector.is_valid_input(gray));
   EXPECT_FALSE(apriltag.is_valid_input(gray));
-  EXPECT_FALSE(KnobLever().is_valid_input(bgr, {20, 20, 5, 5}));
   EXPECT_TRUE(detector.is_valid_input(bgr));
   EXPECT_TRUE(apriltag.is_valid_input(bgr));
-  KnobDepth depth;
-  EXPECT_FALSE(depth.is_valid_input({gray, 1.0, {}}, {0, 0, 5, 5}, {100, 100, 5, 5}));
   sensor_msgs::msg::LaserScan scan;
   LidarObstacleDetector obstacle;
   ASSERT_TRUE(obstacle.configure(3.0, 1));
@@ -132,41 +126,6 @@ TEST(AprilTag, SortsIdsByImagePosition) {
   EXPECT_EQ(result[1].id, 3);
   EXPECT_LT(result[0].center.x, result[1].center.x);
   EXPECT_NEAR(result[0].box.width, 120, 2);
-}
-
-TEST(Depth, FitsFrontPlaneInMetresAndFacesCamera) {
-  cv::Mat depth(100, 100, CV_32FC1, cv::Scalar(0.25));
-  KnobDepth module;
-  ASSERT_TRUE(module.configure(2.0, 0.03, 50));
-  ASSERT_TRUE(module.is_valid_input({depth, 1.0, {}}, {40, 40, 20, 20}, {100, 100, 50, 50}));
-  const auto result = module.compute_result({depth, 1.0, {}}, {40, 40, 20, 20}, {100, 100, 50, 50});
-  ASSERT_TRUE(result);
-  EXPECT_NEAR(result->position[2], 0.25, 1e-6);
-  EXPECT_NEAR(result->position[0], 0, 1e-6);
-  ASSERT_TRUE(result->normal_valid);
-  EXPECT_NEAR(result->normal[2], -1, 1e-6);
-  EXPECT_NEAR(result->plane_rms_m, 0, 1e-6);
-}
-
-TEST(Depth, MissingDepthAndInvalidIntrinsicsDoNotInventPositions) {
-  cv::Mat empty(50, 50, CV_32FC1, cv::Scalar(0));
-  KnobDepth module;
-  ASSERT_TRUE(module.configure(2.0, 0.03, 50));
-  ASSERT_TRUE(module.is_valid_input({empty, 1.0, {}}, {10, 10, 20, 20}, {100, 100, 25, 25}));
-  EXPECT_FALSE(module.compute_result({empty, 1.0, {}}, {10, 10, 20, 20}, {100, 100, 25, 25}));
-  empty.setTo(0.25);
-  EXPECT_FALSE(module.is_valid_input({empty, 1.0, {}}, {10, 10, 20, 20}, {0, 100, 25, 25}));
-}
-
-TEST(Lever, RightLeverIsClockwiseQuarterTurn) {
-  cv::Mat image(100, 100, CV_8UC3, cv::Scalar(0, 0, 100));
-  cv::rectangle(image, cv::Rect(45, 44, 45, 12), cv::Scalar(0, 0, 255), cv::FILLED);
-  KnobLever module;
-  ASSERT_TRUE(module.is_valid_input(image, {0, 0, 100, 100}));
-  const auto angle = module.compute_result(image, {0, 0, 100, 100});
-  ASSERT_TRUE(angle);
-  EXPECT_NEAR(*angle, CV_PI / 2, 0.05);
-  EXPECT_FALSE(module.compute_result(cv::Mat::zeros(100, 100, CV_8UC3), {0, 0, 100, 100}));
 }
 
 TEST(SharedMemory, OwnsSnapshotRejectsOverwrittenSlotAndBusyWriter) {
@@ -353,19 +312,6 @@ TEST(LidarPerception, RejectsInvalidMergerConfiguration) {
   EXPECT_FALSE(module.configure(config, 3.0, 1));
 }
 
-TEST(Depth, RawZ16UsesScaleWithoutAFullFrameConversion) {
-  DepthImage input{cv::Mat(100, 100, CV_16UC1, cv::Scalar(500)), 0.0005, {}};
-  KnobDepth module;
-  ASSERT_TRUE(module.configure(2.0, 0.03, 50));
-  ASSERT_TRUE(module.is_valid_input(input, {40, 40, 20, 20}, {100, 100, 50, 50}));
-  auto result = module.compute_result(input, {40, 40, 20, 20}, {100, 100, 50, 50});
-  ASSERT_TRUE(result);
-  EXPECT_NEAR(result->position[2], 0.25, 1e-6);
-  EXPECT_TRUE(result->normal_valid);
-  EXPECT_NEAR(result->normal[2], -1, 1e-6);
-  EXPECT_EQ(input.raw.type(), CV_16UC1);
-}
-
 TEST(SharedMemory, HandlesOddPixelsResizeAndProducerReplacement) {
   const std::string name = "/craft_perception_resize_" + std::to_string(getpid());
   int fd = shm_open(name.c_str(), O_CREAT | O_EXCL | O_RDWR, 0600);
@@ -470,6 +416,180 @@ TEST(Puck, StandingPuckUsesShelfNormalAndEmptyRingFails) {
   EXPECT_FALSE(module.compute_result({empty, 1.0, {}}, {68, 48, 24, 24}, in));
 }
 
+namespace {
+// Optical frame of the top D435 (43.6 deg down): world up, horizontal forward, right.
+const cv::Vec3d kUp = cv::normalize(cv::Vec3d(0.0, -0.7234, -0.6904));
+const cv::Vec3d kRight(1, 0, 0);
+const cv::Vec3d kForward = kUp.cross(kRight);
+const Intrinsics kTagCamera{615, 615, 320, 240};
+
+// One 16 mm tag on a face: normal toward the camera, tag up (y) along `up_in_face`.
+PuckTagAxis::Corners project_tag(const cv::Vec3d &center, const cv::Vec3d &normal, const cv::Vec3d &up_in_face) {
+  const cv::Vec3d y = cv::normalize(up_in_face), x = y.cross(normal);
+  const double h = 0.008;
+  const double offsets[4][2] = {{-h, h}, {h, h}, {h, -h}, {-h, -h}};
+  PuckTagAxis::Corners corners;
+  for (int k = 0; k < 4; ++k) {
+    const cv::Vec3d p = center + x * offsets[k][0] + y * offsets[k][1];
+    corners[k] = {float(kTagCamera.fx * p[0] / p[2] + kTagCamera.cx), float(kTagCamera.fy * p[1] / p[2] + kTagCamera.cy)};
+  }
+  return corners;
+}
+
+// Visible faces of a 30x30x60 cuboid with long axis `axis`, the cross section's sides along `side`.
+// turns: per visible tag, how many 90-degree turns it is stuck on with (tags go on in any orientation).
+std::vector<PuckTagAxis::Corners> cuboid_tags(const cv::Vec3d &center, cv::Vec3d axis, cv::Vec3d side,
+  const std::vector<int> &turns = {}) {
+  axis = cv::normalize(axis);
+  side = cv::normalize(side);
+  const cv::Vec3d other = axis.cross(side);
+  std::vector<PuckTagAxis::Corners> tags;
+  for (const double sign : {1.0, -1.0}) {
+    const auto end = axis * sign;
+    const auto turned = [&](const cv::Vec3d &n, const cv::Vec3d &up) {  // tag up turned k * 90 deg in the face
+      const int k = tags.size() < turns.size() ? turns[tags.size()] : 0;
+      cv::Vec3d u = up;
+      for (int i = 0; i < k; ++i) u = n.cross(u);
+      return u;
+    };
+    if ((center + end * 0.03).dot(end) < 0) tags.push_back(project_tag(center + end * 0.03, end, turned(end, side)));
+    for (const auto &n : {side * sign, other * sign}) {
+      if ((center + n * 0.015).dot(n) < 0) tags.push_back(project_tag(center + n * 0.015, n, turned(n, axis)));
+    }
+  }
+  return tags;
+}
+
+// Bounding box [px] of the projected 30x30x60 cuboid: what a tight YOLO box around the puck would be.
+cv::Rect2f cuboid_box(const cv::Vec3d &center, cv::Vec3d axis, cv::Vec3d side) {
+  axis = cv::normalize(axis);
+  side = cv::normalize(side - axis * side.dot(axis));
+  const cv::Vec3d other = axis.cross(side);
+  float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+  for (const double a : {-0.03, 0.03}) for (const double b : {-0.015, 0.015}) for (const double c : {-0.015, 0.015}) {
+    const cv::Vec3d p = center + axis * a + side * b + other * c;
+    const float u = float(kTagCamera.fx * p[0] / p[2] + kTagCamera.cx), v = float(kTagCamera.fy * p[1] / p[2] + kTagCamera.cy);
+    x0 = std::min(x0, u); y0 = std::min(y0, v); x1 = std::max(x1, u); y1 = std::max(y1, v);
+  }
+  return {x0, y0, x1 - x0, y1 - y0};
+}
+
+double line_angle_deg(const cv::Vec3d &a, const cv::Vec3d &b) {
+  return std::acos(std::min(1.0, std::abs(cv::normalize(a).dot(cv::normalize(b))))) * 180 / M_PI;
+}
+}  // namespace
+
+TEST(PuckTag, StandingCuboidFromTopAndSideTags) {
+  PuckTagAxis module;
+  ASSERT_TRUE(module.configure({}));
+  const cv::Vec3d center = cv::Vec3d(0.02, 0.0, 0.0) + kForward * 0.35 - kUp * 0.1;
+  const auto tags = cuboid_tags(center, kUp, cv::normalize(kRight + kForward * 0.3));
+  ASSERT_GE(tags.size(), 2u);
+  const auto result = module.compute_result(tags, kTagCamera);
+  ASSERT_TRUE(result);
+  EXPECT_TRUE(result->standing);
+  EXPECT_LT(line_angle_deg(result->axis, kUp), 1.0);
+  EXPECT_GT(result->axis.dot(kUp), 0);
+  EXPECT_LT(cv::norm(result->center - center), 0.002);
+  EXPECT_EQ(result->tags, static_cast<int>(tags.size()));
+}
+
+TEST(PuckTag, LyingCuboidYawedFromThreeTags) {
+  PuckTagAxis module;
+  ASSERT_TRUE(module.configure({}));
+  const double yaw = 30 * M_PI / 180;
+  const cv::Vec3d axis = kRight * std::cos(yaw) + kForward * std::sin(yaw);
+  const cv::Vec3d center = kForward * 0.35 - kUp * 0.1;
+  const auto tags = cuboid_tags(center, axis, kUp);
+  ASSERT_EQ(tags.size(), 3u);
+  const auto result = module.compute_result(tags, kTagCamera);
+  ASSERT_TRUE(result);
+  EXPECT_FALSE(result->standing);
+  EXPECT_LT(line_angle_deg(result->axis, axis), 1.0);
+  EXPECT_GT(result->axis[0], 0);
+  EXPECT_LT(cv::norm(result->center - center), 0.002);
+  EXPECT_NEAR(result->height_m, 0.03, 1e-9);
+}
+
+TEST(PuckTag, TagsStuckOnInAnyOrientation) {
+  PuckTagAxis module;
+  ASSERT_TRUE(module.configure({}));
+  const double yaw = 30 * M_PI / 180;
+  const cv::Vec3d lying = kRight * std::cos(yaw) + kForward * std::sin(yaw);
+  const cv::Vec3d center = kForward * 0.35 - kUp * 0.1;
+  // Every mix of 0/90/180/270-degree turns on the three visible faces gives the same axis.
+  for (int a = 0; a < 4; ++a) for (int b = 0; b < 4; ++b) for (int c = 0; c < 4; ++c) {
+    const auto tags = cuboid_tags(center, lying, kUp, {a, b, c});
+    ASSERT_EQ(tags.size(), 3u);
+    const auto result = module.compute_result(tags, kTagCamera);
+    ASSERT_TRUE(result) << a << b << c;
+    EXPECT_FALSE(result->standing);
+    EXPECT_LT(line_angle_deg(result->axis, lying), 1.0) << a << b << c;
+  }
+  // Standing, top + side tags, side tag turned 90 deg (long axis along its x).
+  const cv::Vec3d stand = cv::Vec3d(0.02, 0.0, 0.0) + kForward * 0.35 - kUp * 0.1;
+  const auto result = module.compute_result(cuboid_tags(stand, kUp, cv::normalize(kRight + kForward * 0.3), {1, 1, 3}),
+    kTagCamera);
+  ASSERT_TRUE(result);
+  EXPECT_TRUE(result->standing);
+  EXPECT_LT(line_angle_deg(result->axis, kUp), 1.0);
+}
+
+TEST(PuckTag, SingleTagNeedsCylinderShape) {
+  PuckTagAxis module;
+  ASSERT_TRUE(module.configure({}));
+  // Lying cylinder, end face toward the camera.
+  const cv::Vec3d axis = cv::normalize(kForward + kRight * 0.4);
+  const cv::Vec3d center = kForward * 0.35 - kUp * 0.1;
+  const std::vector<PuckTagAxis::Corners> tags{project_tag(center - axis * 0.03, -axis, kUp)};
+  EXPECT_FALSE(module.compute_result(tags, kTagCamera));  // cuboid end or side face?
+  const auto result = module.compute_result(tags, kTagCamera, PuckShape::kCylinder);
+  ASSERT_TRUE(result);
+  EXPECT_FALSE(result->standing);
+  EXPECT_LT(line_angle_deg(result->axis, axis), 1.0);
+  EXPECT_LT(cv::norm(result->center - center), 0.002);
+}
+
+TEST(PuckTag, LyingCuboidSurvivesCornerNoise) {
+  PuckTagAxis module;
+  ASSERT_TRUE(module.configure({}));
+  const double yaw = 50 * M_PI / 180;
+  const cv::Vec3d axis = kRight * std::cos(yaw) + kForward * std::sin(yaw);
+  const cv::Vec3d center = kForward * 0.35 - kUp * 0.1;
+  std::mt19937 rng(1);
+  std::normal_distribution<float> noise(0.f, 0.3f);  // px, about AprilTag corner refinement
+  int solved = 0;
+  for (int trial = 0; trial < 50; ++trial) {
+    auto tags = cuboid_tags(center, axis, kUp);
+    for (auto &tag : tags) for (auto &corner : tag) corner += cv::Point2f(noise(rng), noise(rng));
+    const auto result = module.compute_result(tags, kTagCamera);
+    if (!result) continue;
+    ++solved;
+    EXPECT_LT(line_angle_deg(result->axis, axis), 5.0);
+    EXPECT_FALSE(result->standing);
+  }
+  // Tags turned at random: which face is the 30x30 end comes only from the tag positions (PnP of a
+  // 16 mm tag), and 0.3 px corner noise makes that close in ~1 of 5 trials -> no answer (never a wrong one).
+  // Was 45/50 when side tags had a fixed axis. Depth tag positions (D435) would make this firmer.
+  EXPECT_GE(solved, 35);
+}
+
+TEST(PuckTag, DisagreeingTagsAndBadConfigFail) {
+  PuckTagAxis module;
+  ASSERT_TRUE(module.configure({}));
+  const cv::Vec3d center = kForward * 0.35 - kUp * 0.1;
+  // Two tags on faces meeting at 40 deg: no puck has that (faces are 0 or 90 deg apart), whichever
+  // face or tag turn each one is taken to be.
+  const cv::Vec3d n1 = -kForward, n2 = cv::normalize(-kForward * std::cos(40 * M_PI / 180) + kUp * std::sin(40 * M_PI / 180));
+  const std::vector<PuckTagAxis::Corners> tags{
+    project_tag(center + n1 * 0.015, n1, kRight),
+    project_tag(center + n2 * 0.015 + kRight * 0.02, n2, kRight)};
+  EXPECT_FALSE(module.compute_result(tags, kTagCamera));
+  PuckTagAxisConfig bad;
+  bad.up = {0, 0, 0};
+  EXPECT_FALSE(PuckTagAxis().configure(bad));
+}
+
 TEST(Seg, MaskFollowsPrototypesThroughLetterbox) {
   // 640x360 image letterboxed into 640 (top pad 140); one prototype plane: +1 left, -1 right.
   const auto transform = letterbox(cv::Mat(360, 640, CV_8UC3, cv::Scalar(0, 0, 0)), 640);
@@ -481,34 +601,6 @@ TEST(Seg, MaskFollowsPrototypesThroughLetterbox) {
   ASSERT_EQ(mask.size(), cv::Size(40, 20));
   EXPECT_EQ(mask.at<uint8_t>(10, 5), 255);   // x=305 < 320 -> positive plane
   EXPECT_EQ(mask.at<uint8_t>(10, 35), 0);    // x=335 > 320
-}
-
-TEST(Lever, SegMaskUsesSameAngleConvention) {
-  cv::Mat mask(100, 100, CV_8U, cv::Scalar(0));
-  cv::rectangle(mask, cv::Rect(45, 44, 45, 12), cv::Scalar(255), cv::FILLED);  // center -> right
-  KnobLever module;
-  ASSERT_TRUE(module.is_valid_input(mask));
-  const auto angle = module.compute_result(mask);
-  ASSERT_TRUE(angle);
-  EXPECT_NEAR(*angle, CV_PI / 2, 0.05);
-  EXPECT_FALSE(module.compute_result(cv::Mat::zeros(100, 100, CV_8U)));
-  EXPECT_FALSE(module.is_valid_input(cv::Mat(10, 10, CV_8UC3)));
-}
-
-TEST(Lever, C310RejectsSegWithoutPrototypesOrLeverClass) {
-  C310Config c310;
-  c310.use_knob_lever = false;  // configuration checks only, no model load
-  c310.lever_source = "yolo_seg";
-  c310.lever_class_id = 4;
-  EXPECT_FALSE(C310Perception().configure(c310));  // detect model (no proto blob)
-  c310.yolo.proto_blob = "out1";
-  EXPECT_TRUE(C310Perception().configure(c310));
-  c310.lever_class_id = c310.knob_class_id;
-  EXPECT_FALSE(C310Perception().configure(c310));
-  c310.lever_source = "color";
-  EXPECT_FALSE(C310Perception().configure(c310));
-  c310.lever_source = "hsv";
-  EXPECT_TRUE(C310Perception().configure(c310));
 }
 
 TEST(BoardImu, UprightBoardsReportGzMinusBiasWhateverTheirHeading) {
@@ -1032,4 +1124,629 @@ TEST(ScanMergerFloorRoi, ClearSectorKeepsAllEdgeBinsKeepNearPointsPerSide) {
   c.floor_roi.enabled = false;
   ASSERT_TRUE(merger.configure(c));
   EXPECT_TRUE(kept(80, 1.5));    // ROI off: the plain 180 deg field of view
+}
+
+// ---- traffic light ----------------------------------------------------------------------------
+namespace {
+Detection light(int class_id, float score = 0.9f) { return {cv::Rect2f(0, 0, 10, 10), class_id, score, {}}; }
+// 30 fps, 1 s on / 1 s off per color in `seq` (0=R 1=Y 2=G). `drop` frames with no detection,
+// `flip` frames with the wrong color, a spurious 1-frame blink in every OFF phase.
+TrafficLightCounter run_sequence(const std::string &seq, bool noisy) {
+  TrafficLightCounter counter;
+  EXPECT_TRUE(counter.configure({}));
+  double t = 0;
+  const double dt = 1.0 / 30;
+  for (char c : seq) {
+    const int id = c == 'R' ? 0 : c == 'Y' ? 1 : 2;
+    for (int i = 0; i < 30; ++i, t += dt) {
+      std::vector<Detection> frame{light(id)};
+      if (noisy && i % 7 == 3) frame.clear();                    // missed detections
+      if (noisy && i % 11 == 5) frame = {light((id + 1) % 3)};   // wrong color
+      if (noisy && i % 13 == 6) frame.push_back(light(id, 0.2f)); // low score, ignored
+      counter.update(t, frame);
+    }
+    for (int i = 0; i < 30; ++i, t += dt) {
+      std::vector<Detection> frame;
+      if (noisy && i == 15) frame = {light(0)};  // false positive while dark
+      counter.update(t, frame);
+    }
+  }
+  for (int i = 0; i < 90; ++i, t += dt) counter.update(t, {});  // 3 s dark: end of the sequence
+  return counter;
+}
+}
+
+TEST(TrafficLight, CountsCleanSequence) {
+  const auto counter = run_sequence("RRYGGRYYGRRG", false);
+  ASSERT_EQ(counter.blinks().size(), 12u);
+  const auto c = counter.counts();
+  EXPECT_EQ(c.red(), 5);
+  EXPECT_EQ(c.yellow(), 3);
+  EXPECT_EQ(c.green(), 4);
+  EXPECT_TRUE(counter.valid());
+  EXPECT_TRUE(counter.complete());
+  EXPECT_TRUE(counter.rejected().empty());
+}
+
+TEST(TrafficLight, FiltersMissedWrongAndSpuriousDetections) {
+  const std::string seq = "GYRRGYGGRYRR";
+  const auto counter = run_sequence(seq, true);
+  ASSERT_EQ(counter.blinks().size(), 12u);
+  for (size_t i = 0; i < seq.size(); ++i) {
+    EXPECT_EQ(std::string(to_string(counter.blinks()[i].color)), std::string(1, seq[i])) << i;
+  }
+  EXPECT_TRUE(counter.valid());
+  EXPECT_FALSE(counter.rejected().empty());  // the 1-frame false positives were rejected
+}
+
+TEST(TrafficLight, RejectsInvalidConfigAndRuleViolations) {
+  TrafficLightCounter counter;
+  TrafficLightConfig bad;
+  bad.yellow_class_id = bad.red_class_id;
+  EXPECT_FALSE(counter.configure(bad));
+  bad = {};
+  bad.max_gap_s = 0;
+  EXPECT_FALSE(counter.configure(bad));
+  bad = {};
+  bad.end_off_s = bad.max_gap_s;
+  EXPECT_FALSE(counter.configure(bad));
+}
+
+TEST(TrafficLight, WrongCycleIsDiscardedAndRecounted) {
+  // 7 reds breaks the 1..6 rule even though the total is 12: dropped at the end of the cycle.
+  auto counter = run_sequence("RRRRRRRYYGGG", false);
+  EXPECT_FALSE(counter.complete());
+  EXPECT_EQ(counter.discarded_cycles(), 1);
+  EXPECT_TRUE(counter.blinks().empty());
+  // 11 blinks, then a full cycle on the same counter: the second one is accepted.
+  TrafficLightCounter again;
+  ASSERT_TRUE(again.configure({}));
+  double t = 0;
+  const double dt = 1.0 / 30;
+  const auto play = [&](const std::string &seq) {
+    for (char c : seq) {
+      const int id = c == 'R' ? 0 : c == 'Y' ? 1 : 2;
+      for (int i = 0; i < 30; ++i, t += dt) again.update(t, {light(id)});
+      for (int i = 0; i < 30; ++i, t += dt) again.update(t, {});
+    }
+    for (int i = 0; i < 90; ++i, t += dt) again.update(t, {});
+  };
+  play("RRYGGRYYGRR");  // 11
+  EXPECT_FALSE(again.complete());
+  EXPECT_EQ(again.discarded_cycles(), 1);
+  play("RRYGGRYYGRRG");
+  EXPECT_TRUE(again.complete());
+  EXPECT_EQ(again.counts().total(), 12);
+  // Not complete until the dark period: 12 blinks alone are not enough.
+  TrafficLightCounter pending;
+  ASSERT_TRUE(pending.configure({}));
+  t = 0;
+  for (char c : std::string("RRYGGRYYGRRG")) {
+    const int id = c == 'R' ? 0 : c == 'Y' ? 1 : 2;
+    for (int i = 0; i < 30; ++i, t += dt) pending.update(t, {light(id)});
+    for (int i = 0; i < 30; ++i, t += dt) pending.update(t, {});
+  }
+  EXPECT_EQ(pending.blinks().size(), 12u);
+  EXPECT_FALSE(pending.complete());
+}
+
+// ---- traffic light placement (발제 v5) ---------------------------------------------------------
+namespace {
+TrafficLightCounts counts_of(const std::string &seq) {
+  TrafficLightCounts c;
+  for (char ch : seq) ++c.count[ch == 'R' ? 0 : ch == 'Y' ? 1 : 2];
+  return c;
+}
+// spec "RC RB GC ..." : R/G color, C cylinder / B box(cuboid); ids 0.. in order.
+std::vector<PuckInfo> pucks_of(const std::string &spec) {
+  std::vector<PuckInfo> out;
+  for (std::size_t i = 0; i + 1 < spec.size(); i += 3) {
+    out.push_back({static_cast<int>(out.size()), spec[i] == 'R' ? PuckColor::kRed : PuckColor::kGreen,
+                   spec[i + 1] == 'C' ? PuckShape::kCylinder : PuckShape::kCuboid});
+  }
+  return out;
+}
+std::vector<int> sorted(std::vector<int> v) { std::sort(v.begin(), v.end()); return v; }
+}
+
+TEST(TrafficLightPuzzle, BarcodeAndDice) {
+  EXPECT_EQ(parse_barcode("P2-01"), SortOrder::kAscending);
+  EXPECT_EQ(parse_barcode("P2-03"), SortOrder::kAscending);
+  EXPECT_EQ(parse_barcode("P2-02"), SortOrder::kDescending);
+  EXPECT_EQ(parse_barcode("P2-04"), SortOrder::kDescending);
+  EXPECT_FALSE(parse_barcode("P2-05").has_value());
+  for (int n = 1; n <= 6; ++n) EXPECT_EQ(dice_dots(n).size(), static_cast<std::size_t>(n));
+  const auto six = dice_dots(6);  // left and right columns, no middle column
+  for (const auto &d : six) EXPECT_NE(d[0], 0.0);
+  const auto two = dice_dots(2);  // top-left / bottom-right diagonal
+  EXPECT_DOUBLE_EQ(two[0][0], -0.06); EXPECT_DOUBLE_EQ(two[0][1], 0.06);
+  EXPECT_DOUBLE_EQ(two[1][0], 0.06); EXPECT_DOUBLE_EQ(two[1][1], -0.06);
+}
+
+TEST(TrafficLightPuzzle, Q1Ascending) {
+  // 발제 05 Q1: R G R R G R G G Y G Y G, P2-01 -> R4 Y2 G6 -> L1 Y(2), L2 R(4), L3 G(6).
+  const auto counts = counts_of("RGRRGRGGYGYG");
+  ASSERT_EQ(counts.red(), 4); ASSERT_EQ(counts.yellow(), 2); ASSERT_EQ(counts.green(), 6);
+  // red 6 (cuboid 3, cylinder 3), green 6
+  const auto pucks = pucks_of("RB RC RB RC RB RC GB GC GB GC GB GC ");
+  std::string error;
+  const auto plan = solve_traffic_light(counts, SortOrder::kAscending, pucks, &error);
+  ASSERT_TRUE(plan) << error;
+  EXPECT_EQ(plan->locations[0].group, LightColor::kYellow);
+  EXPECT_EQ(plan->locations[1].group, LightColor::kRed);
+  EXPECT_EQ(plan->locations[2].group, LightColor::kGreen);
+  EXPECT_EQ(plan->yellow_shape, PuckShape::kCuboid);
+  EXPECT_EQ(plan->locations[0].puck_ids, (std::vector<int>{0, 2}));        // 2 red cuboids
+  EXPECT_EQ(sorted(plan->locations[1].puck_ids), (std::vector<int>{1, 3, 4, 5}));
+  EXPECT_EQ(sorted(plan->locations[2].puck_ids), (std::vector<int>{6, 7, 8, 9, 10, 11}));
+}
+
+TEST(TrafficLightPuzzle, SpecExampleAndShapeFallback) {
+  // 발제 04 example: red 8, green 4; 3 same-shape reds go to Y -> R5 Y3 G4.
+  // Only cylinders have 3 reds: the cuboid-first choice must fall back.
+  const auto pucks = pucks_of("RB RB RC RC RC RB RB RB GB GC GB GC ");
+  TrafficLightCounts counts; counts.count = {5, 3, 4};
+  // reds: cuboid 5 (0,1,5,6,7), cylinder 3 (2,3,4) -> cuboid also has >= 3: cuboid chosen, ids 0,1,5.
+  auto plan = solve_traffic_light(counts, SortOrder::kDescending, pucks);
+  ASSERT_TRUE(plan);
+  EXPECT_EQ(plan->yellow_shape, PuckShape::kCuboid);
+  // descending: R5, G4, Y3
+  EXPECT_EQ(plan->locations[0].group, LightColor::kRed);
+  EXPECT_EQ(plan->locations[1].group, LightColor::kGreen);
+  EXPECT_EQ(plan->locations[2].group, LightColor::kYellow);
+  EXPECT_EQ(plan->locations[2].puck_ids, (std::vector<int>{0, 1, 5}));
+  // Now only 2 red cuboids: Y must be cylinders.
+  const auto fewer = pucks_of("RB RC RC RC RC RB RC RC GB GC GB GC ");
+  plan = solve_traffic_light(counts, SortOrder::kAscending, fewer);
+  ASSERT_TRUE(plan);
+  EXPECT_EQ(plan->yellow_shape, PuckShape::kCylinder);
+  EXPECT_EQ(plan->locations[0].group, LightColor::kYellow);  // ascending: Y3, G4, R5
+  EXPECT_EQ(plan->locations[0].puck_ids, (std::vector<int>{1, 2, 3}));
+}
+
+TEST(TrafficLightPuzzle, TiesKeepRygAndMixedColorYellow) {
+  // R4 Y4 G4 with red 6 / green 6: Y = 2 red + 2 green of one shape.
+  const auto pucks = pucks_of("RB RB RC RC RC RC GC GB GB GC GC GC ");
+  TrafficLightCounts counts; counts.count = {4, 4, 4};
+  for (const auto order : {SortOrder::kAscending, SortOrder::kDescending}) {
+    std::string error;
+    const auto plan = solve_traffic_light(counts, order, pucks, &error);
+    ASSERT_TRUE(plan) << error;
+    EXPECT_EQ(plan->locations[0].group, LightColor::kRed);
+    EXPECT_EQ(plan->locations[1].group, LightColor::kYellow);
+    EXPECT_EQ(plan->locations[2].group, LightColor::kGreen);
+    EXPECT_EQ(plan->yellow_shape, PuckShape::kCuboid);  // red cuboid 2, green cuboid 2
+    EXPECT_EQ(sorted(plan->locations[1].puck_ids), (std::vector<int>{0, 1, 7, 8}));
+  }
+}
+
+TEST(TrafficLightPuzzle, ReportsImpossibleProblems) {
+  TrafficLightCounts counts; counts.count = {4, 4, 4};
+  std::string error;
+  // Y needs 2 red + 2 green of one shape; red cuboid 1 / green cylinder 1 -> no shape fits.
+  EXPECT_FALSE(solve_traffic_light(counts, SortOrder::kAscending,
+    pucks_of("RB RC RC RC RC RC GC GB GB GB GB GB "), &error));
+  EXPECT_NE(error.find("no shape"), std::string::npos);
+  EXPECT_FALSE(solve_traffic_light(counts, SortOrder::kAscending,
+    pucks_of("RB RB RB GB GB GB GB GB GB GB GB GB "), &error));  // 3 red < R4
+  counts.count = {7, 1, 4};
+  EXPECT_FALSE(solve_traffic_light(counts, SortOrder::kAscending,
+    pucks_of("RB RB RB RB RB RB RB RB GB GB GB GB "), &error));  // R > 6
+}
+
+TEST(TrafficLightPuzzle, SurveyCollectsTwelveThenSolves) {
+  PuckSurvey survey;
+  EXPECT_FALSE(survey.add({7, 0, PuckColor::kRed, PuckShape::kCuboid, 0.9f, {}}));  // no box 7
+  for (int box = 1; box <= 6; ++box) {
+    for (int slot = 0; slot < 2; ++slot) {
+      if (box == 6 && slot == 1) continue;
+      EXPECT_TRUE(survey.add({box, slot, box <= 3 ? PuckColor::kRed : PuckColor::kGreen,
+                              slot ? PuckShape::kCylinder : PuckShape::kCuboid, 0.6f, {}}));
+    }
+  }
+  EXPECT_FALSE(survey.complete());
+  EXPECT_EQ(survey.missing_ids(), (std::vector<int>{11}));
+  EXPECT_FALSE(survey.pucks());
+  survey.add({6, 1, PuckColor::kGreen, PuckShape::kCuboid, 0.4f, {}});
+  survey.add({6, 1, PuckColor::kGreen, PuckShape::kCylinder, 0.8f, {}});  // better look wins
+  ASSERT_TRUE(survey.complete());
+  const auto pucks = *survey.pucks();
+  EXPECT_EQ(pucks[11].shape, PuckShape::kCylinder);
+  TrafficLightCounts counts; counts.count = {4, 4, 4};  // red 6 / green 6, Y = 2+2 one shape
+  EXPECT_TRUE(solve_traffic_light(counts, SortOrder::kAscending, pucks));
+}
+
+TEST(TrafficLightPuzzle, LoadingAndReverification) {
+  PuckSurvey survey;
+  survey.reset();
+  for (int box = 1; box <= 6; ++box) {
+    for (int slot = 0; slot < 2; ++slot) {
+      survey.add({box, slot, box <= 3 ? PuckColor::kRed : PuckColor::kGreen,
+                  slot ? PuckShape::kCylinder : PuckShape::kCuboid, 0.9f, {}});
+    }
+  }
+  EXPECT_FALSE(survey.all_loaded());
+  for (int id = 0; id < 12; ++id) EXPECT_TRUE(survey.load(id, 11 - id));
+  EXPECT_FALSE(survey.load(3, 5));            // already loaded
+  EXPECT_TRUE(survey.all_loaded());
+  EXPECT_EQ(survey.carrier_slot(0), 11);
+
+  TrafficLightCounts counts; counts.count = {4, 4, 4};
+  const auto plan = solve_traffic_light(counts, SortOrder::kAscending, *survey.pucks());
+  ASSERT_TRUE(plan);
+  // Perfect placement, pucks permuted within each location and 5 mm off: passes.
+  std::array<std::vector<PlacedPuck>, 3> seen;
+  for (int l = 0; l < 3; ++l) {
+    const auto &loc = plan->locations[l];
+    for (std::size_t k = 0; k < loc.dots.size(); ++k) {
+      seen[l].push_back({loc.puck_ids[(k + 1) % loc.puck_ids.size()], {loc.dots[k][0] + 0.005, loc.dots[k][1]}});
+    }
+  }
+  EXPECT_TRUE(verify_placement(*plan, seen).ok());
+  // 15 mm off: that dot is empty and the puck is an extra.
+  auto shifted = seen;
+  shifted[0][0].offset[0] += 0.010;
+  auto check = verify_placement(*plan, shifted);
+  EXPECT_FALSE(check.ok());
+  EXPECT_EQ(check.locations[0].empty_dots, 1);
+  EXPECT_EQ(check.locations[0].extra_pucks, 1);
+  EXPECT_TRUE(check.locations[1].ok);
+  // Two pucks swapped between L1 and L3: wrong group at both, nothing duplicated.
+  auto swapped = seen;
+  std::swap(swapped[0][0].id, swapped[2][0].id);
+  check = verify_placement(*plan, swapped);
+  EXPECT_EQ(check.locations[0].wrong_ids.size(), 1u);
+  EXPECT_EQ(check.locations[2].missing_ids.size(), 1u);
+  EXPECT_TRUE(check.duplicate_ids.empty());
+  // A puck never seen.
+  auto lost = seen;
+  const int gone = lost[1].back().id;
+  lost[1].pop_back();
+  check = verify_placement(*plan, lost);
+  EXPECT_EQ(check.unseen_ids, (std::vector<int>{gone}));
+}
+
+TEST(Barcode, ConfirmsAfterThreeReadsAndRejectsUnregistered) {
+  BarcodeReader reader;
+  EXPECT_FALSE(reader.update({"P2-03"}));
+  EXPECT_FALSE(reader.update({"P2-02"}));  // one misread never wins
+  EXPECT_FALSE(reader.update({"P2-03"}));
+  EXPECT_FALSE(reader.confirmed());
+  EXPECT_TRUE(reader.update({"P2-03"}));
+  EXPECT_EQ(reader.order(), SortOrder::kAscending);
+  EXPECT_FALSE(reader.update({"P2-02"}));  // locked until reset
+  reader.reset();
+  for (int i = 0; i < 3; ++i) reader.update({"HELLO"});
+  EXPECT_TRUE(reader.confirmed());
+  EXPECT_FALSE(reader.order().has_value());  // unregistered -> mission error
+}
+
+#ifdef CRAFT_WITH_ZXING
+TEST(Barcode, DecodesRenderedCode128) {
+  ASSERT_TRUE(barcode_decoder_available());
+  for (const std::string text : {"P2-01", "P2-04"}) {
+    const auto bits = ZXing::MultiFormatWriter(ZXing::BarcodeFormat::Code128).setMargin(10).encode(text, 300, 80);
+    cv::Mat symbol(bits.height(), bits.width(), CV_8U);
+    for (int y = 0; y < bits.height(); ++y) {
+      for (int x = 0; x < bits.width(); ++x) symbol.at<uint8_t>(y, x) = bits.get(x, y) ? 0 : 255;
+    }
+    cv::Mat scene(360, 640, CV_8UC3, cv::Scalar(120, 130, 140));  // camera-sized frame, symbol pasted in
+    cv::Mat colour;
+    cv::cvtColor(symbol, colour, cv::COLOR_GRAY2BGR);
+    colour.copyTo(scene(cv::Rect(150, 120, colour.cols, colour.rows)));
+    const auto texts = decode_code128(scene);
+    ASSERT_EQ(texts.size(), 1u) << text;
+    EXPECT_EQ(texts[0], text);
+  }
+  EXPECT_TRUE(decode_code128(cv::Mat(360, 640, CV_8UC3, cv::Scalar(90, 90, 90))).empty());
+}
+#endif
+
+TEST(TrafficLightPuzzle, AssociatesTagsWithPuckBoxes) {
+  const auto box = [](float x, float y, float w, float h, int cls, float score) {
+    return Detection{cv::Rect2f(x, y, w, h), cls, score, {}};
+  };
+  const std::vector<Detection> yolo{
+    box(100, 100, 40, 60, 1, 0.9f),   // red prism, tag 3
+    box(200, 100, 40, 40, 2, 0.8f),   // green cylinder, tag 7 on its top face
+    box(300, 100, 40, 60, 3, 0.9f),   // green prism: two different tags inside -> ambiguous
+    box(400, 100, 40, 40, 0, 0.9f),   // red cylinder seen from the side: no tag -> not identified
+    box(90, 90, 200, 200, 1, 0.9f),   // large box around the first two: smaller boxes win
+    box(500, 100, 40, 60, 1, 0.2f)};  // below min_score
+  const std::vector<PuckTag> tags{{3, {120, 120}}, {3, {125, 150}},  // two faces of one cuboid
+    {7, {220, 120}}, {5, {310, 110}}, {6, {330, 150}}, {13, {420, 120}},  // 13 = location tag
+    {9, {520, 130}}};
+  const auto pucks = associate_pucks(yolo, tags);
+  ASSERT_EQ(pucks.size(), 2u);
+  EXPECT_EQ(pucks[0].id, 3);
+  EXPECT_EQ(pucks[0].color, PuckColor::kRed);
+  EXPECT_EQ(pucks[0].shape, PuckShape::kCuboid);
+  EXPECT_EQ(pucks[1].id, 7);
+  EXPECT_EQ(pucks[1].color, PuckColor::kGreen);
+  EXPECT_EQ(pucks[1].shape, PuckShape::kCylinder);
+  PuckSurvey survey;
+  for (const auto &p : pucks) EXPECT_TRUE(survey.add(p.id, p.color, p.shape, p.score));
+  EXPECT_EQ(survey.missing_ids().size(), 10u);
+}
+
+TEST(AprilTag, SearchesOnlyInsideRoisWithFullImageCoordinates) {
+  cv::Mat image(220, 420, CV_8UC1, cv::Scalar(255)), left, right, bgr;
+  auto dictionary = cv::aruco::getPredefinedDictionary(cv::aruco::DICT_APRILTAG_36h11);
+#if CV_VERSION_MAJOR > 4 || (CV_VERSION_MAJOR == 4 && CV_VERSION_MINOR >= 7)
+  cv::aruco::generateImageMarker(dictionary, 5, 60, left);
+  cv::aruco::generateImageMarker(dictionary, 9, 60, right);
+#else
+  cv::aruco::drawMarker(dictionary, 5, 60, left);
+  cv::aruco::drawMarker(dictionary, 9, 60, right);
+#endif
+  left.copyTo(image(cv::Rect(40, 60, 60, 60)));
+  right.copyTo(image(cv::Rect(300, 80, 60, 60)));
+  cv::cvtColor(image, bgr, cv::COLOR_GRAY2BGR);
+  AprilTagReader module;
+  ASSERT_TRUE(module.configure("tag36h11"));
+  const auto full = module.compute_result(bgr);
+  ASSERT_EQ(full.size(), 2u);
+  // A box around the left tag only (grown 1.4x so the white margin is in the crop).
+  const auto one = module.compute_result(bgr, {cv::Rect2f(30, 50, 80, 80)}, 1.4, 1);
+  ASSERT_EQ(one.size(), 1u);
+  EXPECT_EQ(one[0].id, 5);
+  for (int k = 0; k < 4; ++k) EXPECT_NEAR(cv::norm(one[0].corners[k] - full[0].corners[k]), 0.0, 0.5);
+  // Overlapping boxes see the same tag twice: kept once. Upscaled crops map back to image px.
+  const auto twice = module.compute_result(bgr, {cv::Rect2f(30, 50, 80, 80), cv::Rect2f(35, 55, 80, 80)}, 1.4, 2);
+  ASSERT_EQ(twice.size(), 1u);
+  EXPECT_NEAR(cv::norm(twice[0].center - full[0].center), 0.0, 0.5);
+  // No boxes or boxes away from tags: nothing; bad grow/upscale: nothing.
+  EXPECT_TRUE(module.compute_result(bgr, {}, 1.4, 1).empty());
+  EXPECT_TRUE(module.compute_result(bgr, {cv::Rect2f(180, 10, 40, 40)}, 1.4, 1).empty());
+  EXPECT_TRUE(module.compute_result(bgr, {cv::Rect2f(30, 50, 80, 80)}, 0.5, 1).empty());
+  EXPECT_TRUE(module.compute_result(bgr, {cv::Rect2f(30, 50, 80, 80)}, 1.4, 0).empty());
+}
+
+namespace {
+std::array<cv::Point2f, 4> square_tag(cv::Point2f c, float side) {
+  return {c + cv::Point2f(-side / 2, -side / 2), c + cv::Point2f(side / 2, -side / 2),
+          c + cv::Point2f(side / 2, side / 2), c + cv::Point2f(-side / 2, side / 2)};
+}
+std::array<cv::Point2f, 4> oblique_tag(cv::Point2f c, float side) {  // seen from below: top edge short
+  return {c + cv::Point2f(-side / 4, -side / 4), c + cv::Point2f(side / 4, -side / 4),
+          c + cv::Point2f(side / 2, side / 4), c + cv::Point2f(-side / 2, side / 4)};
+}
+}  // namespace
+
+TEST(PuckShape, FaceOnFromTagCorners) {
+  const PuckShapeRule rule;
+  EXPECT_TRUE(tag_face_on(square_tag({50, 50}, 10), rule));
+  EXPECT_FALSE(tag_face_on(oblique_tag({50, 50}, 10), rule));
+  EXPECT_FALSE(tag_face_on(std::array<cv::Point2f, 4>{}, rule));  // unknown corners: never face-on
+}
+
+TEST(PuckShape, TagsOverrideYoloCylinderWhenTheyProveACuboid) {
+  const auto det = [](float x, float w, float h, int cls) { return Detection{cv::Rect2f(x, 100, w, h), cls, 0.85f, {}}; };
+  const PuckClassMap classes;  // 0 red cylinder, 1 red prism, 2 green cylinder, 3 green prism
+  const std::vector<Detection> yolo{
+    det(100, 30, 45, 0),   // YOLO: red cylinder; two tags (two faces of one cuboid) -> cuboid
+    det(200, 22, 44, 0),   // red cylinder, long box, one face-on tag -> cuboid (its 30x60 side)
+    det(300, 30, 32, 0),   // red cylinder, near-square box, one face-on tag -> could be an end: keep
+    det(400, 22, 44, 0),   // red cylinder, long box, one oblique tag -> keep
+    det(500, 30, 45, 1)};  // red prism, no tag -> not identified
+  const std::vector<PuckTag> tags{
+    {1, {110, 110}, square_tag({110, 110}, 8)}, {1, {120, 135}, oblique_tag({120, 135}, 8)},
+    {2, {211, 122}, square_tag({211, 122}, 8)},
+    {3, {315, 116}, square_tag({315, 116}, 8)},
+    {4, {411, 122}, oblique_tag({411, 122}, 8)}};
+  const auto pucks = associate_pucks(yolo, tags, classes);
+  ASSERT_EQ(pucks.size(), 4u);
+  EXPECT_EQ(pucks[0].id, 1);
+  EXPECT_EQ(pucks[0].tags, 2);
+  EXPECT_EQ(pucks[0].shape, PuckShape::kCuboid);
+  EXPECT_TRUE(pucks[0].shape_from_tags);
+  EXPECT_EQ(pucks[1].shape, PuckShape::kCuboid);
+  EXPECT_TRUE(pucks[1].shape_from_tags);
+  EXPECT_EQ(pucks[2].shape, PuckShape::kCylinder);
+  EXPECT_FALSE(pucks[2].shape_from_tags);
+  EXPECT_EQ(pucks[3].shape, PuckShape::kCylinder);
+  EXPECT_FALSE(pucks[3].shape_from_tags);
+  for (const auto &p : pucks) EXPECT_EQ(p.color, PuckColor::kRed);
+  PuckShapeRule off;
+  off.enabled = false;
+  const auto plain = associate_pucks(yolo, tags, classes, 0.4f, off);
+  EXPECT_EQ(plain[0].shape, PuckShape::kCylinder);
+  EXPECT_FALSE(plain[0].shape_from_tags);
+}
+
+TEST(PuckShape, DepthNormalDecidesFaceOnWhenKnown) {
+  const PuckShapeRule rule;
+  PuckTag tag{2, {50, 50}, oblique_tag({50, 50}, 8), cv::Vec3d(0, 0, 0.5), cv::Vec3d(0, 0, -1)};
+  EXPECT_TRUE(tag_face_on(tag, rule));   // corners say oblique, the depth plane faces the camera
+  tag.normal = cv::Vec3d(std::sin(CV_PI / 4), 0, -std::cos(CV_PI / 4));
+  tag.corners = square_tag({50, 50}, 8);
+  EXPECT_FALSE(tag_face_on(tag, rule));  // 45 deg off the line of sight
+  // Depth positions of the tags become the puck position.
+  const std::vector<Detection> yolo{{cv::Rect2f(30, 30, 40, 40), 2, 0.9f, {}}};
+  PuckTag a{6, {45, 45}, square_tag({45, 45}, 6), cv::Vec3d(0.01, 0, 0.5), cv::Vec3d(0, 0, -1)};
+  PuckTag b{6, {55, 55}, oblique_tag({55, 55}, 6), cv::Vec3d(0.03, 0.02, 0.52), cv::Vec3d(1, 0, 0)};
+  const auto pucks = associate_pucks(yolo, {a, b});
+  ASSERT_EQ(pucks.size(), 1u);
+  ASSERT_TRUE(pucks[0].position);
+  EXPECT_NEAR((*pucks[0].position)[0], 0.02, 1e-9);
+  EXPECT_NEAR((*pucks[0].position)[2], 0.51, 1e-9);
+  EXPECT_EQ(pucks[0].shape, PuckShape::kCylinder);  // green box: red_only keeps the YOLO shape
+  PuckShapeRule all;
+  all.red_only = false;
+  EXPECT_EQ(associate_pucks(yolo, {a, b}, {}, 0.4f, all)[0].shape, PuckShape::kCuboid);  // two tags -> cuboid
+}
+
+TEST(PuckShape, TagDepthFitsTheTagPlane) {
+  const Intrinsics in{200, 200, 100, 100};
+  const auto plane = [&](double tilt_deg) {  // plane z = 0.5 + tan(tilt) * X, as an aligned depth image
+    cv::Mat z(200, 200, CV_32FC1);
+    const double t = std::tan(tilt_deg * CV_PI / 180);
+    for (int v = 0; v < 200; ++v) for (int u = 0; u < 200; ++u) z.at<float>(v, u) = 0.5 / (1 - t * (u - in.cx) / in.fx);
+    return DepthImage{z, 1.0, {}};
+  };
+  const auto quad = square_tag({100, 100}, 20);
+  const auto flat = tag_depth(plane(0), quad, in);
+  ASSERT_TRUE(flat);
+  EXPECT_NEAR(flat->center[2], 0.5, 1e-3);
+  EXPECT_NEAR(flat->view_angle_deg, 0.0, 1.0);
+  EXPECT_LT(flat->normal[2], 0);  // toward the camera
+  const auto tilted = tag_depth(plane(30), quad, in);
+  ASSERT_TRUE(tilted);
+  EXPECT_NEAR(tilted->view_angle_deg, 30.0, 1.5);
+  // No depth or too few valid pixels: nothing.
+  EXPECT_FALSE(tag_depth(DepthImage{cv::Mat::zeros(200, 200, CV_32FC1), 1.0, {}}, quad, in));
+  EXPECT_FALSE(tag_depth(plane(0), quad, Intrinsics{0, 0, 0, 0}));
+}
+
+TEST(PuckShape, SurveyKeepsTagConfirmedShape) {
+  PuckSurvey survey;
+  survey.add(4, PuckColor::kRed, PuckShape::kCylinder, 0.9f);        // YOLO only
+  survey.add(4, PuckColor::kRed, PuckShape::kCuboid, 0.6f, true);    // tags: wins despite the lower score
+  EXPECT_EQ(survey.sighting(4)->shape, PuckShape::kCuboid);
+  EXPECT_TRUE(survey.sighting(4)->shape_confirmed);
+  survey.add(4, PuckColor::kRed, PuckShape::kCylinder, 0.99f);       // YOLO only again: ignored
+  EXPECT_EQ(survey.sighting(4)->shape, PuckShape::kCuboid);
+  survey.add(4, PuckColor::kRed, PuckShape::kCuboid, 0.8f, true);    // better confirmed look replaces
+  EXPECT_FLOAT_EQ(survey.sighting(4)->score, 0.8f);
+}
+
+TEST(PuckTag, YoloBoxSettlesASingleCuboidTag) {
+  PuckTagAxis module;
+  ASSERT_TRUE(module.configure({}));
+  const cv::Size image(640, 480);
+  const cv::Vec3d side = cv::normalize(kRight + kForward * 0.3);
+  // Standing cuboid, only its top (end) tag read.
+  const cv::Vec3d stand = kForward * 0.35 - kUp * 0.3;  // inside the 640x480 image
+  const std::vector<PuckTagAxis::Corners> top{project_tag(stand + kUp * 0.03, kUp, side)};
+  EXPECT_FALSE(module.compute_result(top, kTagCamera, PuckShape::kCuboid));  // end or side? no box: no answer
+  const auto standing = module.compute_result(top, kTagCamera, PuckShape::kCuboid, cuboid_box(stand, kUp, side), image);
+  ASSERT_TRUE(standing);
+  EXPECT_TRUE(standing->standing);
+  EXPECT_LT(line_angle_deg(standing->axis, kUp), 2.0);
+  EXPECT_GT(standing->box_iou, 0.9);
+  // Lying cuboid yawed 30 deg, only its top (side) tag read, stuck on turned 90 deg: the box also tells which
+  // of the tag's two axes is the long one.
+  const double yaw = 30 * M_PI / 180;
+  const cv::Vec3d lying_axis = kRight * std::cos(yaw) + kForward * std::sin(yaw);
+  const cv::Vec3d lie = kForward * 0.35 - kUp * 0.315;
+  const std::vector<PuckTagAxis::Corners> face{project_tag(lie + kUp * 0.015, kUp, kUp.cross(lying_axis))};
+  const auto lying = module.compute_result(face, kTagCamera, PuckShape::kCuboid, cuboid_box(lie, lying_axis, kUp), image);
+  ASSERT_TRUE(lying);
+  EXPECT_FALSE(lying->standing);
+  EXPECT_LT(line_angle_deg(lying->axis, lying_axis), 3.0);
+}
+
+TEST(PuckTag, YoloBoxCutByTheImageEdgeOrNotFittingIsNotTrusted) {
+  PuckTagAxis module;
+  ASSERT_TRUE(module.configure({}));
+  const cv::Vec3d side = cv::normalize(kRight + kForward * 0.3);
+  const cv::Vec3d stand = kForward * 0.35 - kUp * 0.3;  // inside the 640x480 image
+  const std::vector<PuckTagAxis::Corners> top{project_tag(stand + kUp * 0.03, kUp, side)};
+  const auto box = cuboid_box(stand, kUp, side);
+  // Same box but the image ends inside it: treated as cut, so back to tags only (one tag: no answer).
+  EXPECT_FALSE(module.compute_result(top, kTagCamera, PuckShape::kCuboid, box,
+    cv::Size(int(box.x + box.width), 480)));
+  // A box no reading of the tag can fill (three times too wide): every reading below min_box_iou.
+  cv::Rect2f wide = box;
+  wide.x -= box.width; wide.width *= 3;
+  EXPECT_FALSE(module.compute_result(top, kTagCamera, PuckShape::kCuboid, wide, cv::Size(640, 480)));
+  // Two tags (standing, top + side): the box agrees with the tags, the answer stays the same.
+  const auto tags = cuboid_tags(stand, kUp, side);
+  const auto plain = module.compute_result(tags, kTagCamera);
+  const auto boxed = module.compute_result(tags, kTagCamera, PuckShape::kCuboid, box, cv::Size(640, 480));
+  ASSERT_TRUE(plain && boxed);
+  EXPECT_LT(line_angle_deg(plain->axis, boxed->axis), 0.5);
+  EXPECT_EQ(plain->box_iou, -1);
+}
+
+TEST(PuckShape, EveryBoxKeepsBoxesWithoutAUsableId) {
+  const std::vector<Detection> yolo{{cv::Rect2f(0, 0, 40, 60), 1, 0.9f, {}}, {cv::Rect2f(100, 0, 40, 60), 3, 0.9f, {}},
+    {cv::Rect2f(200, 0, 40, 60), 2, 0.9f, {}}, {cv::Rect2f(300, 0, 40, 60), 0, 0.9f, {}}};
+  const std::vector<PuckTag> tags{{3, {20, 20}}, {9, {20, 40}},  // red prism: two different ids
+    {5, {120, 20}}, {5, {220, 20}}};                             // the same id on two green pucks
+  EXPECT_EQ(associate_pucks(yolo, tags).size(), 1u);  // survey view: one green id-5 box only
+  const auto every = associate_pucks(yolo, tags, {}, 0.4f, {}, true);
+  ASSERT_EQ(every.size(), 4u);
+  EXPECT_EQ(every[0].id, -1);                 // ambiguous ids
+  EXPECT_EQ(every[0].tag_corners.size(), 2u);  // but both tags kept for the axis
+  EXPECT_EQ(every[0].shape, PuckShape::kCuboid);
+  EXPECT_EQ(every[1].id, 5);
+  EXPECT_EQ(every[2].id, 5);
+  EXPECT_EQ(every[3].id, -1);                 // no tag at all
+  EXPECT_EQ(every[3].tags, 0);
+}
+
+// ---- traffic light: pixels color source -----------------------------------------------------
+namespace {
+// A 30x70 tower on a grey frame: white cap on top (like ours), one lamp lit as a clipped white core
+// with a saturated ring of `ring_bgr` around it at `center_y` (0 = top of the tower).
+cv::Mat tower_frame(bool lit, double center_y, cv::Scalar ring_bgr) {
+  cv::Mat frame(360, 640, CV_8UC3, cv::Scalar(90, 90, 90));
+  const cv::Rect tower(300, 100, 30, 70);
+  frame(tower).setTo(cv::Scalar(40, 40, 40));
+  frame(cv::Rect(300, 100, 30, 12)).setTo(cv::Scalar(250, 250, 250));  // white cap: top 17 % of the box
+  if (lit) {
+    const cv::Point c(315, 100 + static_cast<int>(center_y * 70));
+    cv::circle(frame, c, 14, ring_bgr, cv::FILLED);
+    cv::circle(frame, c, 11, cv::Scalar(255, 255, 255), cv::FILLED);  // core ~25 % of the box, as on our tower
+  }
+  return frame;
+}
+PixelColorConfig our_pixels() {  // perception.yaml uppercam.traffic_light.pixels
+  PixelColorConfig c;
+  c.cap_fraction = 0.2; c.on_fraction = 0.10; c.use_ring_hue = false; c.red_cut = 0.49; c.yellow_cut = 0.72;
+  return c;
+}
+cv::Scalar bgr_of_hue(int hue) {  // OpenCV hue 0..179, full saturation and value
+  cv::Mat hsv(1, 1, CV_8UC3, cv::Scalar(hue, 255, 230)), bgr;
+  cv::cvtColor(hsv, bgr, cv::COLOR_HSV2BGR);
+  const auto v = bgr.at<cv::Vec3b>(0, 0);
+  return cv::Scalar(v[0], v[1], v[2]);
+}
+}
+
+TEST(TrafficLight, PixelColorOfOurTower) {
+  const auto c = our_pixels();
+  const cv::Rect2f box(300, 100, 30, 70);
+  // Unlit: the white cap alone stays below on_fraction, whatever color the model would say.
+  EXPECT_FALSE(measure_light_color(tower_frame(false, 0, {}), box, c).has_value());
+  // Lamps where ours sit (cap left out): R 0.36-0.40, Y 0.58-0.63, G 0.80-0.85. Red's ring hue 14 is inside
+  // yellow's hue range on our camera: the position decides.
+  EXPECT_EQ(measure_light_color(tower_frame(true, 0.38, bgr_of_hue(14)), box, c), LightColor::kRed);
+  EXPECT_EQ(measure_light_color(tower_frame(true, 0.60, bgr_of_hue(17)), box, c), LightColor::kYellow);
+  EXPECT_EQ(measure_light_color(tower_frame(true, 0.82, bgr_of_hue(32)), box, c), LightColor::kGreen);
+  // With the cap in (cap_fraction 0) the unlit cap alone reads as a lit lamp at a low on_fraction.
+  PixelColorConfig with_cap = c;
+  with_cap.cap_fraction = 0;
+  EXPECT_EQ(measure_light_color(tower_frame(false, 0, {}), box, with_cap), LightColor::kRed);
+}
+
+TEST(TrafficLight, PixelsSourceIgnoresTheModelColor) {
+  TrafficLightConfig config;
+  config.red_class_id = 1; config.yellow_class_id = 2; config.green_class_id = 3; config.off_class_id = 4;
+  config.color_source = ColorSource::kPixels;
+  config.pixels = our_pixels();
+  TrafficLightCounter counter;
+  ASSERT_TRUE(counter.configure(config));
+  const auto tower = [](int cls, float score) { return Detection{cv::Rect2f(300, 100, 30, 70), cls, score, {}}; };
+  const auto dark = tower_frame(false, 0, {});
+  const auto green = tower_frame(true, 0.82, bgr_of_hue(32));
+  double t = 0;
+  const double dt = 1.0 / 15;
+  // 1 s: the model says sign_yellow 0.9 on an unlit tower (2026-11-12 false blinks) -> nothing counted.
+  for (int i = 0; i < 15; ++i, t += dt) counter.update(t, {tower(2, 0.9f)}, dark);
+  for (int i = 0; i < 15; ++i, t += dt) counter.update(t, {tower(4, 0.8f)}, dark);
+  EXPECT_TRUE(counter.blinks().empty());
+  EXPECT_TRUE(counter.rejected().empty());
+  // 1 s lit green, the model calling it sign_off 0.6: counted as green from the pixels.
+  for (int i = 0; i < 15; ++i, t += dt) counter.update(t, {tower(4, 0.6f)}, green);
+  for (int i = 0; i < 15; ++i, t += dt) counter.update(t, {tower(4, 0.8f)}, dark);
+  ASSERT_EQ(counter.blinks().size(), 1u);
+  EXPECT_EQ(counter.blinks()[0].color, LightColor::kGreen);
+  // No frame given: nothing is lit.
+  TrafficLightCounter blind;
+  ASSERT_TRUE(blind.configure(config));
+  for (int i = 0; i < 15; ++i) blind.update(i * dt, {tower(3, 0.9f)});
+  blind.flush();
+  EXPECT_TRUE(blind.blinks().empty());
 }

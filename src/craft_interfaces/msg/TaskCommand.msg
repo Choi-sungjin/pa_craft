@@ -22,6 +22,8 @@ float64 speed
 float64[] speed_limit
 int32 clock_slot
 bool close
+# WAIT: wait duration. NAVIGATE + continuous_tracking: whole-task deadline [s], 0 = configured deadline,
+# positive values at most 3600 s. Updates do not reset the deadline.
 float64 duration_s
 # NAVIGATE: fine in-place alignment [rad] before moving off and at the goal heading; 0 = control.yaml.
 # MANIPULATOR: arrival tolerance of the LM and the four arm motors [motor rad]; 0 = control.yaml (0.5 deg).
@@ -41,3 +43,8 @@ bool camera_distance_control
 float64 camera_gap_m
 float64 camera_target_gap_m
 builtin_interfaces/Time camera_observation_stamp
+
+# NAVIGATE: follow bends while translating, without automatic in-place realignment. Default false preserves
+# ordinary tasks. If the path lies 90 deg or more behind the travel heading, hold still instead of turning.
+# Does not bypass obstacle holds, watchdogs, speed limits or final requested heading alignment.
+bool continuous_tracking

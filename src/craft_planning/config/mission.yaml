@@ -1,0 +1,38 @@
+# Dice memory mission (발제 2026-11-04, v5): mission_master. Every parameter is required.
+#   ros2 topic pub -1 /mission/command std_msgs/msg/String "{data: START}"     (STOP, RESET)
+#   ros2 topic echo /mission/state
+mission_master:
+  ros__parameters:
+    loop_hz: 20.0
+    map_frame: map
+    # Start boxes in visiting order (planning.yaml box_approach names), pucks_per_box on each: 12 pucks in all.
+    start_boxes: [S1, S2, S3, S4, S5, S6]
+    pucks_per_box: 2
+    # L1, L2, L3 in that order: the sorted groups go to them in this order.
+    locations: [L1, L2, L3]
+    # Where the robot goes back to [x m, y m, yaw deg], map frame. TODO(user): confirm. (0.56, 0.98) is the marked
+    # start of demo/corner/run_tour.py; 180 deg = looking at the traffic light (-x), as at the start.
+    home: [0.743, 0.950, 180.0]  # brief start/return zone centre (x 440-1046, y 658-1261 mm; user 2026-11-13: arena set to the brief)
+    home_still_s: 3.0          # stand still in the start zone this long (brief: 3 s)
+    # START clears the blink counter, the barcode and the puck survey of perception, so START comes before the
+    # operator starts the light. false: keep what perception already holds.
+    reset_perception_on_start: true
+    # 0 = wait without a limit. A light that never completes 12 blinks otherwise holds the mission in WatchSignal
+    # (STOP ends it). TODO(user): decide the limits (docs/todo/puck_perception.md B9).
+    barcode_timeout_s: 0.0
+    signal_timeout_s: 0.0
+    approach_timeout_s: 300.0  # one drive + dock to a box, then the mission faults
+    go_home_timeout_s: 300.0
+    leave_timeout_s: 60.0      # back out of a dock (planning box_approach.reverse_distance) before the next drive
+    # true: all three locations are placed first, then each is visited again and verified (the brief's order).
+    # false: a location is verified right after its pucks are placed, before leaving it.
+    verify_after_all: true
+    # true (user 2026-11-12, no arm for now): skip the barcode and every arm action. After the signal is complete the
+    # robot drives up to S1..S6, then L1..L3, then home. false = the full mission (barcode, pick, place, verify).
+    drive_only: true
+    # --- skeleton parts (observe / pick / place / verify are not connected yet) ---
+    skeleton_action_s: 0.5     # a skeleton action reports done after this long
+    # The pick skeleton cannot say which puck it took: true hands the surveyed ids out to the clock slots, lowest
+    # first, so the whole sequence can be walked through. MUST be false once the pick reports the puck id.
+    assume_unknown_picks: true
+    log_dir: ~/craft_mission_logs  # mission_<time>/signal.json, allocation.json, mission.log; empty = no files

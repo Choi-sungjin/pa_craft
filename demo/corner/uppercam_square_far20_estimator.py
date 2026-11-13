@@ -66,8 +66,9 @@ class SquareFar20Estimator(UppercamEstimator):
         d=np.asarray(depth_m,float);K=np.asarray(K,float)
         if d.ndim!=2 or K.shape!=(3,3) or not np.isfinite(K).all() or K[0,0]<=0 or K[1,1]<=0:
             raise ValueError('invalid depth image or intrinsics')
-        # The independently evaluated candidate refines the entire contour at 20 mm.
-        top,cen,n,area,rms=fast.box_top(d,K,self.up,.6229,np.random.default_rng(0),.5,None,dict(br.RANSAC,edge_drop=.020))
+        # The independently evaluated candidate refines the entire contour at 20 mm. box_top_cropped = box_top
+        # bit for bit on windows around the box (2026-11-10, 666 boxgap_1108_1236 frames identical).
+        top,cen,n,area,rms=fast.box_top_cropped(d,K,self.up,.6229,np.random.default_rng(0),.5,None,dict(br.RANSAC,edge_drop=.020))
         side_top=top
         corners,_=br.rectangle(top,K,cen,n)
         seen=br.far_corner_visibility(d,K,cen,n,corners,self.up)
@@ -109,10 +110,11 @@ class SquareFar20Estimator(UppercamEstimator):
                     geometry_frame_id='base_link',method=METHOD,provenance='spec_reimplementation',extrapolated=False)
         try:
             if not frame_id or not math.isfinite(float(timestamp_s)):raise ValueError('invalid frame or stamp')
-            if error is not None or geo is None:raise ValueError(error or 'missing geometry')
+            if error is not None or geo is None:
+                # A frame without geometry is skipped; it no longer clears the filter (2026-11-10).
+                self.selected.filter.miss(timestamp_s);result['error']=error or 'missing geometry';return result
             f=self.selected.update(geo['raw_gap_mm'],frame_index,timestamp_s)
-            if f['state']=='invalid':
-                self.reset();return result
+            if f['state']=='invalid':return result
             self.geometry_history[int(frame_index)]=(float(timestamp_s),geo)
             retained={item['index'] for item in self.selected.filter.history}
             self.geometry_history={index:value for index,value in self.geometry_history.items() if index in retained}

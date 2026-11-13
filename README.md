@@ -46,16 +46,13 @@ pa_craft/
     │   │   └── slam.yaml
     │   ├── include/craft_perception/ # 일반 C++ 모듈 인터페이스
     │   ├── msg/                  # 검출·손잡이·puck 관측 메시지
-    │   ├── models/               # knob_sign ncnn 모델 (puck는 AprilTag ID로 구분)
+    │   ├── models/               # ncnn 모델: knob_sign_v4(신호), pucks_v8b(퍽)
     │   └── src/
     │       ├── perception_master.cpp # 연결·configure·타이머 (control_master 형식)
-    │       ├── d435_perception.cpp   # D435 클래스: yolo → knob_depth/object/obstacle, apriltag, puck_axis
-    │       ├── c310_perception.cpp   # C310 클래스: knob_lever (자체 YOLO)
+    │       ├── d435_perception.cpp   # 그리퍼 D435 클래스: yolo → object/obstacle, apriltag, puck_axis
     │       ├── lidar_perception.cpp  # LiDAR 클래스: 전·후방 스캔 병합 → 장애물
     │       ├── yolo_detector.cpp     # ncnn YOLO
     │       ├── apriltag_reader.cpp
-    │       ├── knob_depth.cpp
-    │       ├── knob_lever.cpp
     │       ├── object_detector.cpp   # YOLO 박스 + depth → 3D 위치
     │       ├── obstacle_detector.cpp # YOLO 박스 + depth → 가까운 장애물 면
     │       ├── puck_axis.cpp         # puck 축 (puck_axis_live.py 이식)
@@ -82,7 +79,6 @@ pa_craft/
         ├── CMakeLists.txt
         ├── package.xml
         └── src/
-            ├── c310_processor.cpp
             └── realsense_processor.cpp
 ```
 
@@ -91,9 +87,9 @@ pa_craft/
 | 경로 | 역할 |
 | --- | --- |
 | `src/craft_bringup` | ROS 2 노드를 함께 실행하는 launch 파일 |
-| `src/craft_sensors` | D435·C310 카메라 입력 처리 (IMU·엔코더는 control 쪽에서 발행) |
+| `src/craft_sensors` | 그리퍼 D435 입력 처리 (어퍼캠 D435는 `demo/corner/run_uppercam_bridge.sh`) (IMU·엔코더는 control 쪽에서 발행) |
 | `src/lidar_processor` | 전·후방 LiDAR 구동·TF·병합 → `/lidar/merged` ([실행 안내](src/lidar_processor/README.md)) |
-| `src/craft_perception` | C++ PerceptionMaster + D435/C310 클래스 (ncnn·AprilTag·깊이·레버·puck 인지) ([실행·주기 설정](src/craft_perception/README.md)) |
+| `src/craft_perception` | C++ PerceptionMaster + D435 클래스 (ncnn·AprilTag·깊이·puck·신호등 인지) ([실행·주기 설정](src/craft_perception/README.md)) |
 | `src/craft_planning` | 주행 경로 계획 |
 | `src/craft_control` | 로봇 팔·시계 조작 계획, 주행 및 조작 목표를 제어 입력으로 연결 |
 | `firmware/wheel_clock`, `firmware/lm_arm` | OpenCR 두 대의 모터 펌웨어 ([설정·빌드 안내](firmware/README.md)) |

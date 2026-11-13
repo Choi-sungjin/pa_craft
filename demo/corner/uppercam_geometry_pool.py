@@ -7,11 +7,13 @@ from collections import deque
 
 _worker_estimator=None
 
+WORKERS=3  # 30 fps (2026-11-10): ~70 ms of geometry per frame on the Jetson needs three workers to keep up
+
 def _init_worker(urdf,calibration,barrier):
     global _worker_estimator
     from uppercam_square_far20_estimator import SquareFar20Estimator
     _worker_estimator=SquareFar20Estimator(urdf,calibration)
-    # Neither worker accepts jobs until both estimators have initialized.
+    # No worker accepts jobs until every estimator has initialized.
     barrier.wait(timeout=10)
 
 def warm_worker():
@@ -28,7 +30,7 @@ def _compute(frame,K):
         return None,str(exc),(time.monotonic()-start)*1000
 
 class OrderedGeometryQueue:
-    def __init__(self,executor,limit=2):
+    def __init__(self,executor,limit=WORKERS):
         self.executor=executor;self.limit=limit;self.pending=deque()
     def submit(self,frame,K,context):
         if len(self.pending)>=self.limit:return False
@@ -45,6 +47,6 @@ class OrderedGeometryQueue:
 
 def new_geometry_pool(urdf,calibration):
     context=multiprocessing.get_context('spawn')
-    barrier=context.Barrier(2)
-    return concurrent.futures.ProcessPoolExecutor(max_workers=2,mp_context=context,
+    barrier=context.Barrier(WORKERS)
+    return concurrent.futures.ProcessPoolExecutor(max_workers=WORKERS,mp_context=context,
         initializer=_init_worker,initargs=(str(urdf),str(calibration),barrier))

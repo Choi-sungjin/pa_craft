@@ -1,16 +1,15 @@
 # C++ PerceptionMaster
 
-`perception_master` 하나가 ROS 입출력, 설정, 타이머를 소유하고 카메라별 클래스
-`D435Perception`, `C310Perception`의 멤버 함수를 호출합니다 (`control_master`와 같은 형식).
-이전의 개별 실행 Python 스크립트(`aruco_reader.py`, `knob_depth.py`, `knob_lever.py`,
-`depth_heatmap.py`, `puck_axis_live.py`)와 분리 전 C++는 `~/craft_cam_backup/`에 백업했습니다.
+`perception_master` 하나가 ROS 입출력, 설정, 타이머를 소유하고 카메라 클래스
+`D435Perception`(그리퍼 D435)의 멤버 함수를 호출합니다 (`control_master`와 같은 형식).
+이전의 개별 실행 Python 스크립트(`aruco_reader.py`, `depth_heatmap.py`, `puck_axis_live.py`)와 분리 전 C++는 `~/craft_cam_backup/`에 백업했습니다.
 모델 export와 테스트에 사용하는 Python은 런타임 의존성이 아닙니다.
 
 | 계층 | 담당 |
 | --- | --- |
-| `PerceptionMaster` | `configure()`: `perception.yaml`을 읽어 `D435Config`/`C310Config`를 채우고 각 클래스의 `configure()` 호출. `connect()`: shm reader, pub/sub, 작업별 타이머 |
-| `D435Perception` / `C310Perception` | 카메라 단위 알고리즘 묶음. ROS 없음. 결과 `nullopt` = 입력 무효(발행 안 함), 빈 vector = 유효 프레임에서 찾지 못함 |
-| 모듈 (`YoloDetector`, `KnobDepth` …) | `configure(...) -> bool`, `is_valid_input(...)`, `compute_result(...)` 규칙 그대로 |
+| `PerceptionMaster` | `configure()`: `perception.yaml`을 읽어 `D435Config`를 채우고 각 클래스의 `configure()` 호출. `connect()`: shm reader, pub/sub, 작업별 타이머 |
+| `D435Perception` | 카메라 단위 알고리즘 묶음. ROS 없음. 결과 `nullopt` = 입력 무효(발행 안 함), 빈 vector = 유효 프레임에서 찾지 못함 |
+| 모듈 (`YoloDetector`, `PuckAxis` …) | `configure(...) -> bool`, `is_valid_input(...)`, `compute_result(...)` 규칙 그대로 |
 
 모듈별로 `configured` 플래그를 두지 않으며 master가 설정 성공 후 타이머를 시작합니다.
 입력·결과 보관은 master가 소유합니다. 추론·자원 접근 실패는 예외로 master의 진단에 기록됩니다.
@@ -22,24 +21,18 @@ PerceptionMaster  (rclcpp::Node, perception_master.cpp)
 │   ROS 입출력 · configure() · 작업 타이머 · 진단
 │
 ├── D435Perception d435_                     (d435_perception.cpp)
-│   ├── YoloDetector    yolo_                → d435_yolo 작업 (knob_sign)
+│   ├── YoloDetector    yolo_                → d435_yolo 작업 (knob_sign_v4)
 │   │   └── InferenceBackend  (NcnnBackend | TensorRtBackend)
 │   ├── AprilTagReader  apriltag_            → 공용 태그 ID 인식
-│   ├── KnobDepth       knob_depth_          → knob_depth 작업       ┐
-│   ├── ObjectDetector  object_detector_     → object_detector 작업  ├ d435_yolo 박스 공유
+│   ├── ObjectDetector  object_detector_     → object_detector 작업  ┐ d435_yolo 박스 공유
 │   ├── ObstacleDetector obstacle_detector_  → obstacle_detector 작업 ┘
 │   └── PuckAxis        puck_axis_           → puck 태그 박스 + depth로 축 계산
-│
-├── C310Perception c310_                     (c310_perception.cpp)
-│   ├── YoloDetector    yolo_                → knob_lever 작업 (knob_sign, 또는 seg 모델)
-│   │   └── InferenceBackend
-│   └── KnobLever       lever_               → hsv | yolo_seg 마스크 → 각도
 │
 ├── LidarPerception lidar_                   → lidar_obstacle 작업 (병합 + 장애물)
 ├── StateEstimator        state_estimator_   → state_estimator 작업 (대기, odom 전달만)
 │
-└── CameraInput cameras_[2]   [kD435], [kC310]
-    └── SharedFrameReader reader   → /dev/shm/craft_vision, /dev/shm/craft_c310 읽기
+└── CameraInput cameras_[kCameraCount]   [kD435] (그리퍼 D435; 어퍼캠은 uppercam JPEG 토픽)
+    └── SharedFrameReader reader   → /dev/shm/craft_vision 읽기
 ```
 
 ### 파일
@@ -52,11 +45,8 @@ craft_perception/
 ├── include/craft_perception/
 │   ├── perception_master.hpp
 │   ├── d435_perception.hpp         # D435Config, D435Perception
-│   ├── c310_perception.hpp         # C310Config, C310Perception
 │   ├── yolo_detector.hpp           # YOLO (구 ObjectDetector), ncnn/TensorRT 백엔드, seg 마스크
 │   ├── apriltag_reader.hpp
-│   ├── knob_depth.hpp
-│   ├── knob_lever.hpp
 │   ├── object_detector.hpp         # YOLO 박스 + depth → 3D 위치
 │   ├── obstacle_detector.hpp       # YOLO 박스 + depth → 가까운 장애물 면
 │   ├── puck_axis.hpp               # puck_axis_live.py 이식
@@ -71,21 +61,19 @@ craft_perception/
 
 | 카메라 | 작업 (`schedule.<이름>`) | 기본 Hz | 입력 / 역할 |
 | --- | --- | --- | --- |
-| D435 | `d435_yolo` | 10 | BGR → knob_sign YOLO 1회. 결과를 프레임과 묶어 아래 3개가 공유 |
-| D435 | `knob_depth` | 10 | YOLO knob 박스 + aligned depth → 위치·패널 법선 |
+| D435 | `d435_yolo` | 10 | BGR → knob_sign_v4 YOLO 1회. 결과를 프레임과 묶어 아래 2개가 공유 |
 | D435 | `object_detector` | 10 | YOLO 전체 박스 + depth → 박스 중앙부 중앙값 깊이의 3D 위치 |
 | D435 | `obstacle_detector` | 10 | YOLO 장애물 클래스 박스 + depth → 박스 내 가까운 면(하위 분위수), 거리 제한 |
 | D435 | `apriltag` | 15 | BGR → 왼쪽부터 정렬한 AprilTag ID. Planning은 바닥·벽면 태그를 미션으로 매핑 |
 | D435 | `puck_axis` | 10 | 설정된 puck 밑면 AprilTag ID/ROI + depth → puck ID, 선반 평면, standing/lying, 축 |
-| C310 | `knob_lever` | 10 | 자체 YOLO + 영상 평면 레버 방향. 레버 픽셀은 `c310.knob_lever.lever_source`로 선택 (`hsv` / `yolo_seg`) |
 | - | `lidar_obstacle` | 20 | 전·후방 스캔 병합 + 장애물 점 투영 |
 | - | `state_estimator` | 100 | 지정 odometry 검증·전달 (대기, 기존 그대로) |
 
-`knob_depth`/`object_detector`/`obstacle_detector`는 `d435_yolo`가 꺼져 있으면 결과가 없습니다
-(시작 시 경고). `puck_axis`는 depth가 필요해 C310이 아닌 D435에서 실행합니다.
+`object_detector`/`obstacle_detector`는 `d435_yolo`가 꺼져 있으면 결과가 없습니다
+(시작 시 경고).
 
 **타이머 Hz는 처리 목표/상한입니다.** 새 입력이 없으면 계산·발행하지 않습니다.
-따라서 10 Hz 검출의 결과를 쓰는 15 Hz 레버 모듈도 새 결과는 최대 10 Hz입니다.
+따라서 10 Hz 검출의 결과를 쓰는 15 Hz 후속 모듈도 새 결과는 최대 10 Hz입니다.
 느린 계산이 설정 주기를 넘으면 자동으로 빨라지지 않습니다. 결과를 중복 발행해
 겉보기 Hz를 맞추지 않고 진단으로 실제 처리율을 표시합니다. 모든 설정은
 `config/perception.yaml`에 있으며 `schedule.<작업>.enabled`, `schedule.<작업>.hz`로 조정합니다.
@@ -101,7 +89,7 @@ craft_perception/
   `MultiThreadedExecutor`가 실행하며 동일 모듈의 작업은 겹치지 않습니다.
 - 기본 executor 스레드는 6개, 각 카메라의 ncnn 추론 스레드는 1개입니다.
   OpenCV 내부 스레드도 1개로 제한합니다. 실제 온보드 CPU에서 처리율을 측정해 조정하세요.
-- 모델 인스턴스: D435 knob_sign, C310 knob_sign 각 1개. 각 인스턴스는 한 작업만
+- 모델 인스턴스: 작업별로 따로 둡니다(D435 `d435.yolo`, 퍽 `puck_survey`, 어퍼캠 `uppercam.yolo`). 각 인스턴스는 한 작업만
   사용하므로 서로 다른 작업은 병렬로 돌아도 같은 `ncnn::Net`을 동시에 쓰지 않습니다.
   D435의 깊이·물체·장애물 계산은 `d435_yolo` 결과를 공유하여 재추론하지 않습니다.
 - 카메라 입력 콜백은 최신 **메타데이터만** 저장합니다. 입력이 30Hz여도 처리하지 않을
@@ -114,7 +102,7 @@ craft_perception/
   (component container)여야 하고, loaned message는 고정 크기 메시지에만 동작해
   `sensor_msgs/Image`에 쓸 수 없습니다. 프로세스 간은 현재 shm(DDS로는 메타데이터만)을 유지합니다.
 - Z16 깊이를 전체 float 영상으로 변환하지 않습니다. 깊이 모듈은 bbox/패널 ROI에서,
-  필요한 픽셀만 m로 환산합니다. C310 캡처 버퍼도 재사용합니다.
+  필요한 픽셀만 m로 환산합니다.
 - 추론 동안 생산자 버퍼를 잠그면 카메라 프레임을 잃으므로 스냅샷을 한 번 복사한 뒤
   즉시 잠금을 풉니다. 모델 전처리에 필요한 별도 버퍼는 남습니다.
 - 검출 결과는 **추론에 사용한 원본 BGR·깊이·캘리브레이션**과 함께 저장합니다.
@@ -134,7 +122,8 @@ craft_perception/
 0 knob, 1 sign_red, 2 sign_yellow, 3 sign_green, 4 sign_off
 ```
 
-모델을 교체할 때는 `d435.yolo`/`c310.yolo`의 `class_names`와 `knob_class_id`도 함께 수정합니다.
+모델을 교체할 때는 `d435.yolo`/`uppercam.yolo`의 `class_names`와 클래스 id 설정도 함께 수정합니다.
+노브 미션은 없어졌습니다(2026-11-11). `knob` 클래스는 모델에 남아 있지만 쓰지 않습니다.
 Puck은 색상 YOLO를 사용하지 않습니다. `config/tag_registry.yaml`을
 `tag ID → {mission: 이름}` 또는 `tag ID → {puck: 번호}` 해시 테이블로 읽어
 바닥·벽면 미션 태그와 puck 밑면 태그를 구분합니다. 현재 레지스트리는
@@ -181,9 +170,6 @@ YOLO_CONFIG_DIR=/tmp/craft-yolo-config custom_yolo26/.venv/bin/python \
 | --- | --- | --- |
 | `/perception/vision/d435/apriltag` | `std_msgs/Int32MultiArray` | AprilTag ID를 영상 왼쪽부터 정렬. PlanningMaster가 설정된 미션 태그만 사용 |
 | `/perception/vision/d435/detections` | `craft_perception/DetectionArray` | D435 `d435_yolo`의 클래스·확률·픽셀 bbox |
-| `/perception/vision/c310/detections` | 같은 메시지 | C310 `knob_lever`의 YOLO 검출 |
-| `/perception/vision/d435/knob_observations` | `craft_perception/KnobObservationArray` | D435 손잡이 위치·법선 및 유효성; lever_valid=false |
-| `/perception/vision/c310/knob_observations` | 같은 메시지 | C310 손잡이 레버 방향; depth_valid=false |
 | `/perception/vision/d435/object_detection` | `geometry_msgs/PoseArray` | 깊이를 얻은 D435 YOLO 물체의 3D 위치, optical frame |
 | `/perception/vision/d435/obstacle` | `geometry_msgs/PoseArray` | 장애물 클래스의 가장 가까운 면 위치, optical frame (신규) |
 | `/perception/vision/d435/puck_observations` | `craft_perception/PuckObservationArray` | 태그로 확정한 `puck_id`, 중심·축·선반 법선·standing, optical frame |
@@ -276,30 +262,12 @@ Pi의 기존 병합 노드를 계속 쓰려면 전체 실행에
 `--input-mode merged`를 추가하면 standalone 병합 노드 경로도 검증합니다.
 별도 ROS domain에서 전·후방 가상 스캔을 발행해 좌표·header·거리 필터·빈 출력을 검사합니다.
 
-knob 위치는 카메라 optical frame에서 m 단위입니다. 레버 각도는 **영상 평면의
-rad, 위쪽=0, 시계방향 양수**이며 로봇 관절각이 아닙니다. 관측 배열의 유효성
+D435 관측 위치는 카메라 optical frame에서 m 단위입니다. 관측 배열의 유효성
 플래그를 확인해야 하며, 0으로 초기화된 무효 필드를 실제 관측으로 쓰면 안 됩니다.
 빈 배열은 새 프레임에서 해당 물체를 찾지 못한 결과입니다. 입력이 끊기면 새 배열도
 나오지 않으므로 소비자는 header 시각/수신 timeout을 확인해야 합니다.
 
-### knob 레버 마스크 (`c310.knob_lever.lever_source`)
-
-| 값 | 레버 픽셀을 얻는 법 | 필요한 모델 |
-| --- | --- | --- |
-| `hsv` (기본) | knob 박스 안 빨강(HSV) 중 Otsu로 밝은 부분 → 노이즈 제거 → 가장 큰 덩어리 | 지금 knob_sign detect 모델 |
-| `yolo_seg` | knob 박스 안에 중심이 있는 lever 클래스 중 최고 점수의 seg 마스크 | lever 클래스를 포함한 YOLO-seg 모델 |
-
-두 방식 모두 그 뒤는 같습니다: PCA 축 → knob 박스 중심(피벗)에서 더 멀리 뻗은 쪽 → 시계 각도.
-`yolo_seg`를 쓰려면 `c310.yolo`를 seg 모델로 바꾸고 blob을 3개(`ncnn_blobs: [in0, out0, out1]`,
-`tensorrt_blobs: [images, output0, output1]`)로 적어 prototype 출력을 받고, `class_names`에 lever를 넣은 뒤
-`lever_class_id`를 그 인덱스로 맞춥니다. blob이 3개면 `YoloDetector`가 seg 모델로 동작해 박스마다
-`Detection::mask`를 채웁니다(계수·prototype 곱 → letterbox 역변환 → sigmoid>0.5). seg export의 blob 이름은
-Ultralytics 기본값을 가정했으니 실제 export 결과로 확인하세요.
-
-중심 bbox의 유효 깊이 중앙값을 사용하고,
-주변 사각 고리에서 깊이 차이가 작은 점을 모아 평면을 fitting합니다. 법선은
-카메라를 향합니다. 레버는 빨강 HSV·밝기 Otsu·가장 큰 성분의 PCA로 추정합니다.
-평면 fitting은 RANSAC이 아니며, deprojection은 pinhole 근사로 렌즈 왜곡을 무시합니다.
+deprojection은 pinhole 근사로 렌즈 왜곡을 무시합니다.
 
 `/perception/vision/d435/object_detection`의 quaternion은 위치 목록 호환용 identity일 뿐 물체 자세가
 아닙니다. 완전한 tool 자세를 만들어 `/perception/vision/object_pose`로 발행하지 않습니다.
@@ -317,12 +285,11 @@ standing(축 = 선반 법선), 아니면 평면에 투영한 2D PCA 장축이며
 ## 공유 메모리 v2
 
 수정된 `craft_sensors`와 함께 재빌드·재시작해야 합니다. 구버전 3개 필드 입력은
-거부합니다. D435는 `/craft_vision`, C310은 `/craft_c310`을 사용합니다.
+거부합니다. 그리퍼 D435는 `/craft_vision`을 사용합니다.
 
 ```text
 D435 /vision/d435/frame_meta: [offset,w,h,sequence,ROS stamp ns,depth unit nm]
-C310 /vision/c310/frame_meta: [offset,w,h,sequence,ROS stamp ns]
-slot: BGR8 + (D435 only Z16 depth) + uint64 sequence trailer
+slot: BGR8 + Z16 depth + uint64 sequence trailer
 ```
 
 생산자는 exclusive flock, 소비자는 nonblocking shared flock을 사용합니다. 소비자는
@@ -332,7 +299,7 @@ slot: BGR8 + (D435 only Z16 depth) + uint64 sequence trailer
 생산자 시작 시 크기 변경도 같은 잠금으로 보호하며, reader는 파일 크기·inode 변화를
 확인해 resize와 프로세스 재시작 시 다시 매핑합니다.
 
-`perception/shared_memory/realsense`, `perception/shared_memory/c310` 진단의
+`perception/shared_memory/realsense` 진단의
 `input_frames`, `snapshots`, `bytes_copied`로 수신 프레임과 실제 복사량을 비교할 수 있습니다.
 
 ## 빌드와 검증
@@ -348,10 +315,10 @@ ros2 run craft_perception perception_master --ros-args --params-file \
   "$(ros2 pkg prefix craft_perception)/share/craft_perception/config/perception.yaml"
 ```
 
-기존 `craft.launch.py`도 master를 실행하며 `d435_model_dir:=...`, `c310_model_dir:=...`로
+기존 `craft.launch.py`도 master를 실행하며 `d435_model_dir:=...`, `uppercam_model_dir:=...`로
 카메라별 YOLO 모델 경로를 따로 바꿀 수 있습니다(launch 값이 yaml의 `*.yolo.model_dir`보다 우선). 모델이 없거나 로드가 실패하면 시작 시 오류로 종료합니다.
-모델 없이 AprilTag와 puck depth를 점검하려면 `schedule.d435_yolo`와
-`schedule.knob_lever`를 false로 설정하세요. `puck_axis`는 AprilTag를 사용하므로 켜 둘 수 있습니다.
+모델 없이 AprilTag와 puck depth를 점검하려면 `schedule.d435_yolo`를
+false로 설정하세요. `puck_axis`는 AprilTag를 사용하므로 켜 둘 수 있습니다.
 
 ```bash
 colcon test --packages-select craft_perception --event-handlers console_direct+
@@ -366,7 +333,7 @@ python3 src/craft_perception/test/test_master_integration.py \
   --model src/craft_perception/models/knob_sign --low-copy
 ```
 
-통합 테스트는 독립 ROS domain과 고유 shm 이름으로 합성 D435/C310 입력을 보내며
+통합 테스트는 독립 ROS domain과 고유 shm 이름으로 합성 D435 입력을 보내며
 실제 ncnn 추론 중 AprilTag 처리와 입력 단절 시 발행 중단을 검사합니다. 실제 장치의
 성능·캘리브레이션·검출 정확도 검증을 대신하지 않습니다.
 

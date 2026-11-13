@@ -27,6 +27,13 @@ struct PlanningStep {
   double duration_s = 0.0;
   std::string box;  // Navigate to this box_approach box (/planning/approach_box) instead of goal
   bool box_near_entry = false;  // explicit held near-box entry, without stage motion
+  // Navigate (/planning/target_base_route): points the route passes before goal, in order (PathPlanner::plan via).
+  std::vector<geometry_msgs::msg::Point> via;
+  // /planning/leave_box: back straight out (the robot keeps its heading) box_approach.reverse_distance, down to
+  // reverse_min_distance when the end is not free. Docked 20 mm from a face the robot stands in the box's padding,
+  // where no route can start ("Start is in an obstacle"); this undoes the dock line first. leave_from: box name, log only.
+  bool leave = false;
+  std::string leave_from;
 };
 
 // Driving up to a box (/planning/approach_box <name>): PathPlanner::plan_box with the box from the list, the goal
@@ -39,6 +46,14 @@ struct BoxApproachConfig {
   bool camera_only_longitudinal = false;
   double camera_slow_gap = 0.100;   // camera_only_longitudinal: camera_speed from this gap (LiDAR line) to the end
   double camera_fast_speed = 0.10;  // [m/s] camera_only_longitudinal: the dock before camera_slow_gap
+  bool dock_wheel_odometry = true;  // the dock tracks the map pose at its start + wheel odometry (no localization jumps)
+  double lidar_window_s = 1.0;     // [s] LiDAR scans standing at the stage point whose median makes the dock line
+  bool yaw_from_map = false;       // perceived box: map yaw (quarter turns), LiDAR normal distance, face position only when its ends were seen
+  // Boxes that always use the map yaw, whatever yaw_from_map says (L1-L3 stand square: user, 2026-11-12).
+  std::vector<std::string> square_boxes;
+  double dock_straight = 0.25;     // [m] camera_only_longitudinal: the dock path is on the face normal this far before the goal
+  double dock_extend = 0.15;       // [m] camera_only_longitudinal: the dock path goes on this far past the goal (into the box)
+  double dock_overrun = 0.005;     // [m] camera_only_longitudinal: stop this far past the goal by odometry if the camera has not
   double camera_final_gap = 0.010, camera_gap_tolerance = 0.003, handoff_gap = 0.100;
   double source_gap_diff = 0.020, camera_timeout = 0.300, lidar_observation_timeout = 0.200, camera_speed = 0.005;
   double camera_uncertainty_max = 0.005, camera_far_uncertainty_max = 0.010,
@@ -64,10 +79,30 @@ struct BoxApproachConfig {
   double stage_lead = 0.20;            // [m] the stage point is this far behind the approach entry
   double stage_goal_tolerance = 0.03;  // [m] the stage drive's arrival distance (the dock starts near the normal)
   double dock_speed = 0.05;            // [m/s] the straight dock from the stage point (or a back-out) to the goal
+  double stage_final_m = 0.30, stage_final_speed = 0.05, stage_final_lookahead = 0.08;  // the last of the stage drive
+  double stage_capture_m = 0.15, stage_capture_s = 2.0;
+  double stage_still_s = 2.0;  // turned in place, within the heading tolerance and still this long: go on  // stuck off the stage point: turn in place instead
+  double ignore_radius = 0.25;  // [m] LiDAR obstacle points this close to the box being approached are dropped
+  double reorient_deg = 10.0;   // [deg] a box measured turned more from the face approached: plan again
+  // The robot at the stage point further than this off the measured box's dock line (sideways [m], heading [deg]):
+  // to the measured box's stage point, square to it, and the LiDAR measures again there (once per box step).
+  double restage_lateral_m = 0.04, restage_yaw_deg = 2.0, restage_reverse_deg = 10.0;
+  // One stage (user, 2026-11-13): driving to the stage point the LiDAR looks for the box all the way; once it sees it
+  // (splice_samples scans in a row), the dock path (the stage path up to a junction, a curve of at least
+  // dock_min_radius onto the face normal, dock_straight straight) replaces the stage path at once and is made again from every new LiDAR median (dock_update_period_s) until the
+  // LiDAR gap is dock_lidar_until_gap; from there the path holds and the upper cam stops it. Not seen by the stage
+  // point: the stop, measure, dock steps as before.
+  bool one_shot = false;
+  int splice_samples = 3;
+  double dock_update_period_s = 0.2, dock_lidar_until_gap = 0.15;
+  double dock_min_radius = 0.30;  // [m] one stage: a dock curve tighter than this is not sent
+  double final_yaw_tolerance = 0.0698;  // [rad] (4 deg) the upper cam check at the end of a dock
+  double dock_reference_x = 0.165;  // [m] base_link x of the point the dock tracks (0 = base_link, front_face_x = LiDAR front)
   double dock_lookahead = 0.020;       // [m] target distance from the front reference during dock tracking
   double dock_goal_tolerance = 0.01;   // [m] the dock's arrival distance (yaw_tolerance its fine alignment)
   double reverse_speed = 0.10;       // [m/s]
   std::map<std::string, std::array<double, 3>> boxes;  // name -> x, y [m, map], yaw of a face normal [rad]
+  std::map<std::string, std::vector<double>> box_faces;  // name -> outward normals [rad, map] it can be approached from
 };
 
 struct PlanningConfig {
@@ -79,6 +114,8 @@ struct PlanningConfig {
   double loop_hz = 20.0;
   double replan_period_s = 0.2;
   double block_wait_s = 2.0;    // blocked path: pause this long before replanning
+  double dock_block_wait_s = 10.0;  // blocked dock / back-out line (no replan there): fail after this long
+  double block_stop_distance = 0.15;  // [m] a block further ahead than this on the path: keep driving up to it
   double min_segment_m = 0.15;  // STOP_TURN corners closer than this to the start are not segment ends
   double odom_timeout_s = 0.5;
   double localization_observation_timeout_s = 0.3;

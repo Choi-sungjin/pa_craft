@@ -15,7 +15,7 @@ import tempfile
 import time
 
 # Tasks that read the D435 frame besides d435_yolo/apriltag (puck_axis uses AprilTag + depth).
-D435_CONSUMERS = ('knob_depth', 'object_detector', 'obstacle_detector', 'puck_axis')
+D435_CONSUMERS = ('object_detector', 'obstacle_detector', 'puck_axis')
 
 
 def main():
@@ -38,7 +38,7 @@ def main():
     from std_msgs.msg import Int32MultiArray, UInt64MultiArray
     from craft_perception.msg import PuckObservationArray
 
-    names = [f'/craft_test_{os.getpid()}_rs', f'/craft_test_{os.getpid()}_c310']
+    names = [f'/craft_test_{os.getpid()}_rs']
     files, child = [], None
     rclpy.init()
     node = rclpy.create_node('perception_synthetic_input')
@@ -69,14 +69,14 @@ def main():
     tf_pub.publish(TFMessage(transforms=[map_from_odom]))
     scan_pub = node.create_publisher(LaserScan, '/lidar/merged', 1)
     publishers = [node.create_publisher(UInt64MultiArray, topic, 1)
-                  for topic in ('/vision/d435/frame_meta', '/vision/c310/frame_meta')]
+                  for topic in ('/vision/d435/frame_meta',)]
     info_pub = node.create_publisher(CameraInfo, '/vision/d435/camera_info', 10)
     image = np.full((360, 640, 3), 255, dtype=np.uint8)
     dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_APRILTAG_36h11)
     marker = cv2.aruco.drawMarker(dictionary, 7, 100)
     image[100:200, 100:200] = marker[:, :, None]
     depth = np.full((360, 640), 250, dtype=np.uint16)
-    payloads = [image.tobytes() + depth.tobytes(), image.tobytes()]
+    payloads = [image.tobytes() + depth.tobytes()]
     sizes = [len(payload) + 8 for payload in payloads]
     log = tempfile.TemporaryFile(mode='w+')
     overrides = tempfile.NamedTemporaryFile(mode='w+', suffix='.yaml')
@@ -87,7 +87,6 @@ def main():
     overrides.write('perception_master:\n  ros__parameters:\n'
                     '    lidar.input_mode: merged\n'
                     f'    schedule.d435_yolo.hz: {detector_hz}\n'
-                    f'    schedule.knob_lever.hz: {detector_hz}\n'
                     f'    schedule.apriltag.hz: {apriltag_hz}\n'
                     f'    tag_registry_file: {registry.name}\n')
     if args.low_copy:
@@ -104,8 +103,8 @@ def main():
             '--params-file', str(Path(__file__).resolve().parents[2] / 'craft_bringup/config/rates.yaml'),
             '--params-file', overrides.name,
             '-p', f'd435.yolo.model_dir:={Path(args.model).resolve()}',
-            '-p', f'c310.yolo.model_dir:={Path(args.model).resolve()}',
-            '-p', f'd435.shm:={names[0]}', '-p', f'c310.shm:={names[1]}',
+            '-p', f'uppercam.yolo.model_dir:={Path(args.model).resolve()}',
+            '-p', f'd435.shm:={names[0]}',
         ], stdout=log, stderr=log)
         deadline, next_frame, sequence = time.monotonic() + 8, 0, 0
         next_odometry, next_scan = 0, 0
@@ -154,14 +153,14 @@ def main():
         assert all(ids == [7] for ids in detections), detections[:5]
         assert len(odometry_results) >= 500, f'odometry starved: {len(odometry_results)}'
         assert len(obstacle_results) >= 100, f'scan processing starved: {len(obstacle_results)}'
-        for name in ('d435_yolo', 'apriltag', 'knob_lever', 'lidar_obstacle', 'state_estimator',
+        for name in ('d435_yolo', 'apriltag', 'lidar_obstacle', 'state_estimator',
                      *D435_CONSUMERS):
             stats = statuses['perception/' + name]
             assert stats['processed'] > 0, (name, stats)
             assert stats['errors'] == 0, (name, stats)
-        for name, expected in (('d435_yolo', detector_hz), ('knob_lever', detector_hz), ('apriltag', apriltag_hz)):
+        for name, expected in (('d435_yolo', detector_hz), ('apriltag', apriltag_hz)):
             assert statuses['perception/' + name]['configured_hz'] == expected
-        for camera, key in enumerate(('realsense', 'c310')):
+        for camera, key in enumerate(('realsense',)):
             stats = statuses['perception/shared_memory/' + key]
             assert stats['snapshots'] > 0
             assert stats['bytes_copied'] == stats['snapshots'] * len(payloads[camera])
@@ -178,9 +177,9 @@ def main():
         while time.monotonic() < until:
             rclpy.spin_once(node, timeout_sec=0.01)
         assert len(detections) == count, 'repeated AprilTag output without a new frame'
-        print('Master integration passed:', len(detections), 'AprilTag results under two-camera NCNN load')
+        print('Master integration passed:', len(detections), 'AprilTag results under NCNN load')
         print('Odometry results:', len(odometry_results), 'obstacle results:', len(obstacle_results))
-        for name in ('d435_yolo', 'knob_lever', 'puck_axis', 'apriltag'):
+        for name in ('d435_yolo', 'puck_axis', 'apriltag'):
             print(name, statuses['perception/' + name])
     finally:
         if child:

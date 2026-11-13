@@ -116,10 +116,12 @@ def record_shm(session):
     rclpy.shutdown()
 
 
-def record_rs(session):
+def record_rs(session, serial=''):
     import pyrealsense2 as rs
 
     pipe, cfg = rs.pipeline(), rs.config()
+    if serial:  # two D435 on the robot: 261622073363 gripper, 261322075477 upper cam
+        cfg.enable_device(serial)
     cfg.enable_stream(rs.stream.color, W, H, rs.format.bgr8, FPS)
     cfg.enable_stream(rs.stream.depth, DEPTH_W, DEPTH_H, rs.format.z16, FPS)
     profile = pipe.start(cfg)
@@ -153,6 +155,7 @@ def main():
     ap.add_argument('--yaw-deg', type=float, default=None, help='lying: puck yaw you set, for the notes')
     ap.add_argument('--note', default='')
     ap.add_argument('--source', choices=['shm', 'rs'], default='shm')
+    ap.add_argument('--serial', default='', help='--source rs: D435 serial (gripper 261622073363, upper 261322075477)')
     ap.add_argument('--frames', type=int, default=100)
     ap.add_argument('--hz', type=float, default=5.0)
     ap.add_argument('--out', default='~/bags/puck_compare')
@@ -162,7 +165,10 @@ def main():
                          '  스택 켜기: ros2 launch craft_bringup craft.launch.py  (LiDAR 스캔도 같이 저장)\n'
                          '  또는 D435 직접: --source rs  (LiDAR 스캔 없음)')
     session = Session(args)
-    (record_shm if args.source == 'shm' else record_rs)(session)
+    if args.source == 'shm':
+        record_shm(session)
+    else:
+        record_rs(session, args.serial)
     print(f'{session.count} frames -> {session.dir}')
 
 

@@ -34,6 +34,13 @@ planning_master:
     replan_period_s: 0.2
     # [s] blocked: pause at once, replan only if still blocked after this (a passer-by clears and the same path resumes)
     block_wait_s: 2.0
+    # [s] the dock or back-out line blocked (no replan there, it would leave the face normal): wait this long for it
+    # to clear, then the step fails (user 2026-11-13: was block_wait_s = 2 s, a mission Fault is costly)
+    dock_block_wait_s: 10.0
+    # [m] An obstacle on the path further ahead than this (along the path, to the first sample in its padding): keep
+    # driving up to it; within it: pause, wait block_wait_s, replan (user, 2026-11-10: was a pause wherever it was).
+    # The check runs every replan_period_s (4 cm at 0.2 m/s) and braking takes ~4 cm.
+    block_stop_distance: 0.15
     # [s] acquisition age and steady-clock receive watchdogs are checked independently
     joint_timeout_s: 0.5
     observation_timeout_s: 0.5
@@ -55,10 +62,11 @@ perception_master:
     schedule:
       d435_yolo: {hz: 10.0}
       apriltag: {hz: 15.0}
-      knob_depth: {hz: 10.0}
       object_detector: {hz: 10.0}
       obstacle_detector: {hz: 10.0}
       puck_axis: {hz: 10.0}
-      knob_lever: {hz: 10.0}
+      puck_survey: {hz: 10.0}
+      traffic_light: {hz: 20.0}  # upper-cam JPEG arrives at --preview-hz (15): runs on each new frame
+      uppercam_puck: {hz: 20.0}  # same frames, after traffic_light is complete
       lidar_obstacle: {hz: 20.0}  # LiDAR scans arrive at 10 Hz: 10 Hz in practice
       state_estimator: {hz: 100.0}

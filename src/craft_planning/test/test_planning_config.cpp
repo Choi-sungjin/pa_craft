@@ -34,7 +34,7 @@ TEST(PlanningMissions, LoadsOrderedStepsForAllSupportedKinds) {
 missions:
   MAIN_MISSION:
     - {id: approach, type: navigate, pose: [1, 2, 0, 0, 0, 0, 1], frame: map}
-    - {id: grasp, type: tcp, pose: [0, 0, 0.02, 0, 0, 0, 1], source: d435_knob, class_id: 0}
+    - {id: grasp, type: tcp, pose: [0, 0, 0.02, 0, 0, 0, 1], source: d435_puck, class_id: 0}
     - {id: close, type: gripper, close: true}
     - {id: slot, type: clock, slot: 12}
     - {id: settle, type: wait, duration_s: 0.5}
@@ -47,7 +47,7 @@ missions:
   EXPECT_EQ(steps[0].goal.pose.position.x, 1.0);
   EXPECT_EQ(steps[1].kind, StepKind::Tcp);
   EXPECT_EQ(steps[1].goal.header.frame_id, "base_link");
-  EXPECT_EQ(steps[1].source, "d435_knob");
+  EXPECT_EQ(steps[1].source, "d435_puck");
   EXPECT_EQ(steps[1].class_id, 0);
   EXPECT_EQ(steps[1].goal.pose.position.z, 0.02);
   EXPECT_EQ(steps[2].kind, StepKind::Gripper);
@@ -59,7 +59,7 @@ missions:
 }
 
 TEST(PlanningMissions, AcceptsEveryObservationSourceWithAnExplicitOffsetAndOrientation) {
-  for (const auto &source : {"fixed", "d435_knob", "d435_puck", "object_pose", "object_detection"}) {
+  for (const auto &source : {"fixed", "d435_puck", "object_pose", "object_detection"}) {
     const auto missions = parse(std::string("missions: {M: [{id: target, type: tcp, source: ") +
       source + ", pose: [0, 0, 0, 0, 0, 0, 2]}]}");
     const auto &step = missions.at("M").front();
@@ -72,6 +72,7 @@ TEST(PlanningMissions, RejectsUnknownTypesSourcesAndFields) {
   for (const auto &text : {
       "missions: {M: [{id: a, type: fly}]}",
       "missions: {M: [{id: a, type: tcp, source: camera, pose: [0,0,0,0,0,0,1]}]}",
+      "missions: {M: [{id: a, type: tcp, source: d435_knob, pose: [0,0,0,0,0,0,1]}]}",
       "missions: {M: [{id: a, type: wait, duration_s: 1, typo: 2}]}",
       "missions: {M: [{id: a, type: gripper, close: true, pose: [0,0,0,0,0,0,1]}]}",
       "missions: {}, typo: true"})
@@ -84,7 +85,7 @@ TEST(PlanningMissions, RejectsMissingOrMalformedRequiredFields) {
   for (const auto &text : {
       "{}", "missions: []", "missions: {M: {id: a}}",
       "missions: {M: [{type: wait, duration_s: 1}]}",
-      "missions: {M: [{id: a, type: tcp, source: d435_knob}]}",
+      "missions: {M: [{id: a, type: tcp, source: d435_puck}]}",
       "missions: {M: [{id: a, type: gripper}]}",
       "missions: {M: [{id: a, type: gripper, close: [true]}]}",
       "missions: {M: [{id: a, type: gripper, close: 'true'}]}",

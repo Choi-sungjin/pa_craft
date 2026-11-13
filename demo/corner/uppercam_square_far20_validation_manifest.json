@@ -4,16 +4,17 @@
   "provenance": "independent_spec_reimplementation",
   "calibration": "uppercam_selected_calibration.json",
   "files": {
-    "uppercam_square_far20_estimator.py": "a0ccdbfd0a5703b3c2079ea558805bf443144f333c8c447eb445e512477db848",
-    "uppercam_fast5_box_range.py": "044159eb5dcec52311cc331b1625209c48cf08c76b521bfed77e4cb78ab75ec9",
+    "uppercam_square_far20_estimator.py": "25378bf65ea9b1c4455d11efb3a70f191c7a7ebd2523ac1eb7e024040a805959",
+    "uppercam_fast5_box_range.py": "263caccb83d3e1852cbd4fc6e3873b12d6c7bf3d797d9cc3f3ee706b6b63d1d3",
     "uppercam_box_range.py": "92feeafb88608c37433a34f1272b6e6dfa038b18705a7ffdae96c7be53da55f3",
     "uppercam_estimator.py": "9f014a65cdb67f7be64ebf915d7e087533d2c868b8cc2439d117e2ba061bfb9d",
-    "uppercam_selected_adapter.py": "d2930522b5e854ad4dcc5b6136f9b0fcdd0859ca1b72741d8ff2c7cfc9669dc0",
+    "uppercam_selected_adapter.py": "6d40a3eb0f4d4c1d221526380ce5733b680de81ac5f435c928a98b2e92e20eba",
     "uppercam_gap_calibration.py": "9675f118a4d4dfe3af3d19bffc3ce7a0983b2bd52415e475e41062be17895c3f",
     "uppercam_causal_median.py": "5c58d5c8bada0a7b84340ae5419b4b5eb66309d6ee287b1c8faefc0c828915c0",
     "uppercam_selected_calibration.json": "c634f08ebb26f3b9095233a58e20d184f56d3dab6acf69f9e3e604b10f51c106",
     "@urdf": "2e230ca6acdd60d03958f274ddd0253ae286d9ab44e57c3ad08984a964343730",
-    "uppercam_geometry_pool.py": "8598d826405198f83689910f5f0ffc76e04aa7483b090234834d05565d33c2f6"
+    "uppercam_geometry_pool.py": "d4b2d43fd27eafad40be393b32ed0b80311d48463a52fbf544d0f713d15387d5",
+    "uppercam_trigger_filter.py": "2dcab66f77388c2f90b20699ae287ae27aed338a98ed6e933aa770ae122df5fc"
   },
   "evidence": {
     "source": "boxgap_1108_1236 single bag, 8 placements",
@@ -22,7 +23,7 @@
     "holdout_mae_mm": 1.1235547034676903,
     "holdout_p95_abs_mm": 3.2335816778324395,
     "independent_placement_validation": false,
-    "runtime_note": "geometry math unchanged; bounded ordered two-worker runtime; selected median extrapolation flag follows supplied filter"
+    "runtime_note": "geometry math unchanged; bounded ordered worker runtime; 2026-11-10: box_top_cropped (bit-identical to box_top on all 666 boxgap_1108_1236 frames), three workers at 30 fps, and the temporal filter changed from CausalMedian3 to LatestGate (uppercam_trigger_filter.py); the holdout figures above were measured with CausalMedian3 and have not been re-measured with LatestGate"
   },
   "operating_limits": {
     "min_gap_mm": 10.0,

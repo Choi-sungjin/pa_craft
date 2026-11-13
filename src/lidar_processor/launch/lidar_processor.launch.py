@@ -87,8 +87,20 @@ def generate_launch_description():
         # 아래)를 보고 스캔 각도 부호를 뒤집는다. 각 LiDAR 의 스캔 0도는 로봇 안쪽(반대편 LiDAR)을 향함 (실측:
         # 모터 4개가 raw 0도 기준 좌우 대칭, 전방 LiDAR 를 손으로 덮으면 raw 90~240도가 막힘) -> 전방 yaw 180도,
         # 후방 0도 (뒤집기 전과 같은 yaw). 처음 넣은 0 / 180 은 180도 틀려 로봇 앞뒤가 뒤집혀 보였다.
-        DeclareLaunchArgument('front_yaw_deg', default_value='180.0'),
-        DeclareLaunchArgument('rear_yaw_deg', default_value='0.0'),
+        # 2026-11-12: 180.0 / 0.0 -> 178.0 / -2.0 (시험값). 로봇 앞면, 뒷면을 곧은 벽에 직각으로 놓고 재면 벽이 합친
+        # 스캔에서 +4.6도(앞), +4.0도(뒤) 돌아가 보였다 = 두 LiDAR 가 차체보다 시계 방향으로 약 4.3도 돌아가 있음
+        # (tools/lidar_yaw/wall_yaw.py; 주행 배그의 방향값 - 이동 방향 = -3.2도 중앙, -4.5도 봉우리와 같은 방향).
+        # 로봇을 벽에 맞춘 방법이 확실치 않아 절반인 2도만 먼저 넣음: 178 / -2 로 같은 벽이 +2.06도로 줄어드는 것 확인.
+        # 순회 결과를 보고 4.3도까지 넣을지 정한다. 되돌리려면 180.0 / 0.0. 제어의 wheel_heading_offset_deg 는 이만큼
+        # 줄여야 한다(3.0 -> 1.0): 둘 다 같은 어긋남을 고치는 것이라 합이 실제 값을 넘으면 안 된다.
+        # 2026-11-12 (2): 178.0 / -2.0 -> 175.7 / -4.3 = 벽에서 잰 4.3도 전부. 2도만 넣은 순회(tour_ly2_1112_1041)에서
+        # 방향값 - 이동 방향의 고정 성분이 -3.2 -> -1.7도로 1.5도 줄었고(넣은 값의 0.75배), 벽 4.3도 : 주행 3.2도도 같은
+        # 비라서 나머지 2.3도를 넣으면 0 근처가 된다는 계산. 제어의 wheel_heading_offset_deg 는 0 으로.
+        DeclareLaunchArgument('front_yaw_deg', default_value='175.7'),
+        # 2026-11-12 (3): rear -4.3 -> -4.5. The rear LiDAR was taken off and put back; 4 placements in a corridor,
+        # the same wall seen by both LiDARs (tools/lidar_yaw/lidar_walls.py): rear - front = +0.03 / +0.39 / +0.15 /
+        # +0.25 deg (mean of the wall ahead and behind), mean +0.2. The front one cannot be checked against walls alone.
+        DeclareLaunchArgument('rear_yaw_deg', default_value='-4.5'),
         DeclareLaunchArgument('front_roll_deg', default_value='180.0',
                               description='180: 뒤집어 장착(업사이드다운), 0: 똑바로'),
         DeclareLaunchArgument('rear_roll_deg', default_value='180.0',

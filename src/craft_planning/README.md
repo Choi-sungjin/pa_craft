@@ -44,7 +44,6 @@ Types use the ROS `package/msg/Type` convention.
 | `/control/arm_joints` | `sensor_msgs/msg/JointState` | Default measured, inverse-calibrated URDF joints; configurable with `joint_state_topic` |
 | `/perception/lidar/obstacle` | `geometry_msgs/msg/PoseArray` | LiDAR points; required for navigation by default |
 | `/perception/vision/d435/obstacle` | `geometry_msgs/msg/PoseArray` | Additional vision obstacle points |
-| `/perception/vision/d435/knob_observations` | `craft_perception/msg/KnobObservationArray` | Depth-valid knob targets |
 | `/perception/vision/d435/puck_observations` | `craft_perception/msg/PuckObservationArray` | Axis-valid puck targets |
 | `/perception/vision/object_pose` | `geometry_msgs/msg/PoseStamped` | Optional generic observation source |
 | `/perception/vision/d435/object_detection` | `geometry_msgs/msg/PoseArray` | Generic object positions |
@@ -239,7 +238,7 @@ missions:
       pose: [1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
     - id: grasp_pose
       type: tcp
-      source: d435_knob
+      source: d435_puck
       class_id: 0
       frame: base_link
       pose: [0.0, 0.0, 0.02, 0.0, 0.0, 0.0, 1.0]
@@ -250,7 +249,7 @@ missions:
 
 Step IDs must be unique per mission. Unknown keys/types, invalid slots, frames,
 poses and non-finite values fail parsing. Pose is `[x,y,z,qx,qy,qz,qw]` with a
-nonzero quaternion. `source` defaults to `fixed`; alternatives are `d435_knob`,
+nonzero quaternion. `source` defaults to `fixed`; alternatives are
 `d435_puck`, `object_pose`, `object_detection`. For `d435_puck`, `class_id` is the
 AprilTag ID printed on the puck underside. The highest-confidence fresh
 matching target is transformed into the step frame. Configured XYZ is an offset
@@ -350,3 +349,28 @@ the initial pip `pin` dependency combination crashed during ROS node constructio
 Tests cover native map/FK/IK/FSM/configuration behavior, ROS scheduling with
 synthetic feedback, and control heartbeat/hold/recovery using disposable PTYs.
 They do not verify physical motor calibration or complete hardware bringup.
+
+## Mission (`mission_master`, 2026-11-12)
+
+The dice memory mission (발제 2026-11-04, v5) runs one level above `planning_master`:
+`ros2 launch craft_bringup craft.launch.py mission:=true`, then
+`ros2 topic pub -1 /mission/command std_msgs/msg/String "{data: START}"` (also `STOP`, `RESET`); `/mission/state` shows
+the state and the action being run. Settings: [config/mission.yaml](config/mission.yaml).
+
+| File | What it holds |
+| --- | --- |
+| `mission_logic.hpp/.cpp` | barcode -> sort order, counts -> groups of L1-L3 (ties R, Y, G), 12 pucks -> allocation (Y one shape), dice spots |
+| `mission_fsm.hpp/.cpp` | `Idle -> ReadBarcode -> WatchSignal -> Collect -> Allocate -> Deliver -> Verify -> Return -> Done`, any -> `Fault`; one `MissionAction` at a time, no ROS |
+| `mission_master.cpp` | ROS node: perception inputs, drives through `/planning/approach_box` and `/planning/target_base_pose`, `signal.json` / `allocation.json` / `mission.log` under `log_dir` |
+
+Collect picks every puck of every start box into the clock (12 slots) before the allocation is made, so R/G cannot take
+what Y needs. A fault (unregistered barcode, invalid signal, incomplete survey, no allocation, a failed or timed-out
+action) sends planning `STOP` and stays in `Fault` until `RESET` or a new `START`.
+
+**Skeletons** (`run_skeleton` in `mission_master.cpp`: logged as `[SKELETON]`, done after `skeleton_action_s`):
+`observe_pucks`, `pick_puck`, `place_puck`, `verify_location`. The pick must report the puck id it took and check
+`/control/gripper_grasped` (control latches a grasp at >= 0.1 A for 0.1 s; a close that ends without it held nothing).
+Until then `assume_unknown_picks: true` hands the surveyed ids out to the slots so the sequence can be walked through.
+
+`box_approach.square_boxes` (L1-L3): these boxes are not turned, so they take the map yaw and skip the second stage
+drive + LiDAR measurement of a box step.

@@ -267,6 +267,8 @@ public:
       path_spacing,
       positive_param("wheel_heading_tolerance"), positive_param("wheel_rotate_angular_speed"),
       positive_param("wheel_tracking_gain"));
+    lateral_.set_goal_rotate_angular_speed(positive_param("wheel_goal_rotate_angular_speed"),
+                                           positive_param("wheel_goal_rotate_min_speed"));
     if (!clock_controller_.configure(
       clock_slot_count_, clock_slot_angle, clock_zero_angle, clock_direction, clock_angle_tolerance))
     {
@@ -382,6 +384,7 @@ public:
     settle_s_ = positive_param("settle_time_s");
     stop_tolerance_ = positive_param("stop_position_tolerance_rad");
     wheel_stop_tolerance_ = positive_param("wheel_stop_tolerance_rad_s");
+    clock_stop_tolerance_ = positive_param("clock_stop_tolerance_rad");
     task_timeout_s_ = positive_param("task_timeout_s");
     odom_timeout_s_ = positive_param("odom_timeout_s");
     camera_timeout_s_ = declare_parameter("camera_distance_timeout_s", 0.5);
@@ -395,6 +398,29 @@ public:
 
     // Control loop timer (craft_bringup/config/rates.yaml). TODO: check computing time and OpenCR serial latency.
     dt_ = 1.0 / positive_param("control_hz");
+    const double integral_gain = declare_parameter<double>("wheel_lateral_integral_gain");
+    const double integral_limit = declare_parameter<double>("wheel_lateral_integral_limit");
+    if (!std::isfinite(integral_gain) || integral_gain < 0.0 || !std::isfinite(integral_limit) || integral_limit < 0.0) {
+      throw std::runtime_error("wheel_lateral_integral_gain and wheel_lateral_integral_limit must be >= 0");
+    }
+    lateral_.set_lateral_integral(integral_gain, integral_limit, dt_);
+    const double heading_offset = declare_parameter<double>("wheel_heading_offset_deg");
+    const auto gain_errors = declare_parameter<std::vector<double>>("wheel_tracking_gain_errors_deg");
+    auto gain_scales = declare_parameter<std::vector<double>>("wheel_tracking_gain_scales");
+    bool schedule_ok = std::isfinite(heading_offset) && std::abs(heading_offset) <= 15.0 && !gain_errors.empty() &&
+      gain_errors.size() == gain_scales.size();
+    std::vector<double> gain_errors_rad;
+    for (std::size_t i = 0; schedule_ok && i < gain_errors.size(); ++i) {
+      schedule_ok = std::isfinite(gain_errors[i]) && gain_errors[i] >= 0.0 && std::isfinite(gain_scales[i]) &&
+        gain_scales[i] > 0.0 && gain_scales[i] <= 3.0 && (i == 0 || gain_errors[i] > gain_errors[i - 1]);
+      gain_errors_rad.push_back(gain_errors[i] * M_PI / 180.0);
+    }
+    if (!schedule_ok) {
+      throw std::runtime_error("wheel_heading_offset_deg must be within +-15; wheel_tracking_gain_errors_deg must "
+                               "increase from >= 0 with as many wheel_tracking_gain_scales in (0, 3]");
+    }
+    lateral_.set_heading_offset(heading_offset * M_PI / 180.0);
+    lateral_.set_gain_schedule(gain_errors_rad, gain_scales);
     timer_ = create_wall_timer(std::chrono::duration<double>(dt_), [this]() {control_loop();});
     lookahead_timer_ = create_wall_timer(std::chrono::milliseconds(50), [this]() {
       if (!have_clock_wheel_feedback_) {return;}
@@ -848,10 +874,11 @@ private:
     return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
   }
   void update_settle(std::vector<double> &anchor, const std::vector<double> &sample,
-                     double &since, double at) {
+                     double &since, double at, double tolerance = -1) {
+    if (tolerance < 0) tolerance = stop_tolerance_;
     bool moved = anchor.size() != sample.size();
     if (!moved) for (size_t i = 0; i < sample.size(); ++i)
-      moved = moved || std::abs(sample[i] - anchor[i]) > stop_tolerance_;
+      moved = moved || std::abs(sample[i] - anchor[i]) > tolerance;
     if (moved) {anchor = sample; since = at;}
   }
   void reject(const TaskCommand &msg, const std::string &reason) {
@@ -906,8 +933,9 @@ private:
           (update || c.speed != 0) && std::isfinite(c.goal_tolerance) && c.goal_tolerance >= 0.0 &&
           std::isfinite(c.tracking_reference_x) && c.tracking_reference_x >= 0.0 &&
           std::isfinite(c.lookahead_distance) && c.lookahead_distance >= 0.0 &&
-          ((c.lookahead_distance > 0.0 && c.tracking_reference_x > 0.0) ||
-          (c.lookahead_distance == 0.0 && c.tracking_reference_x == 0.0)) &&
+          // A task lookahead with any reference point (0 = base_link itself; 2026-11-10 dock), none without one.
+          (c.lookahead_distance > 0.0 || c.tracking_reference_x == 0.0) &&
+          std::isfinite(c.duration_s) && c.duration_s >= 0.0 && c.duration_s <= 3600.0 &&
           std::isfinite(c.tolerance_rad) && c.tolerance_rad >= 0.0 && c.tolerance_rad <= M_PI &&
           (c.speed_limit.empty() || (c.speed_limit.size() == c.path.poses.size() &&
           std::all_of(c.speed_limit.begin(), c.speed_limit.end(), [](double v) {return std::isfinite(v) && v >= 0.0;})));
@@ -968,11 +996,14 @@ private:
       contact_.stop();
       clear_targets_for_new_task();
       task_.begin(c, participants); last_task_id_ = c.task_id; task_at_ = at;
+      active_task_timeout_s_ = c.kind == TaskCommand::NAVIGATE && c.continuous_tracking && c.duration_s > 0 ?
+        c.duration_s : task_timeout_s_;
       arm_stable_at_ = clock_stable_at_ = at;
     } else task_.result.revision = c.revision;
     switch (c.kind) {
       case TaskCommand::NAVIGATE:
         lateral_.set_task_tolerances(c.goal_tolerance, c.tolerance_rad);
+        lateral_.set_continuous_tracking(c.continuous_tracking);
         lateral_.set_task_tracking_reference(c.tracking_reference_x, c.lookahead_distance);
         camera_distance_mode_ = c.camera_distance_control;
         lateral_.set_camera_distance_mode(camera_distance_mode_);
@@ -1068,17 +1099,21 @@ private:
     if (clock_wheel_feedback_updated) {
       publish_wheel_odometry(now_s, serial_timeout_s_);
       drive_received_at_ = now_s;
-      update_settle(clock_anchor_, {clock_angle_}, clock_stable_at_, now_s);
+      const double before = clock_stable_at_;
+      update_settle(clock_anchor_, {clock_angle_}, clock_stable_at_, now_s, clock_stop_tolerance_);
+      if (clock_stable_at_ != before) {settle_reset_by_ = "clock angle moved"; ++settle_resets_;}
     }
     if (clock_wheel_feedback_updated &&
         (std::abs(wheel_left_feedback_) > wheel_stop_tolerance_ ||
-         std::abs(wheel_right_feedback_) > wheel_stop_tolerance_)) clock_stable_at_ = now_s;
+         std::abs(wheel_right_feedback_) > wheel_stop_tolerance_)) {
+      clock_stable_at_ = now_s; settle_reset_by_ = "wheel speed feedback"; ++settle_resets_;
+    }
     const bool odom_stale = task_.running() && task_.kind == TaskCommand::NAVIGATE &&
       (!odom_at_ || now_s - *odom_at_ > odom_timeout_s_);
     const double camera_age = (now().nanoseconds() - camera_stamp_ns_) * 1e-9;
     const bool camera_stale = task_.running() && camera_distance_mode_ &&
       (now_s - camera_received_at_ > camera_timeout_s_ || camera_age < -0.01 || camera_age > camera_timeout_s_);
-    if (task_.running() && (hardware_fault || odom_stale || camera_stale || now_s - task_at_ > task_timeout_s_)) {
+    if (task_.running() && (hardware_fault || odom_stale || camera_stale || now_s - task_at_ > active_task_timeout_s_)) {
       task_.fail(hardware_fault ? "serial feedback or board fault" : odom_stale ? "odometry timeout" :
         camera_stale ? "camera observation timeout" : "task timeout");
       task_hold_ = true;
@@ -1099,7 +1134,7 @@ private:
         clear_planning_targets();
       }
     }
-    if (held && !planning_held_) {arm_stable_at_ = clock_stable_at_ = now_s;}
+    if (held && !planning_held_) {arm_stable_at_ = clock_stable_at_ = now_s; settle_reset_by_ = "hold entered"; ++settle_resets_;}
     planning_held_ = held;
     arm_tx_ok_ = drive_tx_ok_ = false;
     publish_bool(planning_held_pub_, planning_held_);
@@ -1251,6 +1286,20 @@ private:
       if ((!arm_tx_ok_ && arm_feedback_fresh) || (!drive_tx_ok_ && clock_wheel_feedback_fresh)) {
         task_.fail("serial command write failed"); task_hold_ = true;
       } else if (now_s - task_at_ >= settle_s_) {
+        // A drive not done after 2 s standing still: say which condition holds it, every 2 s (2026-11-10: a stage turn
+        // ended within its heading tolerance and the task stayed RUNNING for 140 s with nothing in the log).
+        if (task_.kind == TaskCommand::NAVIGATE && std::abs(wheel_left_feedback_) <= wheel_stop_tolerance_ &&
+            std::abs(wheel_right_feedback_) <= wheel_stop_tolerance_ && now_s - task_at_ >= 2.0) {
+          RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
+            "drive task %lu not done: target_reached=%d feedback_fresh=%d tx_ok=%d wheel_state=%d clock_state=%d "
+            "settled_for=%.2f s (need %.2f; %lu resets, last by %s) wheel_fb=(%.3f, %.3f) clock=%.4f (anchor %.4f, tol %.4f) camera_mode=%d",
+            static_cast<unsigned long>(last_task_id_), lateral_.is_target_reached() ? 1 : 0,
+            clock_wheel_feedback_fresh ? 1 : 0, drive_tx_ok_ ? 1 : 0, wheel_state_, clock_state_,
+            drive_received_at_ - clock_stable_at_, settle_s_, static_cast<unsigned long>(settle_resets_), settle_reset_by_,
+            wheel_left_feedback_, wheel_right_feedback_,
+            clock_angle_, clock_anchor_.empty() ? 0.0 : clock_anchor_[0], clock_stop_tolerance_,
+            camera_distance_mode_ ? 1 : 0);
+        }
         task_.observe({arm_settled && arm_controller_.is_target_reached(arm_joints_),
                        arm_settled && lm_controller_.is_target_reached(lm_angle_),
                        drive_settled && (camera_distance_mode_ ? camera_gap_ <= camera_target_gap_ + camera_tolerance_ : lateral_.is_target_reached()),
@@ -1258,6 +1307,18 @@ private:
                        arm_settled && gripper_controller_.is_target_reached(gripper_angle_)},
                       task_.kind != TaskCommand::WAIT || now_s - task_at_ >= wait_duration_);
       }
+    }
+    // A stop not acknowledged: which condition holds it, every second (2026-11-11: STOPPED came 8 s after STOP with
+    // the wheels at zero, planning's stop acknowledgement timed out at 3 s).
+    if (task_.stopping() && !(stopped && planning_held_)) {
+      RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,
+        "stop of task %lu not acknowledged: held=%d arm_settled=%d feedback_fresh=%d tx_ok=%d wheel_state=%d clock_state=%d "
+        "settled_for=%.2f s (need %.2f; %lu resets, last by %s) wheel_fb=(%.3f, %.3f) clock=%.4f (anchor %.4f, tol %.4f)",
+        static_cast<unsigned long>(last_task_id_), planning_held_ ? 1 : 0, arm_settled ? 1 : 0,
+        clock_wheel_feedback_fresh ? 1 : 0, drive_tx_ok_ ? 1 : 0, wheel_state_, clock_state_,
+        drive_received_at_ - clock_stable_at_, settle_s_, static_cast<unsigned long>(settle_resets_), settle_reset_by_,
+        wheel_left_feedback_, wheel_right_feedback_, clock_angle_, clock_anchor_.empty() ? 0.0 : clock_anchor_[0],
+        clock_stop_tolerance_);
     }
     if (task_.stopping() && stopped && planning_held_) task_.stopped();
     // A released hold never restores targets. A fresh EXECUTE is required.
@@ -1281,7 +1342,10 @@ private:
   craft_control::TaskTracker task_;
   uint64_t last_task_id_ = 0;
   double task_at_ = 0, wait_duration_ = 0, settle_s_ = 0, stop_tolerance_ = 0;
-  double wheel_stop_tolerance_ = 0, task_timeout_s_ = 0, odom_timeout_s_ = 0;
+  const char *settle_reset_by_ = "nothing";  // what last restarted the drive settle timer
+  unsigned long settle_resets_ = 0;
+  double wheel_stop_tolerance_ = 0, clock_stop_tolerance_ = 0, task_timeout_s_ = 0, odom_timeout_s_ = 0;
+  double active_task_timeout_s_ = 0;
   double arm_stable_at_ = 0, clock_stable_at_ = 0, arm_received_at_ = 0, drive_received_at_ = 0;
   bool task_hold_ = false, arm_tx_ok_ = false, drive_tx_ok_ = false;
   std::vector<double> arm_anchor_, clock_anchor_;

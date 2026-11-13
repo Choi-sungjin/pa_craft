@@ -11,7 +11,7 @@ standing still. Steps:
 Ctrl+C sends STOP. For RViz (all latched, map frame): /corner/goal, /corner/path (planned, from
 /control/tracking_path), /corner/trail (driven, map->base_link every 2 cm).
   run_corner.py [--map ~/maps/arena5_legend_opt_arena1cm.yaml] [--dry-run] [--skip-localize] [--corner br|tr|bl|tl] [--near X Y]
-  run_corner.py --box L1|L2|L3 [--fake-detect [--fake-offset DX DY DYAW_DEG]] [...]: drive up to that box instead
+  run_corner.py --box S1..S6|L1..L3 [--fake-detect [--fake-offset DX DY DYAW_DEG]] [...]: drive up to that box instead
     (planning.yaml box_approach: /planning/approach_box). Planning drives to the stage point of the nearest
     approachable face of the known box, stands still, takes the box detection (/perception/box/pose), docks slowly
     square to that face, settles, checks and corrects (backs out, perceives, docks again) until within tolerance.

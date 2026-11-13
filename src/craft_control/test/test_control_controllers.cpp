@@ -781,6 +781,65 @@ TEST(LateralController, SkidSteerSeparation)
   EXPECT_NEAR(w[0], -w[1], 1e-12);
 }
 
+TEST(LateralController, LateralIntegralRemovesTheOffsetOfAHeadingBias)
+{
+  // The pose heading reads 3 deg right of the travel direction (tour bags 2026-11-11): plain Pure Pursuit settles
+  // lookahead * tan(3 deg) left of a straight path, with the integral it comes back onto it. Forward and reverse.
+  const auto run = [](double gain, double v) {
+      craft_control::LateralController c;
+      c.configure(kRadius, kTrack, kWheelbase, 1.8, {0.0}, {0.25}, 0.03, 0.02);
+      c.set_lateral_integral(gain, 1.0, 0.02);
+      double x = 0.0, y = 0.0, yaw = v < 0.0 ? kPi : 0.0;
+      const double bias = -3.0 * kPi / 180.0;
+      c.set_odom(odom(x, y, yaw + bias));
+      c.set_target(path({{0.0, 0.0}, {12.0, 0.0}}));
+      for (int i = 0; i < 2500; ++i) {  // 50 s, 10 m
+        c.set_odom(odom(x, y, yaw + bias));
+        const auto w = c.compute_command(v, v);
+        yaw += (w[1] - w[0]) * kRadius / c.effective_separation() * 0.02;
+        x += v * std::cos(yaw) * 0.02; y += v * std::sin(yaw) * 0.02;
+      }
+      return y;
+    };
+  const double left = 0.25 * std::tan(3.0 * kPi / 180.0);  // 13 mm
+  EXPECT_NEAR(run(0.0, 0.2), left, 0.002);
+  EXPECT_NEAR(run(15.0, 0.2), 0.0, 0.001);
+  EXPECT_NEAR(run(0.0, -0.2), left, 0.002);  // backwards-facing along the same path: the same side
+  EXPECT_NEAR(run(15.0, -0.2), 0.0, 0.001);
+  // The same 3 deg taken off as a fixed heading offset: on the path without the integral.
+  {
+    craft_control::LateralController c;
+    c.configure(kRadius, kTrack, kWheelbase, 1.8, {0.0}, {0.25}, 0.03, 0.02);
+    c.set_heading_offset(3.0 * kPi / 180.0);
+    double x = 0.0, y = 0.0, yaw = 0.0;
+    c.set_odom(odom(x, y, yaw - 3.0 * kPi / 180.0));
+    c.set_target(path({{0.0, 0.0}, {12.0, 0.0}}));
+    for (int i = 0; i < 2500; ++i) {
+      c.set_odom(odom(x, y, yaw - 3.0 * kPi / 180.0));
+      const auto w = c.compute_command(0.2, 0.2);
+      yaw += (w[1] - w[0]) * kRadius / c.effective_separation() * 0.02;
+      x += 0.2 * std::cos(yaw) * 0.02; y += 0.2 * std::sin(yaw) * 0.02;
+    }
+    EXPECT_NEAR(y, 0.0, 0.0005);
+    // Gain schedule: 0.7 within 1 deg, 1.0 from 3 deg, linear between.
+    c.set_gain_schedule({1.0 * kPi / 180.0, 3.0 * kPi / 180.0}, {0.7, 1.0});
+    EXPECT_NEAR(c.gain_scale(0.0), 0.7, 1e-12);
+    EXPECT_NEAR(c.gain_scale(-2.0 * kPi / 180.0), 0.85, 1e-9);
+    EXPECT_NEAR(c.gain_scale(0.5), 1.0, 1e-12);
+  }
+  // A turn on the spot starts the integral again: it belongs to the direction just driven.
+  craft_control::LateralController c;
+  c.configure(kRadius, kTrack, kWheelbase, 1.8, {0.0}, {0.25}, 0.03, 0.02);
+  c.set_lateral_integral(15.0, 1.0, 0.02);
+  c.set_odom(odom(0.0, 0.02, 0.0));
+  c.set_target(path({{0.0, 0.0}, {5.0, 0.0}}));
+  for (int i = 0; i < 50; ++i) c.compute_command(0.2, 0.2);
+  EXPECT_GT(c.lateral_integral(), 0.0);
+  c.set_target(path({{0.0, 0.0}, {-5.0, 0.0}}));  // the next leg is behind: turn first
+  c.compute_command(0.0, 0.2);
+  EXPECT_EQ(c.lateral_integral(), 0.0);
+}
+
 TEST(LateralController, TrackingGainScalesPurePursuitOnly)
 {
   craft_control::LateralController plain;
@@ -1161,4 +1220,49 @@ TEST(LateralController, CameraDistanceKeepsTrackingPastMapEndpoint)
   EXPECT_NEAR(c.lookahead_point()->x, .295, 1e-10);
   c.set_camera_distance_mode(false);
   EXPECT_TRUE(c.is_target_reached());
+}
+
+TEST(LateralController, ContinuousTrackingBendsWithoutAnInPlaceTurnAndHoldsWhenFacingAway)
+{
+  craft_control::LateralController c;
+  c.configure(kRadius,kTrack,kWheelbase,1.0,{.05,.12,.26},{.18,.18,.25},.1,.02);
+  c.set_odom(odom(.2,.2,0));
+  c.set_target(path({{0,0},{.6,.6},{1.,1.}}));
+  EXPECT_FALSE(c.can_track(.10));  // legacy 0.5 rad turn threshold
+  c.set_continuous_tracking(true);
+  EXPECT_TRUE(c.can_track(.10));
+  const auto moving=c.compute_command(.10,.10);
+  EXPECT_NE(moving[0],0.0);
+  const auto standing=c.compute_command(0.,.10);
+  EXPECT_EQ(standing[0],0.0); EXPECT_EQ(standing[1],0.0);
+  c.set_odom(odom(.2,.2,kPi));
+  EXPECT_FALSE(c.can_track(.10));
+  const auto away=c.compute_command(.10,.10);
+  EXPECT_EQ(away[0],0.0); EXPECT_EQ(away[1],0.0);
+  c.set_continuous_tracking(false);
+  EXPECT_FALSE(c.can_track(.10));
+  const auto legacy=c.compute_command(0.,.10);
+  EXPECT_NE(legacy[0],0.0);
+}
+
+TEST(LateralController, ContinuousTourAutomaticallyAlignsAtStartFromEitherDirection)
+{
+  for (double degrees : {-118.,-33.,33.,118.}) {
+    craft_control::LateralController c;
+    c.configure(kRadius,kTrack,kWheelbase,1.,{.05,.12,.26},{.18,.18,.25},.1,.02);
+    c.set_odom(odom(0,0,degrees*kPi/180.));
+    c.set_target(path({{0,0},{2,0}}));
+    c.set_continuous_tracking(true);
+    EXPECT_FALSE(c.can_track(.1));
+    const auto turn=c.compute_command(0.,.1);
+    EXPECT_NE(turn[0],0.0)<<degrees;
+    EXPECT_LT(turn[1]*degrees,0.0)<<degrees;  // shortest turn toward +x
+    c.set_odom(odom(0,0,0));
+    EXPECT_TRUE(c.can_track(.1));
+    for (int i=1;i<=10;++i) c.set_odom(odom(i*.02,0,0));
+    c.set_odom(odom(.2,0,kPi));
+    EXPECT_FALSE(c.can_track(.1));
+    const auto hold=c.compute_command(.1,.1);
+    EXPECT_EQ(hold[0],0.0); EXPECT_EQ(hold[1],0.0);  // after departure, hold instead of rotating
+  }
 }

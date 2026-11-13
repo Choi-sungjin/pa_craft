@@ -240,10 +240,23 @@ def motor_bad(q, ctrl):
     return bad
 
 
+def arg_value(flag):
+    return sys.argv[sys.argv.index(flag) + 1] if flag in sys.argv else None
+
+
 def main():
     a = ASSUME
     if '--lying' in sys.argv:
         a.update(LYING)
+    # Puck position from outside (cam_pick.py: upper camera), plan written to --out instead of plan.yaml.
+    if arg_value('--puck-ahead') is not None:
+        a['puck_ahead'] = float(arg_value('--puck-ahead'))
+    if arg_value('--puck-x') is not None:
+        a['puck_x_offset'] = float(arg_value('--puck-x'))
+    if arg_value('--shelf-height') is not None:   # measured: puck top (camera) - puck height
+        a['shelf_height'] = float(arg_value('--shelf-height'))
+    if arg_value('--grip-mm') is not None:        # jaws cover this much of the puck from its top [mm]
+        a['grasp_coverage'] = float(arg_value('--grip-mm')) / 1000 / a['puck_height']
     ch = Chain(URDF)
     ctrl = yaml.safe_load(open(CONTROL_YAML))['control_master']['ros__parameters']
     off, dirs = ctrl['arm_joint_offsets'], ctrl['arm_joint_directions']
@@ -299,7 +312,7 @@ def main():
         plan.append({'name': name, 'joints': {**{n: float(q[n]) for n in Chain.NAMES},
                                               'jaw_upper_joint': float(jaw)}})
     frames = trajectory(ch, grasp, puck_center - grasp) if ok else []
-    out = 'plan_lying.yaml' if a['lying'] else 'plan.yaml'
+    out = arg_value('--out') or ('plan_lying.yaml' if a['lying'] else 'plan.yaml')
     yaml.safe_dump({'assume': {k: (list(v) if isinstance(v, tuple) else v) for k, v in a.items()},
                     'puck_grasp_urdf': [float(v) for v in grasp], 'waypoints': plan, 'frames': frames},
                    open(HERE / out, 'w'), sort_keys=False)

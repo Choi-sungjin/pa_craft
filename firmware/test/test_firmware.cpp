@@ -287,6 +287,7 @@ void diagnostics() {
     Dynamixel2Arduino bus(Serial3, 84);
     for (unsigned id = 1; id <= 6; ++id) bus.registers[{id, PRESENT_INPUT_VOLTAGE}] = id == 4 ? 115 : 121;
     bus.registers[{2, PRESENT_TEMPERATURE}] = 61;
+    bus.registers[{5, PRESENT_CURRENT}] = -1000;  // 2.69 A the other way: the peak is |current|
     craft::MotorBoard<6> board(bus, axes, true, 1000000, 0.00269);
     board.begin();
     for (unsigned k = 0; k < craft::kDiagTicks; ++k) {
@@ -294,7 +295,8 @@ void diagnostics() {
       test_time_ms += 20;
       board.tick();
     }
-    assert(Serial.output.find("\nD,0,0,0,11.5,12.1,12.1,12.1,11.5,12.1,12.1,-1,0,61,0,0,0,0\n") != std::string::npos);
+    assert(Serial.output.find("\nD,0,0,0,11.5,12.1,12.1,12.1,11.5,12.1,12.1,-1,0,61,0,0,0,0,"
+                              "-1,0.00,0.00,0.00,0.00,2.69,0.00\n") != std::string::npos);
     Serial = {};
     bus.registers[{3, static_cast<uint8_t>(c.item)}] = c.value;
     test_time_ms += 20;
@@ -475,6 +477,38 @@ void dynamicIGain() {
   assert(Serial.output.find("D,4,2,") != std::string::npos);
 }
 
+// A lost status packet skips the tick; only kMaxLostReplies ticks in a row latch "no answer" (D,3).
+void lostReplies() {
+  Serial = {};
+  Serial.connected = true;
+  craft::AxisConfig axes[6];
+  for (unsigned i = 0; i < 6; ++i) axes[i] = {static_cast<uint8_t>(i + 1), false, 0.001, 0, 1, -10, 10, 10, 30, 0.035};
+  Dynamixel2Arduino bus(Serial3, 84);
+  craft::MotorBoard<6> board(bus, axes, true, 1000000, 0.00269);
+  board.begin();
+  const auto lose = [&](unsigned ticks) {
+    for (unsigned k = 0; k < ticks; ++k) {
+      bus.lost_replies = 1;
+      Serial.input = "0,0,0,0,0,0\n";
+      test_time_ms += 20;
+      board.tick();
+    }
+  };
+  const auto good = [&] {
+    Serial.input = "0,0,0,0,0,0\n";
+    test_time_ms += 20;
+    board.tick();
+  };
+  good();
+  lose(2);  // one or two lost replies in a row: ignored
+  assert(Serial.output.find("D,3,") == std::string::npos && lastState() != 2);
+  good();  // one good tick starts the count again
+  lose(2);  // one or two lost replies in a row: ignored
+  assert(Serial.output.find("D,3,") == std::string::npos && lastState() != 2);
+  lose(3);
+  assert(Serial.output.find("D,3,1,") != std::string::npos && lastState() == 2);
+}
+
 int main() {
   protocol();
   imuFeedback();
@@ -487,5 +521,6 @@ int main() {
   hostClosed();
   looseTolerance();
   dynamicIGain();
-  std::cout << "Firmware protocol, IMU feedback, watchdog, fault, relax/hold, channel, diagnostic, time-based profile, closed-port, loose-tolerance and dynamic I gain tests passed\n";
+  lostReplies();
+  std::cout << "Firmware protocol, IMU feedback, watchdog, fault, relax/hold, channel, diagnostic, time-based profile, closed-port, loose-tolerance dynamic I gain and lost-reply tests passed\n";
 }

@@ -28,17 +28,18 @@ find_package(yaml-cpp REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/Detection.msg" "msg/DetectionArray.msg"
-  "msg/KnobObservation.msg" "msg/KnobObservationArray.msg"
   "msg/PuckObservation.msg" "msg/PuckObservationArray.msg"
+  "msg/TrafficLight.msg" "msg/PuckSurvey.msg"
   DEPENDENCIES std_msgs geometry_msgs)
 rosidl_get_typesupport_target(perception_typesupport ${PROJECT_NAME} rosidl_typesupport_cpp)
 
 add_library(perception_modules
   src/tag_registry.cpp
-  src/yolo_detector.cpp src/apriltag_reader.cpp src/knob_depth.cpp src/knob_lever.cpp
-  src/object_detector.cpp src/obstacle_detector.cpp src/puck_axis.cpp
-  src/d435_perception.cpp src/c310_perception.cpp src/shared_frame.cpp
-  src/state_estimator.cpp src/imu_processor.cpp src/localization_monitor.cpp src/scan_relocalizer.cpp src/scan_odometry.cpp src/lidar_obstacle_detector.cpp src/lidar_obstacle_filter.cpp src/lidar_perception.cpp)
+  src/yolo_detector.cpp src/apriltag_reader.cpp
+  src/object_detector.cpp src/obstacle_detector.cpp src/puck_axis.cpp src/puck_tag_axis.cpp
+  src/d435_perception.cpp src/shared_frame.cpp
+  src/state_estimator.cpp src/imu_processor.cpp src/localization_monitor.cpp src/scan_relocalizer.cpp src/scan_odometry.cpp src/lidar_obstacle_detector.cpp src/lidar_obstacle_filter.cpp src/lidar_perception.cpp
+  src/traffic_light.cpp src/barcode_reader.cpp)
 target_compile_features(perception_modules PUBLIC cxx_std_17)
 target_include_directories(perception_modules PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -46,6 +47,17 @@ target_include_directories(perception_modules PUBLIC
   ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(perception_modules PUBLIC lidar_processor::scan_merger ncnn yaml-cpp ${OpenCV_LIBS}
   ${sensor_msgs_TARGETS} ${nav_msgs_TARGETS} ${geometry_msgs_TARGETS})
+
+# Code 128 mission barcode: zxing-cpp (sudo apt install libzxing-dev). Without it the package still
+# builds and decode_code128() finds nothing (barcode_decoder_available() = false).
+find_package(ZXing QUIET)
+if(ZXing_FOUND)
+  message(STATUS "craft_perception: zxing-cpp barcode decoder enabled")
+  target_compile_definitions(perception_modules PRIVATE CRAFT_WITH_ZXING)
+  target_link_libraries(perception_modules PRIVATE ZXing::ZXing)
+else()
+  message(WARNING "craft_perception: zxing-cpp not found (libzxing-dev): barcode decoding disabled")
+endif()
 
 # TensorRT YOLO backend for the Jetson. auto: build it when TensorRT + CUDA are found.
 set(CRAFT_TENSORRT auto CACHE STRING "TensorRT YOLO backend: auto | on | off")
@@ -70,7 +82,7 @@ if(NOT CRAFT_TENSORRT STREQUAL "off")
 endif()
 
 add_executable(perception_master src/perception_master.cpp)
-target_link_libraries(perception_master PRIVATE perception_modules
+target_link_libraries(perception_master PRIVATE perception_modules opencv_imgcodecs
   rclcpp::rclcpp tf2_ros::tf2_ros ament_index_cpp::ament_index_cpp ${perception_typesupport}
   ${std_msgs_TARGETS} ${diagnostic_msgs_TARGETS} ${craft_interfaces_TARGETS})
 
@@ -78,7 +90,13 @@ target_link_libraries(perception_master PRIVATE perception_modules
 add_executable(puck_axis_offline tools/puck_axis_offline.cpp)
 target_link_libraries(puck_axis_offline PRIVATE perception_modules opencv_imgcodecs)
 
-install(TARGETS perception_master perception_modules puck_axis_offline
+# Offline mission-barcode check on recorded frames.
+add_executable(traffic_light_offline tools/traffic_light_offline.cpp)
+target_link_libraries(traffic_light_offline PRIVATE perception_modules opencv_imgcodecs)
+add_executable(barcode_offline tools/barcode_offline.cpp)
+target_link_libraries(barcode_offline PRIVATE perception_modules opencv_imgcodecs)
+
+install(TARGETS perception_master perception_modules puck_axis_offline barcode_offline traffic_light_offline
   EXPORT perception_modules_export
   ARCHIVE DESTINATION lib LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME})
@@ -92,10 +110,17 @@ if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   ament_add_gtest(test_perception_modules test/test_modules.cpp)
   target_link_libraries(test_perception_modules perception_modules)
+  if(ZXing_FOUND)  # the barcode test renders a Code 128 symbol with the zxing writer
+    target_compile_definitions(test_perception_modules PRIVATE CRAFT_WITH_ZXING)
+    target_link_libraries(test_perception_modules ZXing::ZXing)
+  endif()
   add_executable(ncnn_smoke test/ncnn_smoke.cpp)
   target_link_libraries(ncnn_smoke perception_modules)
 endif()
 
 ament_export_targets(perception_modules_export HAS_LIBRARY_TARGET)
+if(ZXing_FOUND)  # static perception_modules carries ZXing::ZXing as a link dependency
+  ament_export_dependencies(ZXing)
+endif()
 ament_export_dependencies(lidar_processor tf2_ros ncnn yaml-cpp OpenCV sensor_msgs nav_msgs geometry_msgs rosidl_default_runtime)
 ament_package()

@@ -4,7 +4,7 @@
 # Outputs are remapped in craft.launch.py: /perception/lidar/{pose,map,map_metadata}.
 slam_toolbox:
   ros__parameters:
-    scan_topic: /lidar/merged
+    scan_topic: /lidar/localization  # /lidar/merged without the beams on the arena boxes (perception localization_scan)
     odom_frame: odom
     map_frame: map
     base_frame: base_link

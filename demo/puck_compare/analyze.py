@@ -1,15 +1,15 @@
 #!/usr/bin/python3
-"""compare.py results -> one table per session, PuckAxis vs CenterPose.
+"""compare.py results -> one table per session: tag vs depth vs centerpose (results/<method>.csv).
 
 The puck is still during a session, so without ground truth:
   hit      frames with a valid axis / frames
   jit50/95 axis scatter around the session mean [deg] (stability)
   c_std    center scatter [mm], norm of per-axis std
-  tilt     angle from the axis to the shelf normal (PuckAxis's median per session) [deg]:
+  tilt     angle from the axis to the shelf normal (the depth method's median per session) [deg]:
            standing should be ~0, lying ~90 -> shown as error |tilt - expected|
-  stand    PuckAxis standing flag agrees with meta label (ours only)
-  ms50/95  per-frame latency (ours: tag/yolo box + axis; centerpose: whole inference)
-cross: same-frame angle between the two axes and center distance.
+  stand    standing flag agrees with meta label (tag/depth)
+  ms50/95  per-frame latency (tag/depth: box + axis; centerpose: YOLO + whole inference)
+cross: same-frame angle between two methods' axes and center distance, for every pair.
 Axes are compared unsigned (a cylinder axis is 180 deg symmetric).
 
 Usage: /usr/bin/python3 analyze.py ~/bags/puck_compare/*_*  [--csv summary.csv]
@@ -80,28 +80,37 @@ def main():
     for session in args.sessions:
         session = session.expanduser()
         meta = json.loads((session / 'meta.json').read_text())
-        ours, n_ours = load(session / 'results' / 'ours.csv')
-        cp, n_cp = load(session / 'results' / 'centerpose.csv')
-        normal = mean_axis(np.array([vec(r, 'n') for r in ours.values()])) if ours else None
+        results = {}
+        for name in ('tag', 'depth', 'centerpose'):
+            path = session / 'results' / f'{name}.csv'
+            if name == 'depth' and not path.exists():
+                path = session / 'results' / 'ours.csv'  # older compare.py runs
+            results[name] = load(path)
+        depth = results['depth'][0]
+        normal = mean_axis(np.array([vec(r, 'n') for r in depth.values()])) if depth else None
         print(f"\n== {session.name}  label={meta['label']} yaw={meta.get('yaw_deg')}  {meta.get('note', '')}")
         print(f"{'method':<11}" + ''.join(f'{k:>8}' for k in keys))
-        for name, rows, n in (('puck_axis', ours, n_ours), ('centerpose', cp, n_cp)):
+        for name, (rows, n) in results.items():
             if rows is None:
                 print(f'{name:<11}  (no results)')
                 continue
             s = stats(rows, n, normal, meta['label'])
             print(f'{name:<11}' + ''.join(f"{s.get(k, float('nan')):>8.2f}" for k in keys))
             out.append(dict(session=session.name, label=meta['label'], method=name, frames=n, **s))
-        if ours and cp:
-            common = sorted(set(ours) & set(cp))
-            if common:
-                a = np.array([vec(ours[f], 'a') for f in common])
-                b = np.array([vec(cp[f], 'a') for f in common])
-                d = np.linalg.norm(np.array([vec(ours[f], 'c') - vec(cp[f], 'c') for f in common]), axis=1) * 1e3
+        names = list(results)
+        for i, x in enumerate(names):
+            for y in names[i + 1:]:
+                ra, rb = results[x][0], results[y][0]
+                common = sorted(set(ra or {}) & set(rb or {}))
+                if not common:
+                    continue
+                a = np.array([vec(ra[f], 'a') for f in common])
+                b = np.array([vec(rb[f], 'a') for f in common])
+                d = np.linalg.norm(np.array([vec(ra[f], 'c') - vec(rb[f], 'c') for f in common]), axis=1) * 1e3
                 ang = unsigned_deg(a, b)
-                print(f'cross ({len(common)} frames): axis diff p50 {pct(ang, 50):.1f} p95 {pct(ang, 95):.1f} deg,'
+                print(f'{x}-{y} ({len(common)} frames): axis diff p50 {pct(ang, 50):.1f} p95 {pct(ang, 95):.1f} deg,'
                       f' center diff p50 {pct(d, 50):.1f} p95 {pct(d, 95):.1f} mm')
-                out.append(dict(session=session.name, label=meta['label'], method='cross', frames=len(common),
+                out.append(dict(session=session.name, label=meta['label'], method=f'{x}-{y}', frames=len(common),
                                 axis_diff50=pct(ang, 50), axis_diff95=pct(ang, 95),
                                 center_diff50=pct(d, 50), center_diff95=pct(d, 95)))
     if args.csv:

@@ -1,48 +1,61 @@
 """CenterPose -> the same per-frame puck rows puck_axis_offline writes (camera optical frame, metres).
 
-Fill CenterPoseAdapter.__init__/_infer once the repo is cloned; compare.py only calls predict().
-CenterPose (NVlabs) returns, per object, 2D/3D projected cuboid keypoints in Objectron order
-(0 = centroid, 1..8 = corners) plus relative scale; with a known puck size it gives a metric pose.
-The cylinder axis is the cuboid's object y axis (Objectron: y up, for bottle/cup categories) - check that
-against the repo's category convention before trusting the numbers.
+Uses the perception-v2 package's trained puck CenterPose (DLA34, crop around a box, 9-point cuboid -> PnP
+with the known 30x30x60 size), i.e. its scripts/centerpose_pucks.py load_model / infer, unchanged.
+The crop needs a puck box: the YOLO puck model gives it (ultralytics .pt).
+
+Needs torch + ultralytics: run compare.py with ~/yolov8-ubuntu24-practice/.venv-yolo/bin/python.
+Package results (synthetic test, 2026-11-08 summary): lying-puck axis 2.3 deg median, centre 22.9 mm
+(depth method 1.7 deg / 1.7 mm) -> the comparison on real sessions is a TODO (docs/todo/puck_perception.md).
 """
+import sys
 import time
+from pathlib import Path
 
 import numpy as np
 
-# Objectron corner signs (x, y, z) for keypoints 1..8.
-CORNERS = np.array([[-1, -1, -1], [-1, -1, 1], [-1, 1, -1], [-1, 1, 1],
-                    [1, -1, -1], [1, -1, 1], [1, 1, -1], [1, 1, 1]])
-
-
-def axis_from_cuboid(points_3d):
-    """(9, 3) centroid + 8 corners in camera frame -> (center, unit y axis)."""
-    p = np.asarray(points_3d, float)
-    corners = p[1:9]
-    top, bottom = corners[CORNERS[:, 1] > 0].mean(0), corners[CORNERS[:, 1] < 0].mean(0)
-    axis = top - bottom
-    return p[0], axis / np.linalg.norm(axis)
+PACKAGE = Path('~/Downloads/perception-v2-puck-box-signal-barcode-20261108.tar/'
+               'perception-v2-puck-box-signal-barcode-20261108').expanduser()
+WEIGHTS = PACKAGE / 'models/centerpose-pucks-v7tag/best.pt'
+YOLO_WEIGHTS = Path('~/dataset/export_pucks_v8n_v2/pucks_v8n_v2_ep24.pt').expanduser()
 
 
 class CenterPoseAdapter:
-    def __init__(self, repo=None, weights=None, category='bottle', puck_size=(0.03, 0.06, 0.03)):
-        self.repo, self.weights, self.category = repo, weights, category
-        self.puck_size = puck_size  # x, y (axis), z [m]; plan.yaml puck_size, axis along y
-        self.model = None  # TODO(centerpose): build the detector from repo + weights
+    def __init__(self, repo=None, weights=None, yolo=None, min_box_score=0.4, device=None):
+        repo = Path(repo or PACKAGE).expanduser()
+        for p in (repo, repo / 'scripts'):
+            if str(p) not in sys.path:
+                sys.path.insert(0, str(p))
+        import torch
+        import centerpose_pucks as cp  # the package module: its load_model / infer
+        from ultralytics import YOLO
+        self.cp = cp
+        self.device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
+        self.model = cp.load_model(str(Path(weights or WEIGHTS).expanduser()), self.device)
+        self.yolo = YOLO(str(Path(yolo or YOLO_WEIGHTS).expanduser()))
+        self.min_box_score = min_box_score
 
     def _infer(self, bgr, K):
-        """-> list of dict(points_3d=(9,3) camera frame [m], score=float). TODO(centerpose)."""
-        raise NotImplementedError('CenterPose not wired yet: fill CenterPoseAdapter._infer')
+        """-> list of dict(id, score, center (3,), axis (3,)) for valid CenterPose results."""
+        boxes = self.yolo.predict(bgr, imgsz=640, conf=self.min_box_score, verbose=False)[0].boxes
+        out = []
+        for (x1, y1, x2, y2), c, s in zip(boxes.xyxy.tolist(), boxes.cls.int().tolist(), boxes.conf.tolist()):
+            r = self.cp.infer(self.model, bgr, (x1, y1, x2, y2), np.asarray(K, np.float64), device=self.device)
+            if r.get('valid'):
+                out.append(dict(id=int(c), score=float(s) * float(r['confidence']),
+                                center=np.array(r['center_camera_m']), axis=np.array(r['axis_camera'])))
+        return out
 
     def predict(self, bgr, K):
         t = time.perf_counter()
         objects = self._infer(bgr, K)
         ms = (time.perf_counter() - t) * 1e3
         rows = []
-        for i, o in enumerate(objects):
-            center, axis = axis_from_cuboid(o['points_3d'])
+        for o in objects:
+            axis = o['axis'] / np.linalg.norm(o['axis'])
             if axis[0] < 0:
                 axis = -axis  # 180 deg symmetric, same sign rule as PuckAxis lying
-            rows.append(dict(id=i, score=o['score'], axis_valid=1, cx=center[0], cy=center[1], cz=center[2],
+            c = o['center']
+            rows.append(dict(id=o['id'], score=o['score'], axis_valid=1, cx=c[0], cy=c[1], cz=c[2],
                              ax=axis[0], ay=axis[1], az=axis[2], detect_ms=ms))
         return rows, ms

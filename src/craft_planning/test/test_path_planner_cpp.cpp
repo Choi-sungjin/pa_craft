@@ -446,6 +446,45 @@ TEST_F(GlobalLocalPlanner, GlobalOnceLocalWindowCutFromIt)
   EXPECT_NEAR(craft_planning::path_progress(plan.global, plan.path.poses.back().pose.position), config.local_ahead, 0.3);
 }
 
+// Via points (run_tour.py, 2026-11-12): the goal is 0.5 m from the start, the route still goes under the wall to the
+// via point in the other half and comes back, as one path without a stop.
+TEST_F(GlobalLocalPlanner, RouteGoesThroughTheViaPointsInOrder)
+{
+  EXPECT_LT(length(planner.plan(odom(1.0, 2.0), pose(1.5, 2.0)).global), 0.6);
+  geometry_msgs::msg::Point far;
+  far.x = 5.0; far.y = 2.0;
+  const std::vector<geometry_msgs::msg::Point> via{far};
+  const auto plan = planner.plan(odom(1.0, 2.0), pose(1.5, 2.0), {}, false, nullptr, &via);
+  ASSERT_TRUE(plan.ok) << plan.error;
+  EXPECT_TRUE(plan.stops.empty());
+  EXPECT_TRUE(planner.collision_free(plan.global));
+  EXPECT_GT(length(plan.global), 7.0);
+  EXPECT_LT(distance_to(plan.global, 5.0, 2.0), 1.0);  // the smoothing rounds the turn at the via point
+  EXPECT_NEAR(plan.global.poses.back().pose.position.x, 1.5, 1e-9);
+  far.x = 3.0; far.y = 2.0;  // in the wall
+  const std::vector<geometry_msgs::msg::Point> blocked{far};
+  EXPECT_FALSE(planner.plan(odom(1.0, 2.0), pose(1.5, 2.0), {}, false, nullptr, &blocked).ok);
+}
+
+// A start a little inside r_robot (stopped at the padding edge, grid rounding) escapes; deeper in still fails
+// (user 2026-11-13, sim 04_goal_blocked_replan looped on "Start is in an obstacle").
+TEST_F(GlobalLocalPlanner, StartJustInsideThePaddingEscapes)
+{
+  config.margin = 0.0; config.r_robot = 0.10;  // as planning.yaml: margin 0, 1 cell = 0.1 m here
+  planner.configure(config);
+  geometry_msgs::msg::PoseArray obstacles;
+  obstacles.header.frame_id = "map";
+  obstacles.poses.push_back(pose(1.15, 1.15).pose);  // diagonal cell: start clearance 0.091 (r_robot - 0.009)
+  const auto plan = planner.plan(odom(1.05, 1.05), pose(1.05, 2.05), obstacles);
+  ASSERT_TRUE(plan.ok) << plan.error;
+  EXPECT_NEAR(plan.path.poses.front().pose.position.x, 1.05, 1e-9);
+  EXPECT_NEAR(plan.path.poses.front().pose.position.y, 1.05, 1e-9);
+  obstacles.poses.back() = pose(1.15, 1.05).pose;  // next cell: clearance 0.05, 5 cm inside: still refused
+  const auto deep = planner.plan(odom(1.05, 1.05), pose(1.05, 2.05), obstacles);
+  EXPECT_FALSE(deep.ok);
+  EXPECT_NE(deep.error.find("Start is in an obstacle"), std::string::npos) << deep.error;
+}
+
 TEST_F(GlobalLocalPlanner, RenewedWindowKeepsThePathUnderTheRobotAndReachesTheGoal)
 {
   const auto first = planner.plan(odom(0.35, 2.65), pose(5.65, 2.65));
@@ -672,3 +711,33 @@ TEST_F(BoxApproach, WallsStillRuleFacesOut)
 }
 
 }  // namespace
+
+TEST(PathProgress, RepeatVisitsUseTheRequestedArcInterval)
+{
+  nav_msgs::msg::Path route;
+  for (const auto xy : std::vector<std::pair<double,double>>{{0,0},{1,0},{1,1},{0,1},{0,0},{1,0}}) {
+    geometry_msgs::msg::PoseStamped pose; pose.pose.position.x=xy.first; pose.pose.position.y=xy.second;
+    route.poses.push_back(pose);
+  }
+  geometry_msgs::msg::Point p; p.x=.5;
+  EXPECT_NEAR(craft_planning::path_progress(route,p),.5,1e-9);
+  EXPECT_NEAR(craft_planning::path_progress(route,p,4.0,5.0),4.5,1e-9);
+  p.x=0;
+  EXPECT_NEAR(craft_planning::path_progress(route,p,3.8,4.2),4.0,1e-9);
+  EXPECT_NEAR(craft_planning::path_length(route),5.0,1e-9);
+  EXPECT_THROW(craft_planning::path_progress(route,p,2.,1.),std::invalid_argument);
+}
+
+TEST_F(GlobalLocalPlanner, ExplicitProgressReachesTheEndOfAClosedRoute)
+{
+  nav_msgs::msg::Path route; route.header.frame_id="map";
+  for (const auto xy : std::vector<std::pair<double,double>>{{.6,.6},{1.6,.6},{1.6,1.6},{.6,1.6},{.6,.6}}) {
+    auto q=pose(xy.first,xy.second); route.poses.push_back(q);
+  }
+  const double total=craft_planning::path_length(route);
+  const auto end=planner.local_path(route,odom(.6,.65),{},nullptr,total-.05);
+  ASSERT_TRUE(end.ok)<<end.error;
+  EXPECT_LT(length(end.path),config.local_behind+.15);
+  EXPECT_NEAR(end.path.poses.back().pose.position.x,.6,1e-9);
+  EXPECT_NEAR(end.path.poses.back().pose.position.y,.6,1e-9);
+}

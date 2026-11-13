@@ -31,16 +31,13 @@ struct ObjectPoint {
   Detection detection;
   cv::Vec3d position;
 };
-struct DepthResult {
-  cv::Vec3d position;
-  bool normal_valid = false;
-  cv::Vec3d normal = {0, 0, 0};
-  double plane_rms_m = 0;
-};
 struct PuckResult {
   bool standing = false;
   cv::Vec3d center, axis, normal;  // optical frame; axis is unit, normal faces the camera
   double height_m = 0, plane_rms_m = 0, ring_inlier_ratio = 0;
   int points = 0;
+  int tags = 0;               // tag method: tags used (0 = depth/donut method)
+  double fit_error_deg = 0;   // tag method: worst disagreement between those tags
+  double box_iou = -1;        // tag method with a YOLO box: projected puck vs box (-1 = not used)
 };
 }  // namespace craft_perception

@@ -1,16 +1,20 @@
 #include "craft_perception/perception_master.hpp"
 #include "craft_perception/tag_registry.hpp"
 #include <ament_index_cpp/get_package_share_directory.hpp>
+#include <opencv2/imgcodecs.hpp>
 #include <algorithm>
 #include <utility>
 #include <filesystem>
 #include <cmath>
+#include <cstdarg>
+#include <cstring>
 #include <limits>
 
 namespace craft_perception {
 namespace {
-const char *const kTasks[] = {"d435_yolo", "apriltag", "knob_depth", "object_detector",
-  "obstacle_detector", "puck_axis", "knob_lever", "lidar_obstacle", "state_estimator"};
+const char *const kTasks[] = {"d435_yolo", "apriltag", "object_detector",
+  "obstacle_detector", "puck_axis", "traffic_light", "puck_survey", "uppercam_puck", "lidar_obstacle",
+  "state_estimator"};
 
 geometry_msgs::msg::Point point(const cv::Vec3d &v) {
   geometry_msgs::msg::Point output; 
@@ -57,35 +61,46 @@ std::unique_ptr<msg::DetectionArray> detections(const std_msgs::msg::Header &hea
   return output;
 }
 
-std::unique_ptr<msg::KnobObservationArray> knob_depth_message(const std_msgs::msg::Header &header,
-  const std::vector<KnobDepthObservation> &knobs, const std::vector<std::string> &labels) {
-  auto output = std::make_unique<msg::KnobObservationArray>();
-  output->header = header;
-  for (const auto &knob : knobs) {
-    msg::KnobObservation observation;
-    observation.detection = message(knob.detection, labels);
-    if (knob.depth) {
-      observation.depth_valid = true;
-      observation.position = point(knob.depth->position);
-      observation.normal_valid = knob.depth->normal_valid;
-      observation.panel_normal = vector(knob.depth->normal);
-      observation.plane_rms_m = knob.depth->plane_rms_m;
-    }
-    output->observations.push_back(observation);
-  }
-  return output;
+// The survey records pucks by AprilTag id: only boxes with one usable id, one box per id (best kept, as
+// associate_pucks does without every_box).
+std::vector<TaggedPuck> identified(const std::vector<TaggedPuck> &pucks) {
+  std::vector<TaggedPuck> out;
+  for (const auto &p : pucks) if (p.id >= 0) out.push_back(p);
+  std::sort(out.begin(), out.end(), [](const TaggedPuck &a, const TaggedPuck &b) {
+    if (a.id != b.id) return a.id < b.id;
+    if (a.shape_from_tags != b.shape_from_tags) return a.shape_from_tags;
+    return a.score > b.score;
+  });
+  out.erase(std::unique(out.begin(), out.end(), [](const TaggedPuck &a, const TaggedPuck &b) { return a.id == b.id; }),
+    out.end());
+  return out;
 }
 
-std::unique_ptr<msg::KnobObservationArray> knob_lever_message(const std_msgs::msg::Header &header,
-  const std::vector<LeverObservation> &levers, const std::vector<std::string> &labels) {
-  auto output = std::make_unique<msg::KnobObservationArray>();
+std::unique_ptr<msg::PuckObservationArray> survey_message(const std_msgs::msg::Header &header,
+  const std::vector<TaggedPuck> &pucks) {
+  auto output = std::make_unique<msg::PuckObservationArray>();
   output->header = header;
-  for (const auto &lever : levers) {
-    msg::KnobObservation observation;
-    observation.detection = message(lever.detection, labels);
-    observation.lever_valid = lever.angle.has_value();
-    observation.lever_angle = lever.angle.value_or(0);
-    output->observations.push_back(observation);
+  for (const auto &p : pucks) {
+    msg::PuckObservation o;
+    o.detection.class_id = p.id;
+    o.detection.label = std::string(p.color == PuckColor::kRed ? "red_" : "green_") +
+      (p.shape == PuckShape::kCylinder ? "cylinder" : "prism") + (p.shape_from_tags ? "_tags" : "");
+    o.detection.confidence = p.score;
+    o.detection.bbox = {p.box.x, p.box.y, p.box.width, p.box.height};
+    o.puck_id = p.id;
+    o.tag_valid = true;
+    o.tags = p.tags;
+    if (p.axis) {
+      o.axis_valid = true;
+      o.center = point(p.axis->center);
+      o.axis = vector(p.axis->axis);
+      o.shelf_normal = vector(p.axis->normal);
+      o.standing = p.axis->standing;
+      o.height_m = p.axis->height_m;
+      o.tags = p.axis->tags;
+      o.tag_fit_error_deg = p.axis->fit_error_deg;
+    }
+    output->observations.push_back(o);
   }
   return output;
 }
@@ -112,6 +127,8 @@ std::unique_ptr<msg::PuckObservationArray> puck_message(const std_msgs::msg::Hea
       observation.height_m = puck.axis->height_m;
       observation.plane_rms_m = puck.axis->plane_rms_m;
       observation.points = puck.axis->points;
+      observation.tags = puck.axis->tags;
+      observation.tag_fit_error_deg = puck.axis->fit_error_deg;
     }
     output->observations.push_back(observation);
   }
@@ -124,8 +141,8 @@ PerceptionMaster::PerceptionMaster() : Node("perception_master") {
   connect();
   RCLCPP_INFO(get_logger(), "StateEstimator: %s -> /perception/state/odom in %s (fusion: robot_localization)",
     odometry_topic_.c_str(), map_frame_.c_str());
-  RCLCPP_INFO(get_logger(), "PerceptionMaster ready; D435 classes=%zu, C310 classes=%zu, "
-    "executor_threads=%d", d435_labels_.size(), c310_labels_.size(), executor_threads_);
+  RCLCPP_INFO(get_logger(), "PerceptionMaster ready; D435 classes=%zu, "
+    "executor_threads=%d", d435_labels_.size(), executor_threads_);
 }
 
 template <typename T> T PerceptionMaster::param(const std::string &name) {
@@ -152,6 +169,12 @@ DetectorConfig PerceptionMaster::yolo_param(const std::string &prefix, std::vect
   config.backend = param<std::string>(prefix + ".backend");
   if (config.backend != "ncnn" && config.backend != "tensorrt") {
     throw std::invalid_argument(prefix + ".backend must be ncnn or tensorrt");
+  }
+  // perception.yaml says tensorrt for the Jetson GPU (2026-11-12, every camera model); a build without TensorRT
+  // (laptop, CI) runs the same model on ncnn instead of refusing to start.
+  if (config.backend == "tensorrt" && !tensorrt_available()) {
+    RCLCPP_WARN(get_logger(), "%s.backend tensorrt: built without TensorRT, using ncnn", prefix.c_str());
+    config.backend = "ncnn";
   }
   config.model_dir = share_path(param<std::string>(prefix + ".model_dir"));
   config.engine_path = share_path(param<std::string>(prefix + ".engine"));
@@ -189,30 +212,24 @@ void PerceptionMaster::configure() {
     }
     schedules_.emplace(name, ModuleSchedule{on, hz});
   }
-  for (const char *name : {"knob_depth", "object_detector", "obstacle_detector"}) {
+  for (const char *name : {"object_detector", "obstacle_detector"}) {
     if (enabled(name) && !enabled("d435_yolo")) {
       RCLCPP_WARN(get_logger(), "%s is enabled but d435_yolo is disabled; it will never get boxes", name);
     }
   }
   cameras_[kD435].frame_id = param<std::string>("d435.frame");
   cameras_[kD435].shm = param<std::string>("d435.shm");
-  cameras_[kC310].frame_id = param<std::string>("c310.frame");
-  cameras_[kC310].shm = param<std::string>("c310.shm");
 
   D435Config d435;
   d435.use_yolo = enabled("d435_yolo");
   d435.use_apriltag = enabled("apriltag");
   d435.use_puck = enabled("puck_axis");
   d435.yolo = yolo_param("d435.yolo", d435_labels_);
-  d435.knob_class_id = param<int64_t>("d435.yolo.knob_class_id");
   d435.apriltag_family = param<std::string>("d435.apriltag_family");
   const auto registry_file = param<std::string>("tag_registry_file");
   d435.tag_registry = load_tag_registry(std::filesystem::path(registry_file).is_absolute() ?
     registry_file : ament_index_cpp::get_package_share_directory("craft_perception") + "/" + registry_file);
   d435.puck_tag_box_scale = positive_param("d435.puck_axis.tag_box_scale");
-  d435.knob_grow = param<double>("d435.knob_depth.grow");
-  d435.knob_tolerance_m = param<double>("d435.knob_depth.tolerance_m");
-  d435.knob_min_points = param<int64_t>("d435.knob_depth.min_points");
   d435.object_inner_fraction = param<double>("d435.object_detector.inner_fraction");
   for (const auto id : param<std::vector<int64_t>>("d435.obstacle_detector.class_ids")) {
     d435.obstacle_class_ids.push_back(id);
@@ -228,26 +245,162 @@ void PerceptionMaster::configure() {
   d435.puck.max_depth_m = param<double>("d435.puck_axis.max_depth_m");
   d435.puck.min_points = param<int64_t>("d435.puck_axis.min_points");
   d435.puck.ransac_iterations = param<int64_t>("d435.puck_axis.ransac_iterations");
-
-  C310Config c310;
-  c310.use_knob_lever = enabled("knob_lever");
-  c310.yolo = yolo_param("c310.yolo", c310_labels_);
-  c310.knob_class_id = param<int64_t>("c310.yolo.knob_class_id");
-  c310.lever_source = param<std::string>("c310.knob_lever.lever_source");
-  c310.lever_class_id = param<int64_t>("c310.knob_lever.lever_class_id");
-  if (c310.lever_source == "yolo_seg" && c310.yolo.proto_blob.empty()) {
-    throw std::invalid_argument("c310.knob_lever.lever_source yolo_seg needs a seg model: give "
-      "c310.yolo blobs as [input, output, protos]");
+  d435.puck_method = param<std::string>("d435.puck_axis.method");
+  {
+    auto &t = d435.puck_tag;
+    const std::string tag = "d435.puck_axis.tag.";
+    t.tag_size_m = param<double>(tag + "tag_size_m");
+    t.length_m = param<double>(tag + "length_m");
+    t.width_m = param<double>(tag + "width_m");
+    const auto up = param<std::vector<double>>(tag + "up_optical");
+    if (up.size() != 3) throw std::invalid_argument(tag + "up_optical needs 3 values");
+    t.up = {up[0], up[1], up[2]};
+    t.standing_max_tilt_deg = param<double>(tag + "standing_max_tilt_deg");
+    t.max_fit_error_deg = param<double>(tag + "max_fit_error_deg");
+    t.max_center_spread_m = param<double>(tag + "max_center_spread_m");
+    t.center_spread_per_m = param<double>(tag + "center_spread_per_m");
+    t.center_weight_deg_per_mm = param<double>(tag + "center_weight_deg_per_mm");
+    t.box_iou_weight_deg = param<double>(tag + "box_iou_weight_deg");
+    t.min_box_iou = param<double>(tag + "min_box_iou");
+    t.box_border_px = param<double>(tag + "box_border_px");
+    t.ambiguity_margin_deg = param<double>(tag + "ambiguity_margin_deg");
+    t.max_reprojection_px = param<double>(tag + "max_reprojection_px");
+    t.max_tags = param<int64_t>(tag + "max_tags");
+    t.shelf_prior_weight = param<double>(tag + "shelf_prior_weight");
   }
 
+  // <prefix>.{red,green}_{cylinder,prism}_class_id, each an index of that survey's yolo.class_names.
+  const auto puck_class_map = [this](const std::string &prefix, const std::vector<std::string> &labels) {
+    const auto class_id = [&](const char *name) {
+      const int id = param<int64_t>(prefix + "." + name);
+      if (id < 0 || id >= static_cast<int>(labels.size())) {
+        throw std::invalid_argument(prefix + "." + name + " must index its yolo.class_names");
+      }
+      return id;
+    };
+    return PuckClassMap{class_id("red_cylinder_class_id"), class_id("red_prism_class_id"),
+                        class_id("green_cylinder_class_id"), class_id("green_prism_class_id")};
+  };
+  // <prefix>.tag_roi_grow / tag_roi_upscale / shape_rule.*: where tags are searched and how they set the shape.
+  const auto tag_search = [this](const std::string &prefix) {
+    PuckTagSearch s;
+    s.grow = param<double>(prefix + ".tag_roi_grow");
+    s.upscale = static_cast<int>(param<int64_t>(prefix + ".tag_roi_upscale"));
+    s.rule.enabled = param<bool>(prefix + ".shape_rule.enabled");
+    s.rule.red_only = param<bool>(prefix + ".shape_rule.red_only");
+    s.rule.face_on_side_ratio = param<double>(prefix + ".shape_rule.face_on_side_ratio");
+    s.rule.face_on_skew_deg = param<double>(prefix + ".shape_rule.face_on_skew_deg");
+    s.rule.face_on_max_angle_deg = param<double>(prefix + ".shape_rule.face_on_max_angle_deg");
+    s.rule.side_face_aspect = param<double>(prefix + ".shape_rule.side_face_aspect");
+    if (!(s.grow >= 1.0 && s.grow <= 4.0) || s.upscale < 1 || s.upscale > 4 ||
+        !(s.rule.face_on_side_ratio > 0 && s.rule.face_on_side_ratio <= 1) || !(s.rule.face_on_skew_deg >= 0) ||
+        !(s.rule.face_on_max_angle_deg >= 0 && s.rule.face_on_max_angle_deg < 90) || !(s.rule.side_face_aspect >= 1)) {
+      throw std::invalid_argument(prefix + ": tag_roi_grow 1..4, tag_roi_upscale 1..4, shape_rule values out of range");
+    }
+    return s;
+  };
+  // Puck survey on the D435: its own YOLO (puck model), loaded only when the task is enabled.
+  if (enabled("puck_survey")) {
+    const auto yolo = yolo_param("d435.puck_survey.yolo", puck_labels_);
+    puck_classes_ = puck_class_map("d435.puck_survey", puck_labels_);
+    puck_min_score_ = param<double>("d435.puck_survey.min_score");
+    puck_tag_search_ = tag_search("d435.puck_survey");
+    if (!puck_yolo_.configure(yolo)) {
+      throw std::invalid_argument("cannot load the " + yolo.backend + " model for d435.puck_survey.yolo (see stderr)");
+    }
+    if (!puck_tags_.configure(d435.apriltag_family)) {
+      throw std::invalid_argument("invalid d435.apriltag_family for puck_survey");
+    }
+  }
+  if (enabled("traffic_light") || enabled("uppercam_puck")) uppercam_frame_ = param<std::string>("uppercam.frame");
+  // Traffic light on the upper cam: its own YOLO, loaded only when the task is enabled.
+  if (enabled("traffic_light")) {
+    if (!barcode_decoder_available()) {
+      mission_event("ERROR", "BARCODE_DECODER_MISSING", "built without zxing-cpp (libzxing-dev): the barcode will not be read");
+    }
+    const auto yolo = yolo_param("uppercam.yolo", uppercam_labels_);
+    if (!uppercam_yolo_.configure(yolo)) {
+      throw std::invalid_argument("cannot load the " + yolo.backend + " model for uppercam.yolo (see stderr)");
+    }
+    TrafficLightConfig light;
+    light.red_class_id = param<int64_t>("uppercam.traffic_light.red_class_id");
+    light.yellow_class_id = param<int64_t>("uppercam.traffic_light.yellow_class_id");
+    light.green_class_id = param<int64_t>("uppercam.traffic_light.green_class_id");
+    light.min_score = param<double>("uppercam.traffic_light.min_score");
+    light.yellow_min_score = param<double>("uppercam.traffic_light.yellow_min_score");
+    light.min_on_s = param<double>("uppercam.traffic_light.min_on_s");
+    light.max_on_s = param<double>("uppercam.traffic_light.max_on_s");
+    light.max_gap_s = param<double>("uppercam.traffic_light.max_gap_s");
+    light.min_vote_ratio = param<double>("uppercam.traffic_light.min_vote_ratio");
+    light.expected_blinks = param<int64_t>("uppercam.traffic_light.expected_blinks");
+    light.end_off_s = param<double>("uppercam.traffic_light.end_off_s");
+    // yolo: color = YOLO class; pixels: YOLO finds the tower, color measured in its pixels (both kept, pick one).
+    const auto source = param<std::string>("uppercam.traffic_light.color_source");
+    if (source != "yolo" && source != "pixels") {
+      throw std::invalid_argument("uppercam.traffic_light.color_source must be yolo or pixels");
+    }
+    light.color_source = source == "pixels" ? ColorSource::kPixels : ColorSource::kYolo;
+    light.off_class_id = param<int64_t>("uppercam.traffic_light.off_class_id");
+    light.locate_min_score = param<double>("uppercam.traffic_light.locate_min_score");
+    const std::string px = "uppercam.traffic_light.pixels.";
+    light.pixels.bright_v = param<int64_t>(px + "bright_v");
+    light.pixels.on_fraction = param<double>(px + "on_fraction");
+    light.pixels.ring_fraction = param<double>(px + "ring_fraction");
+    light.pixels.ring_min_saturation = param<int64_t>(px + "ring_min_saturation");
+    light.pixels.ring_min_pixels = param<int64_t>(px + "ring_min_pixels");
+    light.pixels.green_hue_min = param<double>(px + "green_hue_min");
+    light.pixels.green_hue_max = param<double>(px + "green_hue_max");
+    light.pixels.red_hue_below = param<double>(px + "red_hue_below");
+    light.pixels.red_hue_from = param<double>(px + "red_hue_from");
+    light.pixels.yellow_hue_max = param<double>(px + "yellow_hue_max");
+    light.pixels.red_cut = param<double>(px + "red_cut");
+    light.pixels.yellow_cut = param<double>(px + "yellow_cut");
+    light.pixels.upright_ratio = param<double>(px + "upright_ratio");
+    light.pixels.red_by_position = param<bool>(px + "red_by_position");
+    light.pixels.cap_fraction = param<double>(px + "cap_fraction");
+    light.pixels.use_ring_hue = param<bool>(px + "use_ring_hue");
+    mission_event("INFO", "SIGNAL_COLOR_SOURCE", "color_source=%s", source.c_str());
+    for (const int id : {light.red_class_id, light.yellow_class_id, light.green_class_id, light.off_class_id}) {
+      if (id >= static_cast<int>(uppercam_labels_.size())) {
+        throw std::invalid_argument("uppercam.traffic_light class ids must index uppercam.yolo.class_names");
+      }
+    }
+    if (!traffic_light_.configure(light)) {
+      throw std::invalid_argument("invalid uppercam.traffic_light configuration in perception.yaml");
+    }
+  }
+  // Puck survey on the upper cam after the light: both models are loaded here, so the switch at
+  // traffic_light complete needs no restart or reload.
+  if (enabled("uppercam_puck")) {
+    const auto yolo = yolo_param("uppercam.puck_survey.yolo", uppercam_puck_labels_);
+    uppercam_puck_classes_ = puck_class_map("uppercam.puck_survey", uppercam_puck_labels_);
+    uppercam_puck_min_score_ = param<double>("uppercam.puck_survey.min_score");
+    uppercam_puck_tag_search_ = tag_search("uppercam.puck_survey");
+    if (!uppercam_puck_yolo_.configure(yolo)) {
+      throw std::invalid_argument("cannot load the " + yolo.backend + " model for uppercam.puck_survey.yolo (see stderr)");
+    }
+    if (!uppercam_puck_tags_.configure(d435.apriltag_family)) {
+      throw std::invalid_argument("invalid d435.apriltag_family for uppercam_puck");
+    }
+  }
+
+  // Puck-survey axis (step 4): same PuckTagAxis settings as d435.puck_axis.tag (up_optical is the upper cam's;
+  // the gripper's up depends on the arm pose, TODO).
+  if (enabled("puck_survey") && !d435_survey_axis_.configure(d435.puck_tag)) {
+    throw std::invalid_argument("invalid d435.puck_axis.tag configuration (puck survey axis)");
+  }
+  if (enabled("uppercam_puck")) {
+    if (!uppercam_survey_axis_.configure(d435.puck_tag)) {
+      throw std::invalid_argument("invalid d435.puck_axis.tag configuration (upper-cam puck axis)");
+    }
+    const auto k = param<std::vector<double>>("uppercam.intrinsics_1920x1080");
+    if (k.size() != 4 || !(k[0] > 0 && k[1] > 0)) throw std::invalid_argument("uppercam.intrinsics_1920x1080: [fx, fy, cx, cy]");
+    std::copy(k.begin(), k.end(), uppercam_intrinsics_1080_.begin());
+  }
   cv::setNumThreads(1); // Executor handles module parallelism; avoid nested CPU pools.
   if (!d435_.configure(d435)) {
     throw std::invalid_argument("invalid d435 configuration in perception.yaml, or cannot load the "
       + d435.yolo.backend + " model for d435.yolo (see stderr)");
-  }
-  if (!c310_.configure(c310)) {
-    throw std::invalid_argument("invalid c310 configuration in perception.yaml, or cannot load the "
-      + c310.yolo.backend + " model for c310.yolo (see stderr)");
   }
   lidar_input_mode_ = param<std::string>("lidar.input_mode");
   if (lidar_input_mode_ != "raw" && lidar_input_mode_ != "merged") {
@@ -257,6 +410,9 @@ void PerceptionMaster::configure() {
   lidar_config_.bins = param<int64_t>("lidar.bins");
   lidar_config_.range_max = param<double>("lidar.range_max");
   lidar_config_.max_age = param<double>("lidar.max_age");
+  lidar_motion_compensation_ = param<bool>("lidar.motion_compensation");
+  lidar_config_.first_beam_latest = param<bool>("lidar.first_beam_latest");
+  lidar_config_.pose_time_offset = param<double>("lidar.pose_time_offset");
   lidar_config_.front_fov_deg = param<double>("lidar.front_fov_deg");
   lidar_config_.rear_fov_deg = param<double>("lidar.rear_fov_deg");
   lidar_config_.fov_near_m = param<double>("lidar.fov_near_m");
@@ -275,6 +431,10 @@ void PerceptionMaster::configure() {
     throw std::invalid_argument("invalid lidar / lidar_obstacle configuration");
   }
   obstacle_filter_enabled_ = param<bool>("lidar_obstacle.filter.enabled");
+  brake_decel_ = positive_param("lidar_obstacle.brake_decel");
+  brake_window_s_ = positive_param("lidar_obstacle.brake_window_s");
+  brake_before_s_ = positive_param("lidar_obstacle.brake_before_s");
+  brake_after_s_ = positive_param("lidar_obstacle.brake_after_s");
   LidarObstacleFilterConfig filter;
   filter.wall_margin_m = param<double>("lidar_obstacle.filter.wall_margin_m");
   filter.cell_m = param<double>("lidar_obstacle.filter.cell_m");
@@ -286,6 +446,12 @@ void PerceptionMaster::configure() {
   if (!obstacle_filter_.configure(filter)) throw std::invalid_argument("invalid lidar_obstacle.filter configuration");
   odometry_topic_ = param<std::string>("odometry_source_topic");
   map_frame_ = param<std::string>("map_frame");
+  map_correction_speed_ = param<double>("map_correction.speed");
+  map_correction_yaw_rate_ = param<double>("map_correction.yaw_rate_deg") * M_PI / 180.0;
+  map_correction_snap_m_ = param<double>("map_correction.snap_m");
+  map_correction_snap_rad_ = param<double>("map_correction.snap_deg") * M_PI / 180.0;
+  map_correction_still_v_ = param<double>("map_correction.still_speed");
+  map_correction_still_w_ = param<double>("map_correction.still_yaw_rate_deg") * M_PI / 180.0;
 
   imu_enabled_ = param<bool>("imu.enabled");
   imu_frame_ = param<std::string>("imu.output_frame");
@@ -345,26 +511,58 @@ void PerceptionMaster::configure() {
 }
 
 void PerceptionMaster::connect() {
-  for (int camera = 0; camera < 2; ++camera) {
+  for (int camera = 0; camera < kCameraCount; ++camera) {
     cameras_[camera].reader = std::make_unique<SharedFrameReader>(cameras_[camera].shm, camera == kD435);
   }
   apriltag_pub_ = create_publisher<std_msgs::msg::Int32MultiArray>("/perception/vision/d435/apriltag", 10);
-  detection_pubs_[kD435] = create_publisher<msg::DetectionArray>("/perception/vision/d435/detections", 10);
-  detection_pubs_[kC310] = create_publisher<msg::DetectionArray>("/perception/vision/c310/detections", 10);
-  knob_pubs_[kD435] = create_publisher<msg::KnobObservationArray>("/perception/vision/d435/knob_observations", 10);
-  knob_pubs_[kC310] = create_publisher<msg::KnobObservationArray>("/perception/vision/c310/knob_observations", 10);
+  detection_pub_ = create_publisher<msg::DetectionArray>("/perception/vision/d435/detections", 10);
   puck_pub_ = create_publisher<msg::PuckObservationArray>("/perception/vision/d435/puck_observations", 10);
+  // Latched: the mission may subscribe after the light has finished blinking.
+  traffic_light_pub_ = create_publisher<msg::TrafficLight>("/perception/vision/uppercam/traffic_light",
+    rclcpp::QoS(1).transient_local());
+  mission_event_pub_ = create_publisher<std_msgs::msg::String>("/perception/mission/events", 50);
+  // Confirmed Code 128 text (P2-01..04; anything else = unregistered -> mission error). Latched.
+  barcode_pub_ = create_publisher<std_msgs::msg::String>("/perception/vision/uppercam/barcode",
+    rclcpp::QoS(1).transient_local());
+  traffic_light_reset_sub_ = create_subscription<std_msgs::msg::Empty>("/perception/traffic_light/reset", 10,
+    [this](std_msgs::msg::Empty::ConstSharedPtr) {
+      std::lock_guard<std::mutex> lock(traffic_light_mutex_);
+      traffic_light_.reset();
+      barcode_.reset();
+      barcode_pub_->publish(std_msgs::msg::String());  // empty = not read yet
+      std_msgs::msg::Header header;
+      header.stamp = now();
+      header.frame_id = uppercam_frame_;
+      publish_traffic_light(header);
+      mission_event("INFO", "SIGNAL_RESET", "signal counter and barcode reset");
+    });
   object_pub_ = create_publisher<geometry_msgs::msg::PoseArray>("/perception/vision/d435/object_detection", 10);
   obstacle_pub_ = create_publisher<geometry_msgs::msg::PoseArray>("/perception/vision/d435/obstacle", 10);
   lidar_obstacle_pub_ = create_publisher<geometry_msgs::msg::PoseArray>("/perception/lidar/obstacle", 10);
+  brake_odom_sub_ = create_subscription<nav_msgs::msg::Odometry>("/control/wheel/odom", rclcpp::SensorDataQoS(),
+    [this](nav_msgs::msg::Odometry::ConstSharedPtr input) {
+      const int64_t t = rclcpp::Time(input->header.stamp).nanoseconds();
+      const double v = std::fabs(input->twist.twist.linear.x);
+      merge_v_ = input->twist.twist.linear.x; merge_w_wheel_ = input->twist.twist.angular.z;  // for the scan merge
+      // Turning faster than localization_scan.max_yaw_rate: remembered for publish_localization_scan().
+      if (localization_max_yaw_rate_ > 0.0 && std::fabs(input->twist.twist.angular.z) > localization_max_yaw_rate_) turning_at_ns_ = t;
+      if (!brake_speeds_.empty() && t <= brake_speeds_.back().first) brake_speeds_.clear();
+      brake_speeds_.emplace_back(t, v);
+      const int64_t window = static_cast<int64_t>(brake_window_s_ * 1e9);
+      while (brake_speeds_.size() > 1 && brake_speeds_.front().first < t - window) brake_speeds_.pop_front();
+      const auto &[t0, v0] = brake_speeds_.front();
+      if (t - t0 >= window / 2 && (v0 - v) / ((t - t0) * 1e-9) > brake_decel_) {
+        if (t - brake_at_ns_.load() > static_cast<int64_t>((brake_before_s_ + brake_after_s_) * 1e9)) brake_at_ns_ = t;
+      }
+    });
   odom_pub_ = create_publisher<nav_msgs::msg::Odometry>("/perception/state/odom", 10);
   diagnostics_pub_ = create_publisher<diagnostic_msgs::msg::DiagnosticArray>("/perception/diagnostics", 10);
 
-  for (const Camera camera : {kD435, kC310}) {
+  for (const Camera camera : {kD435}) {
     rclcpp::SubscriptionOptions options;
     options.callback_group = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
     image_subs_[camera] = create_subscription<std_msgs::msg::UInt64MultiArray>(
-      camera == kD435 ? "/vision/d435/frame_meta" : "/vision/c310/frame_meta", rclcpp::QoS(1),
+      "/vision/d435/frame_meta", rclcpp::QoS(1),
       [this, camera](std_msgs::msg::UInt64MultiArray::ConstSharedPtr input) { receive_frame(camera, input->data); },
       options);
   }
@@ -421,6 +619,26 @@ void PerceptionMaster::connect() {
     rear_scan_sub_ = create_subscription<sensor_msgs::msg::LaserScan>("/lidar/rear/scan",
       rclcpp::SensorDataQoS(), [this](sensor_msgs::msg::LaserScan::ConstSharedPtr input) {
         std::lock_guard<std::mutex> lock(scan_mutex_); rear_scan_ = std::move(input);
+      });
+  }
+  localization_box_radius_ = param<double>("localization_scan.box_radius");
+  localization_max_yaw_rate_ = param<double>("localization_scan.max_yaw_rate_deg") * M_PI / 180.0;
+  localization_turn_hold_s_ = param<double>("localization_scan.turn_hold_s");
+  localization_max_tilt_rate_ = param<double>("localization_scan.max_tilt_rate_deg") * M_PI / 180.0;
+  if (!(localization_max_tilt_rate_ >= 0.0)) throw std::invalid_argument("localization_scan.max_tilt_rate_deg must be >= 0");
+  localization_max_slope_ = param<double>("localization_scan.max_slope_deg") * M_PI / 180.0;
+  if (!(localization_max_slope_ >= 0.0)) throw std::invalid_argument("localization_scan.max_slope_deg must be >= 0");
+  if (localization_max_slope_ > 0.0)
+    RCLCPP_INFO(get_logger(), "localization scan: none to SLAM on slopes over %.1f deg (mapping)", localization_max_slope_ * 180.0 / M_PI);
+  if (!(localization_max_yaw_rate_ >= 0.0) || !(localization_turn_hold_s_ >= 0.0)) {
+    throw std::invalid_argument("localization_scan.max_yaw_rate_deg and turn_hold_s must be >= 0");
+  }
+  if (enabled("lidar_obstacle")) {
+    localization_scan_pub_ = create_publisher<sensor_msgs::msg::LaserScan>("/lidar/localization", 10);
+    localization_boxes_sub_ = create_subscription<geometry_msgs::msg::PoseArray>("/planning/boxes",
+      rclcpp::QoS(1).transient_local(), [this](geometry_msgs::msg::PoseArray::ConstSharedPtr input) {
+        if (input->header.frame_id != map_frame_) return;
+        std::lock_guard<std::mutex> lock(localization_boxes_mutex_); localization_boxes_ = std::move(input);
       });
   }
   scan_sub_ = create_subscription<sensor_msgs::msg::LaserScan>(
@@ -496,11 +714,51 @@ void PerceptionMaster::connect() {
 
   add_task("d435_yolo", [this](Task &task) { return d435_yolo(task); });
   add_task("apriltag", [this](Task &task) { return d435_apriltag(task); });
-  add_task("knob_depth", [this](Task &task) { return d435_knob_depth(task); });
   add_task("object_detector", [this](Task &task) { return d435_object_detector(task); });
   add_task("obstacle_detector", [this](Task &task) { return d435_obstacle_detector(task); });
   add_task("puck_axis", [this](Task &task) { return d435_puck_axis(task); });
-  add_task("knob_lever", [this](Task &task) { return c310_knob_lever(task); });
+  if (enabled("traffic_light")) {
+    uppercam_detection_pub_ = create_publisher<msg::DetectionArray>("/perception/vision/uppercam/detections", 10);
+  }
+  if (enabled("uppercam_puck")) {
+    uppercam_survey_obs_pub_ = create_publisher<msg::PuckObservationArray>("/perception/vision/uppercam/puck_survey_observations", 10);
+    uppercam_puck_detection_pub_ =
+      create_publisher<msg::DetectionArray>("/perception/vision/uppercam/puck_detections", 10);
+  }
+  if (enabled("traffic_light") || enabled("uppercam_puck")) {
+    rclcpp::SubscriptionOptions options;
+    options.callback_group = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+    // Bridge publishes best effort (sensor data); its rate is --preview-hz (run_uppercam_bridge.sh: 15).
+    uppercam_image_sub_ = create_subscription<sensor_msgs::msg::CompressedImage>(
+      param<std::string>("uppercam.image_topic"), rclcpp::SensorDataQoS(),
+      [this](sensor_msgs::msg::CompressedImage::ConstSharedPtr input) {
+        std::lock_guard<std::mutex> lock(uppercam_mutex_);
+        uppercam_image_ = std::move(input);
+        ++uppercam_received_;
+      }, options);
+  }
+  add_task("traffic_light", [this](Task &task) { return uppercam_traffic_light(task); });
+  if (enabled("puck_survey")) {
+    puck_detection_pub_ = create_publisher<msg::DetectionArray>("/perception/vision/d435/puck_detections", 10);
+    d435_survey_obs_pub_ = create_publisher<msg::PuckObservationArray>("/perception/vision/d435/puck_survey_observations", 10);
+  }
+  if (enabled("puck_survey") || enabled("uppercam_puck")) {
+    // Latched: the mission may subscribe after the pucks were seen.
+    puck_survey_pub_ = create_publisher<msg::PuckSurvey>("/perception/vision/d435/puck_survey",
+      rclcpp::QoS(1).transient_local());
+    puck_survey_reset_sub_ = create_subscription<std_msgs::msg::Empty>("/perception/puck_survey/reset", 10,
+      [this](std_msgs::msg::Empty::ConstSharedPtr) {
+        std::lock_guard<std::mutex> lock(puck_survey_mutex_);
+        puck_survey_.reset();
+        std_msgs::msg::Header header;
+        header.stamp = now();
+        header.frame_id = cameras_[kD435].frame_id;
+        publish_puck_survey(header);
+        mission_event("INFO", "PUCK_SURVEY_RESET", "puck survey reset");
+      });
+  }
+  add_task("puck_survey", [this](Task &task) { return d435_puck_survey(task); });
+  add_task("uppercam_puck", [this](Task &task) { return uppercam_puck_survey(task); });
   if (lidar_odometry_enabled_) {
     rclcpp::SubscriptionOptions options;
     options.callback_group = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
@@ -635,7 +893,7 @@ bool PerceptionMaster::d435_yolo(Task &task) {
   return on_frame(kD435, task,
     [this](const FramePtr &frame) { return d435_.detect(*frame->data); },
     [this](const FramePtr &frame, std::vector<Detection> &boxes) {
-      detection_pubs_[kD435]->publish(detections(frame->header, boxes, d435_labels_));
+      detection_pub_->publish(detections(frame->header, boxes, d435_labels_));
       auto result = std::make_shared<DetectedFrame>();
       result->frame = frame;
       result->boxes = std::move(boxes);
@@ -651,16 +909,6 @@ bool PerceptionMaster::d435_apriltag(Task &task) {
       auto output = std::make_unique<std_msgs::msg::Int32MultiArray>();
       for (const auto &tag : tags) output->data.push_back(tag.id);
       apriltag_pub_->publish(std::move(output));
-    });
-}
-
-bool PerceptionMaster::d435_knob_depth(Task &task) {
-  return on_detection(task,
-    [this](const SharedFrame &data, const std::vector<Detection> &boxes, const Intrinsics &in) {
-      return d435_.knob_depth(data, boxes, in);
-    },
-    [this](const FramePtr &frame, std::vector<KnobDepthObservation> &knobs) {
-      knob_pubs_[kD435]->publish(knob_depth_message(frame->header, knobs, d435_labels_));
     });
 }
 
@@ -684,26 +932,237 @@ bool PerceptionMaster::d435_obstacle_detector(Task &task) {
     });
 }
 
-// Puck identity and ROI come from configured AprilTag IDs; color is not used.
+// Puck identity and ROI come from configured AprilTag IDs; color is not used. Method tag also uses the
+// survey's shape per tag id (a lone cylinder end tag is otherwise ambiguous with a cuboid side tag).
 bool PerceptionMaster::d435_puck_axis(Task &task) {
   return on_frame(kD435, task,
     [this](const FramePtr &frame) {
       const auto in = intrinsics(*frame);
-      return in ? d435_.puck_axis(*frame->data, *in) : std::nullopt;
+      if (!in) return std::optional<std::vector<PuckObservation>>{};
+      std::unordered_map<int, PuckShape> shapes;  // survey so far, by tag id: tells cylinders (end tags only)
+      {
+        std::lock_guard<std::mutex> lock(puck_survey_mutex_);
+        for (int id = 0; id < 12; ++id) {
+          const auto &sighting = puck_survey_.sighting(id);
+          if (sighting) shapes[id] = sighting->shape;
+        }
+      }
+      return d435_.puck_axis(*frame->data, *in, shapes);
     },
     [this](const FramePtr &frame, std::vector<PuckObservation> &pucks) {
       puck_pub_->publish(puck_message(frame->header, pucks));
     });
 }
 
-// C310: its own YOLO + lever per frame.
-bool PerceptionMaster::c310_knob_lever(Task &task) {
-  return on_frame(kC310, task,
-    [this](const FramePtr &frame) { return c310_.knob_lever(*frame->data); },
-    [this](const FramePtr &frame, KnobLeverResult &result) {
-      detection_pubs_[kC310]->publish(detections(frame->header, result.detections, c310_labels_));
-      knob_pubs_[kC310]->publish(knob_lever_message(frame->header, result.levers, c310_labels_));
+// Puck survey: puck YOLO + AprilTags on the same D435 frame; a puck is recorded when a tag (id 0..11)
+// lies in its box. Publishes the survey whenever a puck is new or its color/shape reading changed.
+bool PerceptionMaster::d435_puck_survey(Task &task) {
+  struct Result { std::vector<Detection> boxes; std::vector<TaggedPuck> pucks; };
+  return on_frame(kD435, task,
+    [this](const FramePtr &frame) -> std::optional<Result> {
+      const auto &bgr = frame->data->bgr;
+      if (!puck_yolo_.is_valid_input(bgr) || !puck_tags_.is_valid_input(bgr)) return {};
+      Result result;
+      result.boxes = puck_yolo_.compute_result(bgr);
+      const auto &s = puck_tag_search_;
+      const auto in = intrinsics(*frame);  // aligned depth: tag 3D position and face normal
+      std::vector<PuckTag> tags;
+      for (const auto &tag : puck_tags_.compute_result(bgr, puck_boxes(result.boxes, puck_classes_, puck_min_score_),
+             s.grow, s.upscale)) {
+        PuckTag t{tag.id, tag.center, tag.corners, std::nullopt, std::nullopt};
+        if (in) {
+          if (const auto d = tag_depth(frame->data->depth, tag.corners, *in)) { t.position = d->center; t.normal = d->normal; }
+        }
+        tags.push_back(t);
+      }
+      result.pucks = associate_pucks(result.boxes, tags, puck_classes_, puck_min_score_, s.rule, true);  // every box
+      puck_axes(result.pucks, d435_survey_axis_, in, bgr.size());
+      return result;
+    },
+    [this](const FramePtr &frame, Result &result) {
+      puck_detection_pub_->publish(detections(frame->header, result.boxes, puck_labels_));
+      d435_survey_obs_pub_->publish(survey_message(frame->header, result.pucks));
+      record_pucks(frame->header, identified(result.pucks), "d435");
     });
+}
+
+bool PerceptionMaster::uppercam_puck_survey(Task &task) {
+  if (enabled("traffic_light")) {  // signal model first; pucks only after the 12 blinks
+    std::lock_guard<std::mutex> lock(traffic_light_mutex_);
+    if (!traffic_light_.complete()) return false;
+  }
+  sensor_msgs::msg::CompressedImage::ConstSharedPtr image;
+  {
+    std::lock_guard<std::mutex> lock(uppercam_mutex_);
+    if (!uppercam_image_ || uppercam_received_ == task.seen) return false;
+    image = uppercam_image_;
+    task.seen = uppercam_received_;
+  }
+  if (!is_fresh_input(image->header.stamp)) return false;
+  const cv::Mat bgr = cv::imdecode(cv::Mat(1, static_cast<int>(image->data.size()), CV_8U,
+    const_cast<uint8_t *>(image->data.data())), cv::IMREAD_COLOR);
+  if (!uppercam_puck_yolo_.is_valid_input(bgr) || !uppercam_puck_tags_.is_valid_input(bgr)) return false;
+  const auto boxes = uppercam_puck_yolo_.compute_result(bgr);
+  const auto &s = uppercam_puck_tag_search_;
+  std::vector<PuckTag> tags;  // JPEG only, no depth: face-on from the tag corners
+  for (const auto &tag : uppercam_puck_tags_.compute_result(bgr,
+         puck_boxes(boxes, uppercam_puck_classes_, uppercam_puck_min_score_), s.grow, s.upscale)) {
+    tags.push_back({tag.id, tag.center, tag.corners, std::nullopt, std::nullopt});
+  }
+  auto pucks = associate_pucks(boxes, tags, uppercam_puck_classes_, uppercam_puck_min_score_, s.rule, true);  // every box
+  // Upper cam: no camera_info; the 1920x1080 intrinsics scaled to this frame (16:9 modes share the FOV).
+  const double sx = bgr.cols / 1920.0, sy = bgr.rows / 1080.0;
+  const auto &k = uppercam_intrinsics_1080_;
+  puck_axes(pucks, uppercam_survey_axis_, Intrinsics{k[0] * sx, k[1] * sy, (k[2] + 0.5) * sx - 0.5, (k[3] + 0.5) * sy - 0.5},
+    bgr.size());
+  uppercam_puck_detection_pub_->publish(detections(image->header, boxes, uppercam_puck_labels_));
+  uppercam_survey_obs_pub_->publish(survey_message(image->header, pucks));
+  record_pucks(image->header, identified(pucks), "uppercam");
+  return true;
+}
+
+void PerceptionMaster::puck_axes(std::vector<TaggedPuck> &pucks, const PuckTagAxis &module,
+  const std::optional<Intrinsics> &in, cv::Size image) const {
+  if (!in) return;
+  for (auto &p : pucks) {
+    std::vector<PuckTagAxis::Corners> corners(p.tag_corners.begin(), p.tag_corners.end());
+    if (module.is_valid_input(corners, *in)) p.axis = module.compute_result(corners, *in, p.shape, p.box, image);
+  }
+}
+
+void PerceptionMaster::record_pucks(const std_msgs::msg::Header &header, const std::vector<TaggedPuck> &pucks,
+  const char *camera) {
+  std::lock_guard<std::mutex> lock(puck_survey_mutex_);
+  bool changed = false;
+  for (const auto &puck : pucks) {
+    const auto before = puck_survey_.sighting(puck.id);
+    puck_survey_.add(puck.id, puck.color, puck.shape, puck.score, puck.shape_from_tags);
+    const auto &after = puck_survey_.sighting(puck.id);
+    if (!before || before->color != after->color || before->shape != after->shape ||
+        before->shape_confirmed != after->shape_confirmed) {
+      changed = true;
+      const cv::Vec3d p = puck.position.value_or(cv::Vec3d(0, 0, 0));
+      mission_event("INFO", "PUCK_SEEN", "id=%d color=%s shape=%s(%s) tags=%d score=%.2f xyz=%s%.3f,%.3f,%.3f axis=%s missing=%zu cam=%s",
+        puck.id, after->color == PuckColor::kRed ? "red" : "green",
+        after->shape == PuckShape::kCylinder ? "cylinder" : "cuboid", after->shape_confirmed ? "tags" : "yolo",
+        puck.tags, after->score, puck.position ? "" : "none:", p[0], p[1], p[2],
+        !puck.axis ? "none" : puck.axis->standing ? "standing" : "lying",
+        puck_survey_.missing_ids().size(), camera);
+    }
+  }
+  if (changed) publish_puck_survey(header);
+}
+
+void PerceptionMaster::mission_event(const char *level, const char *code, const char *format, ...) {
+  char detail[256];
+  va_list args;
+  va_start(args, format);
+  std::vsnprintf(detail, sizeof(detail), format, args);
+  va_end(args);
+  if (std::strcmp(level, "ERROR") == 0) RCLCPP_ERROR(get_logger(), "[MISSION] %s %s %s", level, code, detail);
+  else if (std::strcmp(level, "WARN") == 0) RCLCPP_WARN(get_logger(), "[MISSION] %s %s %s", level, code, detail);
+  else RCLCPP_INFO(get_logger(), "[MISSION] %s %s %s", level, code, detail);
+  if (!mission_event_pub_) return;  // configure() runs before the publishers exist
+  std_msgs::msg::String output;
+  output.data = std::string(level) + "|" + code + "|" + detail;
+  mission_event_pub_->publish(output);
+}
+
+// Caller holds puck_survey_mutex_.
+void PerceptionMaster::publish_puck_survey(const std_msgs::msg::Header &header) {
+  auto output = std::make_unique<msg::PuckSurvey>();
+  output->header = header;
+  for (int id = 0; id < 12; ++id) {
+    const auto &sighting = puck_survey_.sighting(id);
+    if (!sighting) continue;
+    output->ids.push_back(id);
+    output->colors.push_back(sighting->color == PuckColor::kRed ? msg::PuckSurvey::RED : msg::PuckSurvey::GREEN);
+    output->shapes.push_back(sighting->shape == PuckShape::kCylinder ? msg::PuckSurvey::CYLINDER : msg::PuckSurvey::CUBOID);
+    output->scores.push_back(sighting->score);
+    output->shape_confirmed.push_back(sighting->shape_confirmed);
+  }
+  output->complete = puck_survey_.complete();
+  puck_survey_pub_->publish(std::move(output));
+}
+
+// Traffic light: newest upper-cam JPEG -> YOLO -> blink counter (camera stamps as its clock).
+// Once 12 blinks are in, frames are no longer decoded or inferred until a reset.
+bool PerceptionMaster::uppercam_traffic_light(Task &task) {
+  sensor_msgs::msg::CompressedImage::ConstSharedPtr image;
+  {
+    std::lock_guard<std::mutex> lock(uppercam_mutex_);
+    if (!uppercam_image_ || uppercam_received_ == task.seen) return false;
+    image = uppercam_image_;
+    task.seen = uppercam_received_;
+  }
+  bool need_signal, need_barcode;
+  {
+    std::lock_guard<std::mutex> lock(traffic_light_mutex_);
+    need_signal = !traffic_light_.complete();
+    need_barcode = !barcode_.confirmed();
+  }
+  if (!need_signal && !need_barcode) return false;
+  if (!is_fresh_input(image->header.stamp)) return false;
+  const cv::Mat bgr = cv::imdecode(cv::Mat(1, static_cast<int>(image->data.size()), CV_8U,
+    const_cast<uint8_t *>(image->data.data())), cv::IMREAD_COLOR);
+  if (!uppercam_yolo_.is_valid_input(bgr)) return false;
+  if (need_barcode) {
+    const auto texts = decode_code128(bgr);
+    std::lock_guard<std::mutex> lock(traffic_light_mutex_);
+    if (barcode_.update(texts)) {
+      std_msgs::msg::String output;
+      output.data = *barcode_.text();
+      barcode_pub_->publish(output);
+      const auto order = barcode_.order();
+      if (order) {
+        mission_event("INFO", "BARCODE_OK", "code=%s order=%s", output.data.c_str(),
+          *order == SortOrder::kAscending ? "ascending" : "descending");
+      } else {
+        mission_event("ERROR", "BARCODE_UNREGISTERED", "code=%s (expected P2-01..P2-04)", output.data.c_str());
+      }
+    }
+  }
+  if (!need_signal) return true;
+  const auto boxes = uppercam_yolo_.compute_result(bgr);
+  const auto &header = image->header;
+  uppercam_detection_pub_->publish(detections(header, boxes, uppercam_labels_));
+  std::lock_guard<std::mutex> lock(traffic_light_mutex_);
+  if (traffic_light_.complete()) return true;  // a reset raced the inference: fine either way
+  const int discarded = traffic_light_.discarded_cycles();
+  const auto blink = traffic_light_.update(rclcpp::Time(header.stamp).seconds(), boxes, bgr);
+  if (traffic_light_.discarded_cycles() != discarded) {  // wrong count: start over on the next cycle
+    mission_event("WARN", "SIGNAL_CYCLE_DISCARDED", "%s; waiting for the next cycle (discarded=%d)",
+      traffic_light_.last_discard().c_str(), traffic_light_.discarded_cycles());
+    publish_traffic_light(header);
+    return true;
+  }
+  const auto counts = traffic_light_.counts();
+  if (blink) {
+    mission_event("INFO", "SIGNAL_BLINK", "(%d/%d) color=%s total R=%d Y=%d G=%d on=%.2fs votes=%d/%d",
+      counts.total(), traffic_light_.expected_blinks(), to_string(blink->color),
+      counts.red(), counts.yellow(), counts.green(), blink->end_s - blink->start_s, blink->votes, blink->frames);
+  }
+  if (traffic_light_.complete()) {  // the light stayed dark for end_off_s after a valid 12
+    mission_event("INFO", "SIGNAL_COMPLETE", "(%d/%d) total R=%d Y=%d G=%d",
+      counts.total(), traffic_light_.expected_blinks(), counts.red(), counts.yellow(), counts.green());
+  }
+  if (blink || traffic_light_.complete()) publish_traffic_light(header);
+  return true;
+}
+
+// Caller holds traffic_light_mutex_.
+void PerceptionMaster::publish_traffic_light(const std_msgs::msg::Header &header) {
+  auto output = std::make_unique<msg::TrafficLight>();
+  output->header = header;
+  const auto counts = traffic_light_.counts();
+  output->red = counts.red();
+  output->yellow = counts.yellow();
+  output->green = counts.green();
+  for (const auto &b : traffic_light_.blinks()) output->sequence.push_back(static_cast<uint8_t>(b.color));
+  output->complete = traffic_light_.complete();
+  output->valid = traffic_light_.valid();
+  output->discarded_cycles = traffic_light_.discarded_cycles();
+  traffic_light_pub_->publish(std::move(output));
 }
 
 std::optional<lidar_processing::Pose2D> PerceptionMaster::lidar_pose(const std::string &frame) {
@@ -740,18 +1199,109 @@ bool PerceptionMaster::lidar_obstacle(Task &task) {
     }
     if (!rear_pose) RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
       "No usable rear LiDAR scan/TF; processing front only");
+    // Latest speeds, taken as constant over the two sweeps (0.1 s each, up to lidar.max_age apart).
+    const lidar_processing::Motion motion{merge_v_.load(), imu_enabled_ ? merge_w_imu_.load() : merge_w_wheel_.load()};
     merged = lidar_.merge(*input, *front_pose, rear_pose ? rear.get() : nullptr,
-                          rear_pose ? &*rear_pose : nullptr);
+                          rear_pose ? &*rear_pose : nullptr, lidar_motion_compensation_ ? &motion : nullptr);
     if (!merged) { task.seen = id; return false; }
     merged_scan_pub_->publish(*merged);  // Preserve SLAM/RViz input without a merger node.
   }
   task.seen = id;
   const auto &scan = merged ? *merged : *input;
+  publish_localization_scan(scan);
+  const int64_t stamp = rclcpp::Time(scan.header.stamp).nanoseconds(), brake = brake_at_ns_.load();
+  const int64_t before = static_cast<int64_t>(brake_before_s_ * 1e9), after = static_cast<int64_t>(brake_after_s_ * 1e9);
+  if (brake > 0 && brake != brake_handled_ns_) {
+    // A new hard stop: back to before its scans (brake_before_s before it), filter state and published obstacles.
+    brake_handled_ns_ = brake;
+    for (auto it = obstacle_snapshots_.rbegin(); it != obstacle_snapshots_.rend(); ++it) {
+      if (it->stamp > brake - before) continue;
+      {std::lock_guard<std::mutex> lock(obstacle_filter_mutex_); obstacle_filter_.restore(it->filter);}
+      last_lidar_obstacles_ = it->published;
+      break;
+    }
+    RCLCPP_INFO(get_logger(), "hard stop: LiDAR obstacles from %.1f s before to %.1f s after it left out",
+                brake_before_s_, brake_after_s_);
+  }
+  if (brake > 0 && stamp > brake - before && stamp <= brake + after) {
+    if (last_lidar_obstacles_) {
+      auto again = *last_lidar_obstacles_; again.header.stamp = scan.header.stamp;
+      lidar_obstacle_pub_->publish(again);
+    }
+    return true;
+  }
+  {
+    std::lock_guard<std::mutex> lock(obstacle_filter_mutex_);
+    obstacle_snapshots_.push_back({stamp, obstacle_filter_.state(), last_lidar_obstacles_});
+  }
+  while (!obstacle_snapshots_.empty() && obstacle_snapshots_.front().stamp < stamp - before - static_cast<int64_t>(1e9))
+    obstacle_snapshots_.pop_front();
   auto obstacles = lidar_.detect_obstacles(scan);
   if (!obstacles) return false;
   if (obstacle_filter_enabled_) filter_obstacles(*obstacles, scan);
   lidar_obstacle_pub_->publish(*obstacles);
+  last_lidar_obstacles_ = *obstacles;
   return true;
+}
+
+// /lidar/localization: the merged scan without the beams that end on an arena box (within localization_scan.box_radius
+// of a centre on /planning/boxes: the planning.yaml places, the target box where the LiDAR measured it), for
+// slam_toolbox. The boxes are erased from the saved pose graph but stood in every scan (12-17 % of its points), and
+// the localization jumped 65 mm on stopping 0.29 m in front of one (2026-11-11). No boxes or no map pose yet: the
+// scan as it is.
+void PerceptionMaster::publish_localization_scan(const sensor_msgs::msg::LaserScan &scan) {
+  if (!localization_scan_pub_) return;
+  // No scan to slam_toolbox while the robot turns fast and turn_hold_s after: the merged scan is the latest front and
+  // rear sweeps (0.1 s each, up to lidar.max_age apart) laid over each other as if the robot stood still, so at the
+  // 0.6 rad/s of a turn on the spot it is bent 3.4 deg within a sweep and up to 6.9 deg between the two. Tour bags
+  // 2026-11-11/12: a pose jump of slam_toolbox (> 2.5 deg or 6 cm at once) 8.4 times a minute within 1 s of turning
+  // over 30 deg/s, 0.8 times a minute when not turning. The pose runs on wheel + IMU meanwhile (0.5 % yaw scale).
+  if (localization_max_yaw_rate_ > 0.0 && rclcpp::Time(scan.header.stamp).nanoseconds() <=
+      turning_at_ns_.load() + static_cast<int64_t>(localization_turn_hold_s_ * 1e9)) return;
+  // Nor while the chassis rocks (bumpy floor): a tilted LiDAR plane hits the floor or the wall tops, and those ranges
+  // went into the map (doubled walls) and pulled the pose. Wheel + IMU odometry carries the pose meanwhile.
+  if (localization_max_tilt_rate_ > 0.0 && rclcpp::Time(scan.header.stamp).nanoseconds() <=
+      tilting_at_ns_.load() + static_cast<int64_t>(localization_turn_hold_s_ * 1e9)) {
+    const auto n = ++tilt_dropped_;
+    RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 10000, "localization scan: %lu scans dropped so far while the "
+                         "chassis rocked (roll / pitch rate over %.0f deg/s)", static_cast<unsigned long>(n),
+                         localization_max_tilt_rate_ * 180.0 / M_PI);
+    return;
+  }
+  if (localization_max_slope_ > 0.0 && rclcpp::Time(scan.header.stamp).nanoseconds() <=
+      sloped_at_ns_.load() + static_cast<int64_t>(localization_turn_hold_s_ * 1e9)) {
+    const auto n = ++slope_dropped_;
+    RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 10000, "localization scan: %lu scans dropped so far on slopes "
+                         "(over %.1f deg from level)", static_cast<unsigned long>(n), localization_max_slope_ * 180.0 / M_PI);
+    return;
+  }
+  geometry_msgs::msg::PoseArray::ConstSharedPtr boxes;
+  { std::lock_guard<std::mutex> lock(localization_boxes_mutex_); boxes = localization_boxes_; }
+  if (!boxes || boxes->poses.empty()) {localization_scan_pub_->publish(scan); return;}
+  geometry_msgs::msg::TransformStamped tf;
+  try {
+    tf = tf_buffer_->lookupTransform(map_frame_, tf2::TimePointZero, scan.header.frame_id,
+                                     tf2_ros::fromRclcpp(rclcpp::Time(scan.header.stamp)), obstacle_odom_frame_);
+  } catch (const std::exception &) {
+    try {
+      tf = tf_buffer_->lookupTransform(map_frame_, scan.header.frame_id, tf2::TimePointZero);
+    } catch (const std::exception &) {localization_scan_pub_->publish(scan); return;}
+  }
+  const auto &q = tf.transform.rotation;
+  const double yaw = std::atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z));
+  const double r2 = localization_box_radius_ * localization_box_radius_;
+  auto out = scan;
+  for (std::size_t i = 0; i < out.ranges.size(); ++i) {
+    const float r = out.ranges[i];
+    if (!std::isfinite(r)) continue;
+    const double a = scan.angle_min + i * scan.angle_increment + yaw;
+    const double x = tf.transform.translation.x + r * std::cos(a), y = tf.transform.translation.y + r * std::sin(a);
+    for (const auto &b : boxes->poses) {
+      const double dx = x - b.position.x, dy = y - b.position.y;
+      if (dx * dx + dy * dy <= r2) {out.ranges[i] = std::numeric_limits<float>::quiet_NaN(); break;}
+    }
+  }
+  localization_scan_pub_->publish(out);
 }
 
 // Keep only obstacle points worth avoiding (LidarObstacleFilter, judged in the map frame), plus the remembered ones
@@ -824,7 +1374,42 @@ bool PerceptionMaster::state_estimator(Task &task) {
     odom_pub_->publish(state_estimator_.compute_result(*input)); return true;
   }
   try {  // slam_toolbox owns map->odom; latest is fine because it changes slowly.
-    const auto tf = tf_buffer_->lookupTransform(map_frame_, input->header.frame_id, tf2::TimePointZero);
+    auto tf = tf_buffer_->lookupTransform(map_frame_, input->header.frame_id, tf2::TimePointZero);
+    if (map_correction_speed_ > 0) {
+      // The robot's map pose moves toward the one slam_toolbox's map->odom gives at most map_correction.speed /
+      // yaw_rate (planar); further off than snap (start, relocalization): taken at once.
+      const auto yaw_of = [](const geometry_msgs::msg::Quaternion &q) {
+        return std::atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z));};
+      const double px = input->pose.pose.position.x, py = input->pose.pose.position.y, pyaw = yaw_of(input->pose.pose.orientation);
+      const double stamp = rclcpp::Time(input->header.stamp).seconds();
+      const double tyaw = yaw_of(tf.transform.rotation), tc = std::cos(tyaw), ts = std::sin(tyaw);
+      const double gx = tf.transform.translation.x + tc * px - ts * py, gy = tf.transform.translation.y + ts * px + tc * py;
+      const double gyaw = tyaw + pyaw;  // the pose slam_toolbox's correction gives
+      double x = gx, y = gy, yaw = gyaw;
+      if (map_correction_) {
+        const auto &m = *map_correction_;
+        const double mc = std::cos(m.yaw), ms = std::sin(m.yaw);
+        const double sx = m.x + mc * px - ms * py, sy = m.y + ms * px + mc * py, syaw = m.yaw + pyaw;  // the pose in use
+        const double ex = gx - sx, ey = gy - sy, e = std::hypot(ex, ey), eyaw = std::remainder(gyaw - syaw, 2 * M_PI);
+        const double dt = std::clamp(stamp - m.stamp, 0.0, 0.5);
+        // Standing still nothing steers by the pose: the correction is taken at once, so the pose in use and the
+        // TF's (the box observation, the obstacles) agree when the box is measured at the stage point (2026-11-11:
+        // a 65 mm correction on stopping there was still 26 mm along / 15 mm sideways behind when the dock was made).
+        const auto &v = input->twist.twist;
+        const bool still = std::abs(v.linear.x) < map_correction_still_v_ && std::abs(v.angular.z) < map_correction_still_w_;
+        if (!still && e <= map_correction_snap_m_ && std::abs(eyaw) <= map_correction_snap_rad_) {
+          const double step = std::min(e, map_correction_speed_ * dt), k = e > 0 ? step / e : 0.0;
+          x = sx + ex * k; y = sy + ey * k;
+          yaw = syaw + std::clamp(eyaw, -map_correction_yaw_rate_ * dt, map_correction_yaw_rate_ * dt);
+        }
+      }
+      MapCorrection m; m.yaw = std::remainder(yaw - pyaw, 2 * M_PI); m.stamp = stamp;
+      m.x = x - (std::cos(m.yaw) * px - std::sin(m.yaw) * py); m.y = y - (std::sin(m.yaw) * px + std::cos(m.yaw) * py);
+      map_correction_ = m;
+      tf.transform.translation.x = m.x; tf.transform.translation.y = m.y;
+      tf.transform.rotation.x = 0; tf.transform.rotation.y = 0;
+      tf.transform.rotation.z = std::sin(m.yaw / 2); tf.transform.rotation.w = std::cos(m.yaw / 2);
+    }
     odom_pub_->publish(state_estimator_.compute_result(*input, tf.transform, map_frame_));
     return true;
   } catch (const std::exception &e) {
@@ -847,6 +1432,37 @@ void PerceptionMaster::receive_imu(std::size_t board, const sensor_msgs::msg::Im
     std::fabs(wheel_yaw_rate) <= wheel_still_angular_;
   const auto &w = input.angular_velocity;
   const auto &a = input.linear_acceleration;
+  // The chassis rocking on the floor (wheel board only: the arm board moves with the arm): roll / pitch rate past
+  // the gyro offset, remembered for publish_localization_scan().
+  if (board == 0 && localization_max_tilt_rate_ > 0.0) {
+    const auto &bias = imu_.board(board).bias();
+    if (std::fabs(w.x - bias[0]) > localization_max_tilt_rate_ || std::fabs(w.y - bias[1]) > localization_max_tilt_rate_)
+      tilting_at_ns_ = rclcpp::Time(input.header.stamp).nanoseconds();
+  }
+  // Standing tilted on a slope (mapping only): the gravity direction against level.
+  if (board == 0 && localization_max_slope_ > 0.0) {
+    const double n = std::sqrt(a.x * a.x + a.y * a.y + a.z * a.z);
+    if (n > 5.0) {
+      const std::array<double, 3> g{a.x / n, a.y / n, a.z / n};
+      if (wheels_still) { for (int k = 0; k < 3; ++k) slope_level_sum_[k] += g[k]; ++slope_level_n_; }
+      if (wheels_fresh) {  // speeding up or braking tips the measured gravity like a slope: not judged then
+        const double tv = rclcpp::Time(wheel_odom_->header.stamp).seconds(), v = wheel_odom_->twist.twist.linear.x;
+        if (slope_v_t_ > 0.0 && tv > slope_v_t_ + 1e-3) slope_accel_ += 0.2 * ((v - slope_v_) / (tv - slope_v_t_) - slope_accel_);
+        if (tv > slope_v_t_ + 1e-3) { slope_v_ = v; slope_v_t_ = tv; }
+      }
+      const bool first = slope_gravity_[0] == 0.0 && slope_gravity_[1] == 0.0 && slope_gravity_[2] == 0.0;
+      for (int k = 0; k < 3; ++k) slope_gravity_[k] = first ? g[k] : slope_gravity_[k] + 0.04 * (g[k] - slope_gravity_[k]);
+      if (slope_level_n_ >= 100 && std::fabs(slope_accel_) < 0.05) {
+        double dot = 0, ng = 0, nl = 0;
+        for (int k = 0; k < 3; ++k) {
+          dot += slope_gravity_[k] * slope_level_sum_[k]; ng += slope_gravity_[k] * slope_gravity_[k];
+          nl += slope_level_sum_[k] * slope_level_sum_[k];
+        }
+        if (std::acos(std::clamp(dot / std::sqrt(ng * nl), -1.0, 1.0)) > localization_max_slope_)
+          sloped_at_ns_ = rclcpp::Time(input.header.stamp).nanoseconds();
+      }
+    }
+  }
   if (imu_.update(board, t, {w.x, w.y, w.z}, {a.x / kGravity, a.y / kGravity, a.z / kGravity}, wheels_still)) {
     const auto &bias = imu_.board(board).bias();
     RCLCPP_INFO(get_logger(), "%s IMU calibrated: gyro offset (%.5f, %.5f, %.5f) rad/s", kNames[board],
@@ -888,6 +1504,7 @@ void PerceptionMaster::receive_imu(std::size_t board, const sensor_msgs::msg::Im
   output.orientation_covariance[0] = -1.0;
   output.linear_acceleration_covariance[0] = -1.0;
   output.angular_velocity.z = rate->value;
+  merge_w_imu_ = rate->value;  // for the scan merge
   output.angular_velocity_covariance[0] = output.angular_velocity_covariance[4] = 1e6;  // unmeasured x/y
   output.angular_velocity_covariance[8] = rate->variance;
   imu_pub_->publish(output);
@@ -1096,10 +1713,10 @@ void PerceptionMaster::diagnostics() {
     value("errors", task->errors); value("overruns", task->overruns);
     task->previous_processed = task->processed; output.status.push_back(status);
   }
-  for (const Camera camera : {kD435, kC310}) {
+  for (const Camera camera : {kD435}) {
     std::lock_guard<std::mutex> lock(cameras_[camera].mutex);
     diagnostic_msgs::msg::DiagnosticStatus status;
-    status.name = camera == kD435 ? "perception/shared_memory/realsense" : "perception/shared_memory/c310";
+    status.name = "perception/shared_memory/realsense";
     status.hardware_id = cameras_[camera].shm; status.message = "on-demand shared snapshots";
     const auto value = [&status](const std::string &key, uint64_t number) {
       diagnostic_msgs::msg::KeyValue item; item.key = key; item.value = std::to_string(number);

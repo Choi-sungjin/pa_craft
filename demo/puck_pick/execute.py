@@ -55,17 +55,34 @@ RELEASE_GRIPPER_DEG = 147.9
 # elbow, wrist, roll all the way before the LM and shoulder).
 BACK_ROLL_URDF_DEG = -90.9
 LOAD_SLOT = 12
+# bigbro --slot N: the clock slot this run loads into (1-12; the clock turns it to the loading guide, the arm poses
+# stay the slot-12 ones). bigbro2 loads two pucks into 12, then 11.
+# --slot 12,11 with --plan a.yaml,b.yaml (bigbro2): several pucks in one run, see bigbro_steps.
+BIGBRO_SLOTS = [int(v) for v in sys.argv[sys.argv.index('--slot') + 1].split(',')] if '--slot' in sys.argv else [LOAD_SLOT]
+BIGBRO_SLOT = BIGBRO_SLOTS[0]
 # Nominal pose (fixed 2026-11-05): carriage lined up with clock 12, raw motor degrees LM, shoulder, elbow,
 # wrist_pitch, tool_roll, gripper. Every run starts here and ends here. Reassembled 2026-11-06 (new elbow
 # bracket); LM 858.3 = clock 12 after LM and clock were re-aligned (2026-11-06, was 829.7, 941.1); was
 # [1030.9, 69.3, 181.0, 195.8, 90.3, 146.7].
 # 2026-11-07: timing belt re-fitted and the LM scale re-measured (control.yaml): clock 12 = LM 548.3 (measured); the
 # box places are their slide positions [m] in raw degrees again (box centre = LM mid travel 594.1).
-NOMINAL_RAW_DEG = [548.3, 84.9, 100.1, 16.8, 90.0, 94.0]  # tool_roll 90 (was 91.1), gripper full open (was 141.9)
+# 2026-11-13: re-set by hand, this is now the nominal pose: DYNAMIXEL Wizard positions, LM the guide-side reading (checkarm 561.4,
+# Wizard 201.7 + 1 turn); tool_roll Wizard 360 = 0.0 (limit -175..175). Was [548.3, 84.9, 100.1, 16.8, 90.0, 94.0].
+NOMINAL_RAW_DEG = [561.4, 53.9, 178.0, 58.4, 0.0, 73.1]
 # Via pose between the nominal pose and any work, both ways. Shoulder, elbow, wrist_pitch given by hand
 # (2026-11-06); LM the old via - nominal difference on the new nominal; tool_roll and gripper as the nominal pose
 # (they must not move); LM = nominal (858.3 since 2026-11-06, was 829.7, 940.8). Was [1030.6, 83.4, 101.2, 114.2, 91.8, 149.6].
-VIA_RAW_DEG = [548.3, 92.5, 182.9, 104.6, 90.0, 141.9]  # tool_roll 90 (was 91.1)
+# 2026-11-13: re-set with teacharm jog (teach.yaml p12, LM held at the new nominal 561.4) next to the new nominal pose.
+# Was [548.3, 92.5, 182.9, 104.6, 90.0, 141.9].
+VIA_RAW_DEG = [561.4, 93.3, 177.6, 61.3, -0.4, 73.1]
+# Carrying a puck out of the clock (sis2 8, dice): the 2026-11-06 via (wrist folded, tool_roll 90), LM as the via.
+# The new via above stands the tool up: on the way from over the slot the puck ends rose to 0.535 m and hit the
+# structure (2026-11-13, user); through this pose they stay under 0.402 m (FK, 60 mm puck) and tool_roll does not turn.
+CARRY_VIA_RAW_DEG = [VIA_RAW_DEG[0], 92.5, 182.9, 104.6, 90.0, 141.9]
+# On the way there the shoulder first goes this much further out (away from the folded nominal side, + URDF), then back
+# to the carry via (2026-11-13, user: the puck end grazed the structure the gripper rests on at the nominal pose,
+# its underside 65 mm over the battery).
+CARRY_SHOULDER_OUT_DEG = 5.0
 # sis2 (taught 2026-11-06, clock reassembled, slot 12 at the guide; LM taught at 829.7, now the clock-12 LM 858.3): raw motor degrees LM, shoulder, elbow, wrist_pitch,
 # tool_roll, gripper. Pick via: over the clock, tool_roll 0, way in and out. Pre-grasp: jaws part open around the
 # stored puck, 28 mm down from its top. Lift: gripped and lifted clear of the slot. The gripper values are what the
@@ -80,6 +97,13 @@ PICK_LIFT_RAW_DEG = [548.2, 104.2, 137.8, 146.3, 0.0, 168.4]  # jog-taught grasp
 # Travel time per sis2 step [s] (time-based profile, firmware 2026-11-06: the LM and arm joints of a step start and
 # arrive together). Not listed or 0: as fast as the speed caps allow (69 deg/s arm, 41 gripper, 28 mm/s LM; 2026-11-07), the farthest
 # joint decides. A time shorter than the caps allow is stretched to them.
+SLOW_SECONDS = {}  # step label -> time [s], filled from the real start pose in main() for the nominal <-> via moves
+GOTO_DEG_S = 5.2  # into the nominal pose: joint speed [deg/s] (the speed cap is 69), the farthest joint decides
+VIA_DEG_S = 12.0  # moves to a via pose: faster (wrist swings of 100+ deg took 20 s at 5.2), still time-based
+APPROACH_DEG = 4.0  # nominal <-> via: the last this many degrees of the farthest joint are a separate slow move
+APPROACH_DEG_S = 1.5  # speed of that final approach [deg/s]
+APPROACH_MIN_S = 2.0
+GOTO_MIN_S = 3.0  # nominal <-> via: no move shorter than this [s]
 STEP_SECONDS = {
     'sis2 1:': 0.0,  # nominal -> nominal via
     'sis2 2:': 0.0,  # -> over the stored puck (tool_roll, gripper)
@@ -95,6 +119,9 @@ STEP_SECONDS = {
     # Dice: the put-down slow (2026-11-07, user): at the caps it takes 0.3-0.8 s for the 75 mm and the joints go
     # past the touch and press the puck into the box; 2 s = ~37 mm/s down, the time-based ramp easing into the touch.
     'put down on the': 2.0,
+    # bigbro: down onto the puck in front, 40 mm in 2 s (2026-11-14, user: the jaws went too deep and hit the box).
+    # At the caps (0 here) the joints run past the goal before they settle, as the dice put-down did.
+    'bigbro pick: descend': 2.0,
 }
 # Place on the box: the taught touching pose (857.6, 94.0, 283.1, -59.7, 90; it pressed a little) moved in the URDF
 # model to the box centre (x -12.5 mm, 112.5 mm ahead of the LiDAR face: +19.3 mm ahead, -20.4 mm along the LM) and
@@ -213,8 +240,8 @@ PUT_DOWN_ABOVE = 0.01  # [m]
 # Vertical moves (descend / lift / put down / rise) go in one unstaged move (2026-11-02, was 4 mm pieces staged
 # elbow-first: 20 moves for 4 cm). Joints arrive one by one, so the TCP bows ~10 mm front-back mid-move.
 NO_STAGING = ('arm over the slot', 'straight down to the grasp', 'straight up ', 'descend', 'lift the puck',
-              'put down', 'rise above the puck', 'sis2 ', 'dice ',
-              'via pose:', 'via pose (off')  # out_to_via; the way back to the via pose stays staged
+              'put down', 'rise above the puck', 'sis2 ', 'dice ', 'bigbro ',
+              'via pose:', 'via pose (off', 'to the nominal pose')  # out_to_via; the way back to the via pose stays staged
 STAGE_SEG = 1000  # plan frames per vertical piece: one move
 # --lying: the arm reaches the plan's tool angle through a pose LYING_HIGH over the grasp, then comes down the
 # vertical line in 1 cm pieces. Going straight from the standing lift pose to the approach dipped the fingertips
@@ -236,6 +263,18 @@ def via_pose():
     return teach.raw_to_target(VIA_RAW_DEG)
 
 
+def carry_via_pose():
+    """CARRY_VIA_RAW_DEG as a MANIPULATOR target (the way out of the clock with a puck)."""
+    return teach.raw_to_target(CARRY_VIA_RAW_DEG)
+
+
+def carry_via_path():
+    """The carry via with the shoulder CARRY_SHOULDER_OUT_DEG further out, then the carry via (arm joints only)."""
+    via = carry_via_pose()[:5]
+    out = list(via); out[1] += math.radians(CARRY_SHOULDER_OUT_DEG)
+    return [out, via]
+
+
 def wrist_first(prev, target, what):
     """Step: prev with only the wrist_pitch moved to target's (the elbow follows in the next step)."""
     q = list(prev)
@@ -243,13 +282,21 @@ def wrist_first(prev, target, what):
     return (f'wrist_pitch to {what} first, the rest stays', TaskCommand.MANIPULATOR, q)
 
 
+def close_but_shoulder(a, b, joint_deg=15.0, slide_m=0.005):
+    """True when LM (slide) and the elbow, wrist_pitch and tool_roll of the poses a and b are within joint_deg / slide_m:
+    only the shoulder differs, so the arm can go in one move (2026-11-13, user: the stop-and-go steps looked jerky)."""
+    return abs(a[0] - b[0]) < slide_m and all(abs(a[i] - b[i]) < math.radians(joint_deg) for i in (2, 3, 4))
+
+
 def out_to_via(prev):
     """Steps prev -> via pose, the reverse of the way back: the shoulder alone, then the elbow with LM, tool_roll and
     gripper, then the wrist_pitch alone."""
     via = via_pose()
+    m = TaskCommand.MANIPULATOR
+    if close_but_shoulder(prev, via):  # one smooth move instead of three stop-and-go ones
+        return [('via pose: one move (only the shoulder moves)', m, via)]
     shoulder = list(prev[:1]) + [via[1]] + list(prev[2:])
     elbow = via[:3] + [prev[3]] + via[4:]
-    m = TaskCommand.MANIPULATOR
     return [('via pose: shoulder first, the rest stays', m, shoulder),
             ('via pose: elbow, LM, tool_roll, gripper next (wrist_pitch stays)', m, elbow),
             ('via pose (off the nominal pose): wrist_pitch last', m, via)]
@@ -266,6 +313,8 @@ def with_via(steps, start, out=True):
                if kind == TaskCommand.MANIPULATOR and target(arg) == start)
     wrap = (lambda q: [q]) if nested(steps[last][2]) else (lambda q: q)
     prev = next(target(arg) for _, kind, arg in reversed(steps[:last]) if kind == TaskCommand.MANIPULATOR)
+    if all(abs(a - b) < 1e-6 for a, b in zip(prev[:5], via[:5])):  # already comes back through the via pose
+        return [(n, k, wrap(q)) for n, k, q in out_to_via(start)] + steps if out else steps
     name, kind, wrist = wrist_first(prev, via, 'the via pose')
     back = ('via pose before the nominal pose', TaskCommand.MANIPULATOR, wrap(via))
     name2, kind2, wrist2 = wrist_first(via, start, 'the nominal pose')
@@ -329,9 +378,16 @@ def above(arm, dz):
     return [float(v) for v in q]
 
 
-def plan_pose(name='plan.yaml'):
+PLAN_FILES = sys.argv[sys.argv.index('--plan') + 1].split(',') if '--plan' in sys.argv else ['plan.yaml']  # cam_pick.py: plan_cam.yaml
+PLAN_FILE = PLAN_FILES[0]
+
+
+def plan_pose(name=None):
     """pose(i): frame i of a plan.py output as [slide + LM_BACKLASH, shoulder, elbow, wrist_pitch, tool_roll]."""
+    name = name or PLAN_FILE
     f = yaml.safe_load(open(HERE / name))['frames']
+    if not f:  # plan.py writes no frames when a waypoint is outside the limits
+        sys.exit(f'{name} has no frames: plan.py failed (a waypoint outside the joint/LM limits); nothing sent')
     return lambda i: [f[i]['joints'][ARM[0]] + LM_BACKLASH] + [f[i]['joints'][n] for n in ARM[1:]]
 
 
@@ -442,11 +498,10 @@ def steps_from_plan(current_slide=None, start=None):
     roll = load[:4] + [math.radians(BACK_ROLL_URDF_DEG)]
     s.append(('back 1: tool_roll to raw 0 deg', TaskCommand.MANIPULATOR, [roll]))
     if start is not None:
-        half = [(a + b) / 2 for a, b in zip(roll[2:4], start[2:4])]
-        wrist = roll[:3] + half[1:] + roll[4:]  # wrist_pitch before the elbow
-        s.append(('back 2a: wrist_pitch half way to the start pose (the rest stays)', TaskCommand.MANIPULATOR, [wrist]))
-        s.append(('back 2b: elbow half way to the start pose (LM, shoulder, tool_roll stay)',
-                  TaskCommand.MANIPULATOR, [roll[:2] + half + roll[4:]]))
+        # 2026-11-13 (user): from the clock straight to the via pose, then the nominal pose. The old way back (elbow
+        # and wrist half way to the start) passed the gripper rest once the nominal pose changed and hit it.
+        s.append(('back 2: to the nominal via pose, one move (LM moves 1.5 mm only)', TaskCommand.MANIPULATOR,
+                  [via_pose()[:5]]))
         s.append(('back 3: LM, shoulder, elbow, wrist_pitch, tool_roll to the start pose', TaskCommand.MANIPULATOR,
                   [start]))
     return s
@@ -537,7 +592,7 @@ def dice_steps(current_slide=None, start=None):
             s.append((f'{n} to the nominal via pose (tool_roll back to 90)', m, via[:5]))
         s += pick_steps(f'{n} pick:')
         s += [
-            (f'{n} to the nominal via pose with the puck', m, via[:5]),
+            (f'{n} to the carry via pose with the puck, shoulder out first (wrist folded, tool_roll 90)', m, carry_via_path()),
             (f'{n} 75 mm over the {row}-{col} pip (tool_roll to raw {DICE_PLACE_ROLL_RAW_DEG:g}{ff})', m, pose(75)),
             (f'{n} put down on the {row}-{col} pip, one move', m, pose(0)),
             (f'{n} open gripper full (release)', TaskCommand.GRIPPER, False),
@@ -545,6 +600,7 @@ def dice_steps(current_slide=None, start=None):
             # the column; the open jaws stay >= 20 mm from the neighbours 60 mm away.
             (f'{n} up to 75 mm, one move', m, pose(75)),
         ]
+    s.append(('dice end: to the nominal via pose (gripper full open)', m, via[:5]))  # work -> via -> nominal (user 2026-11-13)
     s.append(('dice end: to the nominal pose (gripper full open)', m, start))
     # Shoulder I off while it waits at the nominal pose (2026-11-07, user): run sis_1107_1343 held the nominal pose
     # at 0.6 A on the shoulder for minutes and the shoulder got hot (48 C, the others 37-40) and weak. Same target, no
@@ -578,7 +634,7 @@ def unload_steps(current_slide=None, start=None):
         ('sis2 5: close gripper (grasp the stored puck)', TaskCommand.GRIPPER, True),
         ('sis2 6: up 20 mm (tool vertical)', m, mid),
         ('sis2 7: up to 40 mm over the slot', m, over),
-        ('sis2 8: to the nominal via pose with the puck (gripper stays closed)', m, via[:5]),
+        ('sis2 8: to the carry via pose with the puck, shoulder out first (wrist folded, tool_roll 90, gripper stays closed)', m, carry_via_path()),
     ] + ([] if PLACE_ABOVE_RAW_DEG is None else [
         ('sis2 9: over the place pose', m, above),
         ('sis2 10: descend onto the box (puck touches)', m, place),
@@ -586,9 +642,72 @@ def unload_steps(current_slide=None, start=None):
         (f'sis2 12: tool_roll to raw {PLACE_RELEASE_ROLL_RAW_DEG:g} (90 deg turn, jaws open), the rest stays', m,
          place[:4] + [roll_out]),
         ('sis2 13: ascend over the place pose', m, above[:4] + [roll_out]),
+        ('sis2 13b: to the nominal via pose (gripper full open)', m, via[:5]),  # back through the via (user 2026-11-13)
         ('sis2 14: to the nominal pose, one move (gripper full open)', m, start),
     ])
 
+
+
+def bigbro_steps(current_slide=None, start=None):
+    """One bigbro_one per --plan file / --slot pair, in one run (2026-11-14, user: after loading a puck the arm goes
+    straight on to the next one, not back to the nominal pose). All plans come from one upper-cam frame taken at the
+    nominal pose (cam_pick.py --count N), so the arm never has to clear the camera in between. Between pucks: carry
+    via -> via -> the next pick; only the last puck ends at the nominal pose. Labels get ' [puck k]' (step times are
+    kept per label)."""
+    global PLAN_FILE, BIGBRO_SLOT
+    if len(PLAN_FILES) == 1:
+        return bigbro_one(current_slide, start, True)
+    if len(BIGBRO_SLOTS) != len(PLAN_FILES):
+        sys.exit(f'--plan has {len(PLAN_FILES)} files, --slot {len(BIGBRO_SLOTS)} slots: give one slot per plan')
+    s = []
+    for k, (PLAN_FILE, BIGBRO_SLOT) in enumerate(zip(PLAN_FILES, BIGBRO_SLOTS)):
+        one = bigbro_one(current_slide, start, k == len(PLAN_FILES) - 1)
+        if k:  # already at the via pose (bigbro 8 of the puck before)
+            one = [x for x in one if not x[0].startswith('bigbro 0:')]
+        s += [(f'{n} [puck {k + 1}]', kind, a) for n, kind, a in one]
+    return s
+
+
+def bigbro_one(current_slide=None, start=None, home=True):
+    """bigbro (2026-11-13, to compare with sis1): the sis1 pick of the puck in front (plan.yaml / --plan), then into
+    clock slot 12 through the poses sis2 runs there (taught 2026-11-06 after the clock reassembly), not the sis1
+    loading pose (hand-set 2026-11-03, 36 mm off slot 12 by FK). Independent of the nominal pose except the start and
+    the end: via -> pick -> wrist folded -> clock 12 -> over the slot -> down to PICK_MID (sis2 grasp + 20 mm: the sis1
+    grip holds the puck lower in the jaws than sis2 does) -> open to RELEASE_GRIPPER_DEG -> up -> shoulder out, carry
+    via -> via -> nominal."""
+    pick = steps_from_plan(current_slide, start)
+    pick = pick[:[n for n, _, _ in pick].index('ascend') + 1]
+    m = TaskCommand.MANIPULATOR
+    via = via_pose()[:5]
+    over = teach.raw_to_target(PICK_DESCEND_FROM_RAW_DEG + [0.0])[:5]
+    mid = teach.raw_to_target(PICK_MID_RAW_DEG + [0.0])[:5]
+    # Release height: PICK_MID is the sis2 grasp + 20 mm, fine for a 45 mm grip. A shallower grip leaves the puck that
+    # much lower under the jaws, so the release goes up by the difference (toward the 40 mm over pose, joint blend).
+    a = yaml.safe_load(open(HERE / PLAN_FILE)).get('assume', {})
+    grip_mm = 1000 * a.get('puck_height', 0.06) * a.get('grasp_coverage', 0.75)
+    f = min(max((45.0 - grip_mm) / 20.0, 0.0), 1.0)
+    release = [m_ + (o_ - m_) * f for m_, o_ in zip(mid, teach.raw_to_target(PICK_DESCEND_FROM_RAW_DEG + [0.0])[:5])]
+    lift = pick[-1][2][-1]  # the ascend pose
+    # In: fold the wrist to the slot angle first (as sis1 load 1, TCP up to 501 mm), then straight over the slot
+    # (420 mm). Through the carry via instead the TCP rises to 570 mm (FK), past where a puck hit the gripper rest.
+    fold = lift[:3] + [over[3]] + lift[4:5]
+    s = [('bigbro 0: to the nominal via pose', m, via)]
+    pick = [(f'bigbro pick: {n}', k, a) for n, k, a in pick]
+    over_puck = [n for n, _, _ in pick].index('bigbro pick: move 2: shoulder above the puck') + 1
+    pick.insert(over_puck, ('bigbro check: gripper cam sees the puck lined up under the jaws', GRIPCHECK, None))
+    s += pick
+    s += [('bigbro 1: wrist_pitch folded to the slot angle first, the rest stays', m, fold),
+          (f'bigbro 2: clock to slot {BIGBRO_SLOT} (loading guide)', TaskCommand.CLOCK, BIGBRO_SLOT),
+          (f'bigbro 3: over clock slot {BIGBRO_SLOT} (sis2 over pose, 40 mm)', m, over),
+          (f'bigbro 4: down into the slot to sis2 grasp + {20 + 20 * f:.0f} mm (grip {grip_mm:.0f} mm)', m, release),
+          (f'bigbro 5: open gripper to {RELEASE_GRIPPER_DEG:g} deg (release in the slot)', TaskCommand.GRIPPER,
+           math.radians(RELEASE_GRIPPER_DEG)),
+          ('bigbro 6: up to 40 mm over the slot', m, over),
+          ('bigbro 7: to the carry via pose, shoulder out first', m, carry_via_path()),
+          ('bigbro 8: to the nominal via pose', m, via)]
+    if start is not None and home and '--no-home' not in sys.argv:  # --no-home: stay at the via pose, the next puck starts there
+        s.append(('bigbro 9: to the nominal pose', m, start))
+    return s
 
 class Runner(Node):
     def __init__(self):
@@ -645,13 +764,15 @@ def describe(kind, arg):
         return [round(v, 4) for v in arg[-1]] + ([f'{len(arg)} moves'] if len(arg) > 1 else [])
     if kind == TaskCommand.CLOCK:
         return f'slot {arg}'
+    if kind == GRIPCHECK:
+        return f'look, stop if > {GRIPCHECK_MM:g} mm off'
     if not isinstance(arg, bool):
         return f'open to {math.degrees(arg):.1f} deg'
     return 'close' if arg else 'open'
 
 
-# 'choi' or --auto anywhere on the command line (sis3 choi): no Enter between the steps.
-AUTO = 'choi' in sys.argv[1:] or '--auto' in sys.argv[1:]
+# auto, choi or --auto anywhere on the command line (dice 6 auto): no Enter between the steps.
+AUTO = any(a in sys.argv[1:] for a in ('auto', 'choi', '--auto'))
 
 
 # Arrival tolerance of a MANIPULATOR step (2026-11-07): moves to the (nominal) via pose need no precision, so they
@@ -720,10 +841,44 @@ def step_contact(name):
     return next((r for key, r in STEP_CONTACT.items() if key in name), 0.0)
 
 
-def step_seconds(name):
+def step_seconds(name, k=0):
     """Travel time [s] of a MANIPULATOR step (the first STEP_SECONDS key in its label), 0 = as fast as the caps
     allow."""
+    v = SLOW_SECONDS.get(name)
+    if v:  # one time per pose of the step (main move, then the slow final approach)
+        return v[min(k, len(v) - 1)]
     return next((s for key, s in STEP_SECONDS.items() if key in name), 0.0)
+
+
+def seconds_text(name):
+    v = SLOW_SECONDS.get(name)
+    return ' + '.join(f'{x:.1f}' for x in v) + ' s' if v else (f'{step_seconds(name):g} s' if step_seconds(name) else '')
+
+
+# Start check: the LM this far from the nominal pose means the arm was put down elsewhere (--lm-tol-mm N widens it
+# for one run, e.g. after a power cut left the carriage 10 mm off with its turn count read right).
+LM_START_TOL = float(sys.argv[sys.argv.index('--lm-tol-mm') + 1]) / 1000 if '--lm-tol-mm' in sys.argv else 0.010
+GRIPCHECK = 'gripcheck'   # pseudo step kind: gripper-cam look at the puck before going down (bigbro)
+GRIPCHECK_MM = 10.0       # stop when the puck sits further than this from the lined-up reference (camera x / y)
+GRIP_LOCATE = Path.home() / 'craft' / 'tools' / 'realsense_check' / 'grip_locate.py'
+
+
+def grip_check():
+    """One gripper-cam frame (tools/realsense_check/grip_locate.py) against its lined-up reference.
+    Returns (ok, reason). No reference or no camera: not ok, so nothing goes down blind."""
+    import re
+    import subprocess
+    r = subprocess.run(['/usr/bin/python3', str(GRIP_LOCATE), '--capture'], capture_output=True, text=True, timeout=60)
+    text = r.stdout + r.stderr
+    m = re.search(r'dx ([+-]\d+) dy ([+-]\d+) dz ([+-]\d+) mm', text)
+    line = next((l for l in text.splitlines() if 'camera x' in l or 'no puck' in l), text.strip()[-200:])
+    print('   ' + line)
+    if not m:
+        return False, 'gripper cam: no puck or no reference'
+    dx, dy = int(m.group(1)), int(m.group(2))
+    if max(abs(dx), abs(dy)) > GRIPCHECK_MM:
+        return False, f'gripper cam: puck {dx:+d} / {dy:+d} mm off the lined-up spot (limit {GRIPCHECK_MM:g})'
+    return True, f'gripper cam: puck {dx:+d} / {dy:+d} mm off, within {GRIPCHECK_MM:g}'
 
 
 def run_steps(node, steps):
@@ -738,13 +893,20 @@ def run_steps(node, steps):
             if answer == 'q':
                 return False
             auto = answer == 'bro'
-        for target in (arg if kind == TaskCommand.MANIPULATOR else [arg]):
+        if kind == GRIPCHECK:
+            ok, reason = grip_check()
+            print(f'   -> {"SUCCEEDED" if ok else "FAILED"} {reason}')
+            if not ok:
+                print('step did not succeed')
+                return False
+            continue
+        for k, target in enumerate(arg if kind == TaskCommand.MANIPULATOR else [arg]):
             gains = None
             if kind == TaskCommand.MANIPULATOR:
                 gains = step_i_gains(name)
                 if gains != I_GAINS_BASE:
                     print(f'   I gains {"/".join(map(str, gains))} (STEP_I_GAINS)')
-            status, reason = node.wait(node.send(kind, target, step_seconds(name), step_tolerance(name), gains,
+            status, reason = node.wait(node.send(kind, target, step_seconds(name, k), step_tolerance(name), gains,
                                                  step_contact(name) if kind == TaskCommand.MANIPULATOR else 0.0))
             if status != 'SUCCEEDED':
                 break
@@ -802,8 +964,10 @@ def main():
     dry = '--dry-run' in sys.argv
     lying = '--lying' in sys.argv
     dice = '--dice' in sys.argv
-    unload = '--unload' in sys.argv or dice  # both set their own way out and stop at their own end
-    make_steps = dice_steps if dice else unload_steps if unload else lying_steps_from_plan if lying else steps_from_plan
+    bigbro = '--bigbro' in sys.argv
+    unload = '--unload' in sys.argv or dice or bigbro  # these set their own way out and stop at their own end
+    make_steps = (bigbro_steps if bigbro else dice_steps if dice else unload_steps if unload
+                  else lying_steps_from_plan if lying else steps_from_plan)
     goto = sys.argv[sys.argv.index('--goto') + 1] if '--goto' in sys.argv else None
     if goto is not None:
         if goto not in ('nominal', 'via'):
@@ -812,7 +976,7 @@ def main():
                                  if goto == 'nominal' else out_to_via(nominal_pose()))
     steps = make_steps() if make_steps is steps_from_plan else stage(make_steps(), None)
     for name, kind, arg in steps:
-        print(f'  {name:45s}', describe(kind, arg), f'{step_seconds(name):g} s' if step_seconds(name) else '')
+        print(f'  {name:45s}', describe(kind, arg), seconds_text(name))
     if dry:
         return 0
     rclpy.init()
@@ -846,7 +1010,7 @@ def main():
         # Wherever it was put down, the first move takes it to the nominal pose; a joint 90 deg off (LM 10 mm)
         # means it was put down somewhere else entirely (e.g. tool_roll a half turn away).
         off = [f'{n} {(now[n] - t) * 1000:+.1f} mm' if n == 'slide_joint' else f'{n} {math.degrees(now[n] - t):+.1f} deg'
-               for n, t in zip(ARM, start) if abs(now[n] - t) > (0.010 if n == 'slide_joint' else math.radians(90.0))]
+               for n, t in zip(ARM, start) if abs(now[n] - t) > (LM_START_TOL if n == 'slide_joint' else math.radians(90.0))]
         if off:
             print(f'!! too far from the nominal pose ({", ".join(off)}): move it closer by hand; aborting'); return 1
         steps = make_steps(via_pose()[0], start)
@@ -856,15 +1020,44 @@ def main():
             elif all(abs(now[n] - v) < (0.001 if n == 'slide_joint' else math.radians(0.5))
                      for n, v in zip(ARM, via_pose())):
                 print('already at the via pose: the move out to it is skipped')
-                steps = [s for s in steps if not s[0].startswith(('sis2 1:', 'dice 0:'))]
+                steps = [s for s in steps if not s[0].startswith(('sis2 1:', 'dice 0:', 'bigbro 0:'))]
         elif goto == 'nominal':  # wrist_pitch before the elbow
-            steps = [wrist_first([now[n] for n in ARM], start, 'the nominal pose')] + steps
+            if not close_but_shoulder([now[n] for n in ARM], start):
+                steps = [wrist_first([now[n] for n in ARM], start, 'the nominal pose')] + steps
         else:  # from where it was put down: shoulder, elbow, wrist_pitch
             steps = out_to_via([now[n] for n in ARM])
         if make_steps is not steps_from_plan:  # sis1 sets its own move order
             steps = stage(steps, [slide] + [now[n] for n in ARM[1:]])
+        # Moves to / from the via and nominal pose: slow and eased (time-based), not at the speed caps (a 40 degree
+        # shoulder move at 69 deg/s dropped the arm, 2026-11-13, user). Same in --goto and every flow.
+        prev = [slide] + [now[n] for n in ARM[1:]]
+        new_steps = []
         for name, kind, arg in steps:
-            print(f'  {name:45s}', describe(kind, arg))
+            if kind != TaskCommand.MANIPULATOR:
+                new_steps.append((name, kind, arg)); continue
+            # Smooth, time-based: the way into the nominal pose (with the slow final approach) and every move to a via
+            # pose (one move each, no split): at the speed caps the via moves jerked the motors (user 2026-11-13).
+            # Work steps keep their STEP_SECONDS.
+            into_nominal = ('nominal pose' in name and 'via pose' not in name) or (
+                start is not None and all(abs(a - b) < 1e-6 for a, b in zip(arg[-1][:5], start[:5])))  # e.g. sis1 'back 3'
+            if not (into_nominal or 'via pose' in name):
+                prev = arg[-1]; new_steps.append((name, kind, arg)); continue
+            out, times = [], []
+            for j, q in enumerate(arg):
+                deg = max(abs(q[i] - prev[i]) for i in range(1, 5)) * 180 / math.pi
+                if into_nominal and j == len(arg) - 1 and deg > 2 * APPROACH_DEG:  # the last APPROACH_DEG of the farthest joint: own slow move
+                    f = APPROACH_DEG / deg
+                    out.append([q[i] - (q[i] - prev[i]) * f if i < len(prev) else q[i] for i in range(len(q))])
+                    times.append(max(GOTO_MIN_S, (deg - APPROACH_DEG) / GOTO_DEG_S))
+                    out.append(q); times.append(max(APPROACH_MIN_S, APPROACH_DEG / APPROACH_DEG_S))
+                else:
+                    out.append(q); times.append(max(GOTO_MIN_S, deg / (GOTO_DEG_S if into_nominal else VIA_DEG_S)))
+                prev = q
+            SLOW_SECONDS[name] = times
+            new_steps.append((name, kind, out))
+        steps = new_steps
+        for name, kind, arg in steps:
+            print(f'  {name:45s}', describe(kind, arg), seconds_text(name) if kind == TaskCommand.MANIPULATOR else '')
         if AUTO:
             print('\nAUTO (choi): every step runs without asking. Keep a hand on the 12 V power; Ctrl+C = STOP + hold.')
             for k in (3, 2, 1):
@@ -876,6 +1069,9 @@ def main():
                 go_home(node, start, lying)
             else:
                 print('sending STOP + hold'); node.stop()
+        if goto is not None:  # via / nom: done, control (and the board) keep holding the pose
+            print('done: control keeps holding the pose.')
+            return 0
         print('done. control keeps holding the last pose; Ctrl+C to exit this script.')
         while True:
             time.sleep(1)

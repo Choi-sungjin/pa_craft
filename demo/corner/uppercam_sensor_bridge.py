@@ -19,9 +19,10 @@ from std_msgs.msg import String
 import tf2_ros
 from uppercam_fast5_robust_estimator import Fast5RobustUppercamEstimator
 from uppercam_square_far20_estimator import SquareFar20Estimator
-from uppercam_geometry_pool import OrderedGeometryQueue,new_geometry_pool,warm_worker
-from uppercam_lidar_geometry import fit_box_face
-from uppercam_bridge_utils import (camera_box_in_map,acquisition_valid,planar_pose,
+from uppercam_geometry_pool import OrderedGeometryQueue,new_geometry_pool,WORKERS,warm_worker
+from uppercam_lidar_geometry import fit_box_face,observe_face_endpoints
+from uppercam_bridge_utils import (camera_box_in_map,acquisition_valid,planar_pose,box_grid,scale_intrinsics,
+                                   depth_align_nearest,depth_reproject,
                                    load_validated_square_manifest,square_observation_policy)
 
 def sec(stamp):return stamp.sec+stamp.nanosec*1e-9
@@ -58,6 +59,20 @@ class SensorBridge(Node):
   if not math.isfinite(self.camera_front_face_x) or self.camera_front_face_x<0 or not math.isfinite(self.camera_box_side) or self.camera_box_side<=0:raise ValueError('invalid camera reference geometry')
   self.diag=self.create_publisher(String,'/perception/uppercam/diagnostics',10)
   self.preview_pub=self.create_publisher(CompressedImage,'/perception/uppercam/image_raw/compressed',qos_profile_sensor_data)
+  def size(text,name):
+   try:w,h=(int(v) for v in str(text).lower().split('x'))
+   except ValueError:raise ValueError(f'{name} must be WxH, e.g. 848x480')
+   if not (0<w<=1920 and 0<h<=1080):raise ValueError(f'{name} out of range')
+   return w,h
+  self.depth_size=size(getattr(args,'depth_size','424x240'),'depth size');self.color_size=size(getattr(args,'color_size','640x360'),'color size')
+  # Box estimator input grid: its morphology counts pixels, so it stays at the validated 640x360 when the colour
+  # stream is raised for puck tags; --box-depth picks how the depth gets there (docs/todo/puck_perception.md).
+  self.box_size=size(getattr(args,'box_size',None) or '%dx%d'%self.color_size,'box size');box_grid(self.color_size,self.box_size)
+  self.box_depth=getattr(args,'box_depth','align_nearest')
+  if self.box_depth not in ('align_nearest','reproject'):raise ValueError('box depth must be align_nearest or reproject')
+  # Preview JPEG rate: 2 Hz for viewing; the traffic-light bag needs ~15 Hz (--preview-hz 15, 2026-11-11).
+  self.preview_period=1./float(getattr(args,'preview_hz',2.))
+  if not math.isfinite(self.preview_period) or not 1./30<=self.preview_period<=10.:raise ValueError('preview hz must be 0.1..30')
   self.preview_queue=queue.Queue(maxsize=1);self.preview_last_at=-float('inf');self.preview_published_at=-float('inf')
   self.preview_thread=threading.Thread(target=self.preview_worker,daemon=True);self.preview_thread.start()
   self.create_subscription(BoxObservationRequest,'/planning/box_observation_request',self.receive_request,
@@ -96,6 +111,7 @@ class SensorBridge(Node):
   m.header.stamp=(stamp_msg if stamp_msg is not None else Time(nanoseconds=max(0,int(stamp_s*1e9))).to_msg())
   m.request_id=req.request_id;m.source=req.source;m.valid=bool(result.get('valid',False))
   m.reason=str(result.get('reason',''));m.extrapolated=bool(result.get('extrapolated',False))
+  m.face_centre_observed=bool(result.get('face_centre_observed',False))
   m.gap_uncertainty_m=float(result.get('uncertainty_m',1.0))
   timeout=self.camera_timeout if req.source=='uppercam' else .20
   if not acquisition_valid(stamp_s,self.get_clock().now().nanoseconds*1e-9,sec(req.header.stamp),timeout):
@@ -152,17 +168,38 @@ class SensorBridge(Node):
     pts=np.column_stack((ranges[keep]*np.cos(a[keep]),ranges[keep]*np.sin(a[keep]),np.zeros(keep.sum())))
     pts=pts@quaternion_rotation(tf.rotation).T+np.array([tf.translation.x,tf.translation.y,tf.translation.z])
     p=req.expected_box.position;q=req.expected_box.orientation
-    fit=fit_box_face(pts[:,:2],(p.x,p.y,yaw(q)),planar_pose(base),side=req.box_side,front_face_x=req.front_face_x,laser_pose=planar_pose(tf))
+    # The face is looked for within 20 deg of the expected yaw; a box turned further (45 deg, 2026-11-10) is found
+    # with the yaw turned 40 deg either way (faces repeat every 90 deg, so these three cover every turn).
+    prior=(p.x,p.y,yaw(q))
+    for turn in (0.,math.radians(40),-math.radians(40)):
+     prior=(p.x,p.y,yaw(q)+turn)
+     fit=fit_box_face(pts[:,:2],prior,planar_pose(base),side=req.box_side,front_face_x=req.front_face_x,laser_pose=planar_pose(tf))
+     if fit is not None:break
     if fit is None:raise ValueError('no unambiguous LiDAR box face')
     centre=fit['box_center_map'];result=dict(valid=True,reason='lidar face fit',box_map=(*centre,fit['box_yaw']),
-       gap_m=fit['gap_m'],lateral_m=fit['lateral_m'],yaw_rad=fit['yaw_relative'],uncertainty_m=max(.010,fit['uncertainty_m']))
+       gap_m=fit['gap_m'],lateral_m=fit['lateral_m'],yaw_rad=fit['yaw_relative'],uncertainty_m=max(.010,fit['uncertainty_m']),
+       face_centre_observed=False)
+    # Both face ends in the raw beams: the box centre along the face measured, not the request's prior (2026-11-10).
+    ends=observe_face_endpoints(ranges,a,quaternion_rotation(tf.rotation),np.array([tf.translation.x,tf.translation.y,tf.translation.z]),
+       fit,prior,side=req.box_side,sensor_min=scan.range_min,sensor_max=scan.range_max)
+    # Seen obliquely (a turned box), the side face's start passes for a face end and the centre comes out cm off
+    # (2026-11-10: 29 deg, 6 cm): the ends count only with the face within 20 deg of facing the laser.
+    if ends['ok']:
+     n=np.array(fit['face_normal_map']);v=np.array([tf.translation.x,tf.translation.y])-np.array(ends['face_centre_map'])
+     if n@v<np.cos(np.radians(20.))*np.linalg.norm(v):ends=dict(ok=False,reason='face seen obliquely, ends not used')
+    if ends['ok']:
+     bx,by,heading=planar_pose(base);face=np.array(ends['face_centre_map'])
+     result.update(box_map=(*ends['box_center_map'],fit['box_yaw']),face_centre_observed=True,
+       lateral_m=float((face-np.array([bx,by]))@np.array([-math.sin(heading),math.cos(heading)])),
+       reason='lidar face fit, both face ends seen (width %.1f mm)'%(ends['width_m']*1000))
+    else:result['reason']='lidar face fit; centre: prior ('+ends['reason']+')'
     self.publish(req,stamp,result,stamp_msg=scan.header.stamp)
    except ValueError as e:self.publish(req,stamp,{'valid':False,'reason':str(e)},stamp_msg=scan.header.stamp)
  def offer_preview(self,colour,rs):
   try:
    if not self.preview_pub.get_subscription_count():return
    now=time.monotonic()
-   if now-self.preview_last_at<.5:return
+   if now-self.preview_last_at<self.preview_period:return
    domain=colour.get_frame_timestamp_domain();stamp=colour.get_timestamp()/1000.
    if domain not in (rs.timestamp_domain.global_time,rs.timestamp_domain.system_time):return
    if not acquisition_valid(stamp,self.get_clock().now().nanoseconds*1e-9,0.,self.camera_timeout):return
@@ -175,7 +212,7 @@ class SensorBridge(Node):
    try:stamp,frame=self.preview_queue.get(timeout=.1)
    except queue.Empty:continue
    try:
-    if time.monotonic()-self.preview_published_at<.5:continue
+    if time.monotonic()-self.preview_published_at<self.preview_period:continue
     ok,encoded=cv2.imencode('.jpg',frame,[int(cv2.IMWRITE_JPEG_QUALITY),80])
     if not ok or not self.preview_pub.get_subscription_count():continue
     if not acquisition_valid(stamp,self.get_clock().now().nanoseconds*1e-9,0.,self.camera_timeout):continue
@@ -223,8 +260,8 @@ class SensorBridge(Node):
        estimator=(SquareFar20Estimator(self.args.urdf,self.args.calibration) if self.estimator_kind=='square_far20'
                   else Fast5RobustUppercamEstimator(self.args.urdf,self.args.calibration))
       if self.estimator_kind=='square_far20' and pool is None:
-       pool=new_geometry_pool(self.args.urdf,self.args.calibration);ordered=OrderedGeometryQueue(pool,limit=2)
-       warm=[pool.submit(warm_worker) for _ in range(2)]
+       pool=new_geometry_pool(self.args.urdf,self.args.calibration);ordered=OrderedGeometryQueue(pool,limit=WORKERS)
+       warm=[pool.submit(warm_worker) for _ in range(WORKERS)]
        while not all(f.done() for f in warm) and not self.quit.is_set():self.quit.wait(.01)
        if self.quit.is_set():break
        if not all(f.result() for f in warm):raise RuntimeError('geometry worker initialization failed')
@@ -237,9 +274,18 @@ class SensorBridge(Node):
         global_options.append((sensor,sensor.get_option(rs.option.global_time_enabled)))
         sensor.set_option(rs.option.global_time_enabled,1.)
       pipe=rs.pipeline(ctx);cfg=rs.config();cfg.enable_device(self.args.serial)
-      cfg.enable_stream(rs.stream.depth,424,240,rs.format.z16,15)
-      cfg.enable_stream(rs.stream.color,640,360,rs.format.bgr8,15)
+      # Depth is aligned to colour, so the estimator's input grid is the colour size; a larger depth size only
+      # adds real detail to that grid (2026-11-11: --depth-size / --color-size, defaults = the validated 424x240 / 640x360).
+      cfg.enable_stream(rs.stream.depth,self.depth_size[0],self.depth_size[1],rs.format.z16,30)  # 30 fps (2026-11-10, was 15)
+      cfg.enable_stream(rs.stream.color,self.color_size[0],self.color_size[1],rs.format.bgr8,30)
       profile=pipe.start(cfg);scale=profile.get_device().first_depth_sensor().get_depth_scale();align=rs.align(rs.stream.color)
+      reproj=None
+      if self.box_depth=='reproject' and self.box_size!=self.color_size:
+       dp=profile.get_stream(rs.stream.depth).as_video_stream_profile();cp=profile.get_stream(rs.stream.color).as_video_stream_profile()
+       di,ci,ex=dp.get_intrinsics(),cp.get_intrinsics(),dp.get_extrinsics_to(cp)
+       Kd=np.array([[di.fx,0,di.ppx],[0,di.fy,di.ppy],[0,0,1.]]);Kc=np.array([[ci.fx,0,ci.ppx],[0,ci.fy,ci.ppy],[0,0,1.]])
+       sx,sy=box_grid(self.color_size,self.box_size)
+       reproj=(Kd,np.array(ex.rotation).reshape(3,3).T,np.array(ex.translation),scale_intrinsics(Kc,sx,sy))  # rotation is column-major
      try:collect()
      except Exception as e:
       recover_geometry(e);continue
@@ -253,10 +299,16 @@ class SensorBridge(Node):
       self.enqueue((None,time.time(),{'valid':False,'state':'unmapped_hardware_timestamp'},None));continue
      self.offer_preview(colour,rs)
      if ordered is not None and len(ordered.pending)>=ordered.limit:continue
-     aligned=align.process(frames);d=aligned.get_depth_frame();intr=aligned.get_color_frame().profile.as_video_stream_profile().intrinsics
      try:
-      K=np.array([[intr.fx,0,intr.ppx],[0,intr.fy,intr.ppy],[0,0,1.]])
-      frame=np.asanyarray(d.get_data())*scale;index=depth.get_frame_number()
+      index=depth.get_frame_number()
+      if reproj is not None:  # raw depth straight onto the box grid, no high-res align
+       K=reproj[3];frame=depth_reproject(np.asanyarray(depth.get_data())*scale,*reproj,self.box_size).astype(np.float64)
+      else:
+       aligned=align.process(frames);d=aligned.get_depth_frame();intr=aligned.get_color_frame().profile.as_video_stream_profile().intrinsics
+       K=np.array([[intr.fx,0,intr.ppx],[0,intr.fy,intr.ppy],[0,0,1.]])
+       frame=np.asanyarray(d.get_data())*scale
+       if self.box_size!=self.color_size:  # align_nearest: high-res aligned depth -> box grid
+        frame,K=depth_align_nearest(frame,K,self.box_size);frame=frame.astype(np.float64)
       if ordered is not None:
        ordered.submit(frame,K,(stamp,index))
       else:
@@ -399,6 +451,12 @@ def main():
  ap.add_argument('--camera-box-side',type=float,default=.205)
  ap.add_argument('--manifest',default=str(Path(__file__).with_name('uppercam_square_far20_validation_manifest.json')))
  ap.add_argument('--serial',default='261322075477');ap.add_argument('--scan-topic',default='/lidar/front/scan')
+ ap.add_argument('--depth-size',default='424x240',help='D435 depth stream WxH @30 (424x240 validated; 848x480, 1280x720)')
+ ap.add_argument('--color-size',default='640x360',help='D435 colour stream WxH @30 (preview JPEG and puck tags use it)')
+ ap.add_argument('--box-size',default=None,help='box estimator depth grid WxH, same aspect as colour (default = colour size; 640x360 validated)')
+ ap.add_argument('--box-depth',choices=['align_nearest','reproject'],default='align_nearest',
+                help='how depth reaches --box-size when colour is larger: align to colour then nearest down, or reproject raw depth')
+ ap.add_argument('--preview-hz',type=float,default=2.,help='/perception/uppercam/image_raw/compressed rate')
  ap.add_argument('--policy',default=str(Path(__file__).with_name('uppercam_sensor_policy.json')))
  args,ros=ap.parse_known_args();rclpy.init(args=ros);node=SensorBridge(args)
  try:rclpy.spin(node)

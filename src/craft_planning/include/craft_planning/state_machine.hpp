@@ -16,6 +16,8 @@ struct FsmInput {
   bool ready = false, healthy = true, feedback_fresh = true;
   bool compute_done = false, compute_ok = false, completed = false, stopped = false;
   std::string error;
+  // Per-step execution deadline, 0 = configured default. Only a long continuous tour overrides it.
+  double execution_timeout_s = 0;
 };
 struct FsmOutput { bool start_compute = false, send_command = false, stop = false; };
 class StateMachine {

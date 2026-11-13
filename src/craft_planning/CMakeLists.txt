@@ -21,7 +21,7 @@ find_package(Threads REQUIRED)
 
 add_library(planning_modules
   src/state_machine.cpp src/path_planner.cpp src/arm_planner.cpp src/planning_config.cpp src/grasp_region.cpp
-  src/dice_demo.cpp)
+  src/dice_demo.cpp src/mission_logic.cpp src/mission_fsm.cpp)
 target_compile_features(planning_modules PUBLIC cxx_std_17)
 target_compile_options(planning_modules PRIVATE -Wall -Wextra -Wpedantic)
 target_include_directories(planning_modules PUBLIC
@@ -43,7 +43,12 @@ add_executable(dice_demo src/dice_demo_main.cpp)
 target_compile_features(dice_demo PRIVATE cxx_std_17)
 target_compile_options(dice_demo PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(dice_demo PRIVATE planning_modules ament_index_cpp::ament_index_cpp)
-install(TARGETS planning_modules planning_master dice_demo
+add_executable(mission_master src/mission_master.cpp)
+target_compile_features(mission_master PRIVATE cxx_std_17)
+target_compile_options(mission_master PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(mission_master PRIVATE planning_modules
+  craft_perception::craft_perception__rosidl_typesupport_cpp ${std_msgs_TARGETS})
+install(TARGETS planning_modules planning_master dice_demo mission_master
   ARCHIVE DESTINATION lib LIBRARY DESTINATION lib RUNTIME DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)
 install(FILES v75_ws/src/v75_robot_description/urdf/v75_robot.urdf
@@ -64,7 +69,7 @@ install(FILES README.md IMPLEMENTATION.md DESTINATION share/${PROJECT_NAME})
 if(BUILD_TESTING)
   find_package(ament_cmake_pytest REQUIRED)
   find_package(ament_cmake_gtest REQUIRED)
-  foreach(module state_machine path_planner_cpp arm_planner planning_config grasp_region dice_demo)
+  foreach(module state_machine path_planner_cpp arm_planner planning_config grasp_region dice_demo mission_logic mission_fsm)
     ament_add_gtest(test_${module} test/test_${module}.cpp)
     target_link_libraries(test_${module} planning_modules)
     target_compile_definitions(test_${module} PRIVATE
@@ -72,6 +77,9 @@ if(BUILD_TESTING)
       CRAFT_PLANNING_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
   endforeach()
   target_link_libraries(test_path_planner_cpp PNG::PNG yaml-cpp)
+  # Offline look at a route through via points on a real map (test/route_check.cpp); not installed.
+  add_executable(route_check test/route_check.cpp)
+  target_link_libraries(route_check planning_modules)
   ament_add_pytest_test(test_path_planner test/test_path_planner.py
     APPEND_ENV PYTHONPATH=${CMAKE_INSTALL_PREFIX}/${PYTHON_INSTALL_DIR})
   ament_add_pytest_test(test_box_detector test/test_box_detector.py

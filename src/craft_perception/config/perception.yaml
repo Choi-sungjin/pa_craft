@@ -7,6 +7,25 @@ perception_master:
     # /odometry/local (localization:=slam) or ekf_global's /odometry/global in map (localization:=ekf).
     odometry_source_topic: /odometry/local
     map_frame: map  # source already in map is relayed; other frames are moved here via TF
+    # /perception/state/odom follows slam_toolbox's map->odom at a bounded rate instead of taking each correction at
+    # once (user, 2026-11-10): the corrections moved the map pose 4-20 mm sideways about twice a second and up to
+    # 1.4 deg (noboxes_1110_1943), and Pure Pursuit turned on each (w = 2 v y / L^2: heading swinging 4 deg at the
+    # stage point, 2 deg while driving). The robot's map pose moves toward the corrected one at most speed / yaw_rate;
+    # further off than snap (start, relocalization) it is taken at once. speed: 0 = off (every correction at once).
+    # Obstacles and the box observation still use the TF's map->odom (up to the lag apart, cm, gone standing still).
+    map_correction:
+      speed: 0.02         # [m/s]
+      # 0.3 (2026-11-11, was 2.0; not driven yet): over a tour lap (2600-3000 deg of turning) slam_toolbox's yaw moved
+      # +-1.7 deg against the IMU yaw from place to place, in steps of 0.3 deg (95 %: 1.5) about 3 times a second, while
+      # the gyro explains 7-11 % of that (scale within 0.5 %, 0.1-0.3 deg/min). At 2 deg/s every step went straight into
+      # the pose Pure Pursuit steers by; 0.3 deg/s is still 60 times the gyro drift. Back to 2.0 if the heading lags.
+      yaw_rate_deg: 2.0   # [deg/s]
+      snap_m: 0.15        # [m]
+      snap_deg: 10.0      # [deg]
+      # Standing still (the EKF's speed and yaw rate below these) the correction is taken at once: nothing steers by
+      # the pose then, and the box measured at the stage point must be in the same map pose as the robot.
+      still_speed: 0.005        # [m/s]
+      still_yaw_rate_deg: 0.5   # [deg/s]
     tag_registry_file: config/tag_registry.yaml
 
     # imu_processor: both chassis-fixed OpenCR IMUs (raw, /control/imu/{wheel_clock,lm_arm}) ->
@@ -88,31 +107,80 @@ perception_master:
         turn_rate: 0.2             # [rad/s] above: turning (scale segments)
         min_bias_segment_s: 2.0
 
+    # Gripper D435 (serial in craft_sensors camera.yaml): realsense_processor -> shared memory.
     d435:
       frame: camera_color_optical_frame
       shm: /craft_vision
-      yolo:  # one inference per frame, shared by knob_depth / object_detector / obstacle_detector
+      yolo:  # one inference per frame, shared by object_detector / obstacle_detector
         model_dir: models/knob_sign_v4  # relative to installed craft_perception share
-        backend: ncnn  # ncnn (laptop/CPU) | tensorrt (Jetson; build with TensorRT)
+        backend: tensorrt  # Jetson GPU (2026-11-12, all camera models); a build without TensorRT falls back to ncnn
         engine: models/knob_sign_v4/model.engine  # tensorrt only: built on the Jetson with trtexec
         ncnn_blobs: [in0, out0]
         tensorrt_blobs: [images, output0]  # Ultralytics ONNX names
         input_size: 640
         # Must match exported metadata.yaml exactly. Current custom_yolo26 v3 model.
         class_names: [knob, sign_red, sign_yellow, sign_green, sign_off]
-        knob_class_id: 0
         confidence: 0.5
         nms_iou: 0.45
         max_detections: 100
         ncnn_threads: 1
       apriltag_family: tag36h11  # tag16h5 | tag25h9 | tag36h10 | tag36h11; independent of YOLO
-      knob_depth: {grow: 2.0, tolerance_m: 0.03, min_points: 50}
       object_detector: {inner_fraction: 0.5}  # median depth of the box center part
       obstacle_detector:
         class_ids: [1, 2, 3, 4]  # YOLO classes treated as obstacles (traffic sign stands)
         max_range_m: 1.5
         near_quantile: 0.1       # nearest-surface depth of the box
-      puck_axis:  # Registry puck-tag ROI + depth
+      # Puck survey (발제 04): which puck (AprilTag id 0..11) has which color/shape, for the placement puzzle.
+      # Its own YOLO on the same shared-memory frame as d435.yolo. Cuboids carry a tag on every face,
+      # cylinders only on the two end faces. Reset: /perception/puck_survey/reset (std_msgs/Empty).
+      puck_survey:
+        yolo:
+          model_dir: models/pucks_v8b  # perception-v2 package pucks_v8b (provenance.json)
+          backend: tensorrt  # Jetson GPU; engine = trtexec --onnx=model.onnx --saveEngine=model.engine --fp16 on the Jetson
+          engine: models/pucks_v8b/model.engine
+          ncnn_blobs: [in0, out0]
+          tensorrt_blobs: [images, output0]
+          input_size: 640
+          class_names: [red_cylinder, red_prism, green_cylinder, green_prism]
+          confidence: 0.25
+          nms_iou: 0.45
+          max_detections: 100
+          ncnn_threads: 1
+        red_cylinder_class_id: 0
+        red_prism_class_id: 1
+        green_cylinder_class_id: 2
+        green_prism_class_id: 3
+        min_score: 0.4  # package default --conf 0.4
+        tag_roi_grow: 1.4     # tags searched only inside each puck box grown by this (CPU: 0.36 vs 12.1 ms/frame full)
+        tag_roi_upscale: 3    # crop upscale before detection; 1080p 2026-11-12: x3 reads the oblique side tags (green prism 1 -> 1.8 tags/box)
+        shape_rule:           # traffic_light.hpp PuckShapeRule: >= 2 tags in a box, or 1 face-on tag on a long box -> cuboid
+          enabled: true
+          red_only: true               # patch for red prism vs red cylinder only; green keeps YOLO
+          face_on_side_ratio: 0.85     # no depth: tag quad shortest/longest side
+          face_on_skew_deg: 10.0       # no depth: tag corner angles within 90 +- this
+          face_on_max_angle_deg: 20.0  # with depth: tag normal vs line of sight
+          side_face_aspect: 1.6        # YOLO box long/short side of a cuboid's 30x60 face
+      puck_axis:  # Registry puck tags -> axis
+        # tag: AprilTag faces only (PuckTagAxis, no depth). donut: tag ROI + depth shelf plane (PuckAxis, below).
+        method: tag
+        tag:
+          tag_size_m: 0.016       # printed tag side (black border), 16x16 mm
+          length_m: 0.060         # 30x30x60 cuboid / Ø30x60 cylinder
+          width_m: 0.030
+          up_optical: [0.0, -0.7234, -0.6904]  # world up in camera_top_color_optical_frame (URDF: 43.6 deg down)
+          standing_max_tilt_deg: 45.0
+          max_fit_error_deg: 15.0   # worst angle between tags of one puck (axis lines, 90 deg between faces)
+          max_center_spread_m: 0.008      # tags' back-projected puck centers agree within this (tags turned at random: face assignment by position)
+          center_spread_per_m: 0.02       # or this x distance if larger (2026-11-12 bag: true standing reading 8.5 mm at 0.78 m)
+          center_weight_deg_per_mm: 2.0   # cost of that spread
+          box_iou_weight_deg: 60.0      # with a YOLO puck box: cost per (1 - IoU); 60 (was 30) so the box settles standing vs lying
+          min_box_iou: 0.6              # answers projecting below this IoU are dropped (2026-11-12: true 0.90-0.95, wrong 0.43-0.65)
+          box_border_px: 3.0            # boxes this close to the image edge may be cut: no IoU term
+          ambiguity_margin_deg: 5.0 # another axis within this cost -> axis_valid false
+          max_reprojection_px: 2.0
+          max_tags: 4
+          shelf_prior_weight: 1.0   # cost/deg the axis is off both up and level (lone-tag IPPE flip tie-break)
+        # donut method only:
         tag_box_scale: 2.0  # puck diameter / printed tag side; calibrate on hardware
         grow: 2.0
         plane_threshold_m: 0.004
@@ -124,29 +192,102 @@ perception_master:
         min_points: 30
         ransac_iterations: 100
 
-    c310:
-      frame: c310_optical_frame
-      shm: /craft_c310
-      yolo:  # knob_lever runs its own instance on the C310 image
-        model_dir: models/knob_sign_v4
-        backend: ncnn  # ncnn (laptop/CPU) | tensorrt (Jetson; build with TensorRT)
-        engine: models/knob_sign_v4/model.engine  # tensorrt only: built on the Jetson with trtexec
+    # Upper cam (어퍼캠 D435): not on shared memory; demo/corner/run_uppercam_bridge.sh publishes its JPEG
+    # frames (--preview-hz 15). Used by the traffic_light task only.
+    uppercam:
+      frame: camera_top_color_optical_frame
+      # Upper-cam D435 (261322075477) colour intrinsics at 1920x1080 (res_record.py meta, 2026-11-12); scaled to the
+      # JPEG size for the puck-survey axis (the bridge publishes no camera_info).
+      intrinsics_1920x1080: [1362.574, 1361.790, 965.518, 583.265]
+      image_topic: /perception/uppercam/image_raw/compressed
+      yolo:  # own instance, loaded only when schedule.traffic_light is enabled
+        model_dir: models/knob_sign_v4  # signal v4 (custom_yolo26/weights/v4.pt), same model as d435.yolo
+        backend: tensorrt  # Jetson GPU (2026-11-12: ncnn CPU took ~200 ms a frame -> 5 Hz, half the 10 Hz frames dropped; engine 4 ms)
+        engine: models/knob_sign_v4/model.engine
         ncnn_blobs: [in0, out0]
-        tensorrt_blobs: [images, output0]  # Ultralytics ONNX names
+        tensorrt_blobs: [images, output0]
         input_size: 640
         class_names: [knob, sign_red, sign_yellow, sign_green, sign_off]
-        knob_class_id: 0
-        confidence: 0.5
+        confidence: 0.25  # traffic_light.min_score decides; lower boxes still go to the detections topic
         nms_iou: 0.45
         max_detections: 100
         ncnn_threads: 1
-      knob_lever:
-        # hsv: red + Otsu brightness heuristic (current knob_sign detect model).
-        # yolo_seg: lever mask from a seg model; set c310.yolo to it, with a third blob for the
-        #   prototype masks (ncnn_blobs: [in0, out0, out1], tensorrt_blobs: [images, output0, output1])
-        #   and a lever class in class_names.
-        lever_source: hsv
-        lever_class_id: 5  # yolo_seg only: index of the lever class in c310.yolo.class_names
+      # Traffic light (발제 04): 12 blinks, 1 s on / 1 s off (sign_off ignored). A blink counts only if lit
+      # >= min_on_s and its majority color >= min_vote_ratio of its lit frames; dropouts shorter than
+      # max_gap_s are bridged. Bag 2026-11-11 (traffic_light_1111_1152, ~9 Hz): 12/12, lit 0.77-0.94 s,
+      # lowest lit score 0.60. Reset: /perception/traffic_light/reset (std_msgs/Empty).
+      traffic_light:
+        red_class_id: 1     # sign_red
+        yellow_class_id: 2  # sign_yellow
+        green_class_id: 3   # sign_green
+        min_score: 0.5
+        yellow_min_score: 0.75
+        min_on_s: 0.6       # [s]
+        max_on_s: 1.6       # [s] longer = merged blinks / stuck light
+        max_gap_s: 0.4      # [s] < 1 s OFF phase
+        min_vote_ratio: 0.6
+        expected_blinks: 12
+        end_off_s: 2.8      # [s] dark this long = sequence over (rule: 3 s). Not 12 valid blinks then: discard, recount next cycle
+        # How a frame's lit color is decided; both kept, pick one (2026-11-12):
+        #   yolo:   the YOLO class (min_score / yellow_min_score above). Unlit tower seen as sign_yellow = false blinks.
+        #   pixels: YOLO only locates the tower (any sign class incl. off_class_id, >= locate_min_score). The white cap
+        #           (top cap_fraction of the box) is left out; lit = clipped white core >= on_fraction of the rest; the
+        #           color is where that core sits along the tower (top red, middle yellow, bottom green). An unlit tower
+        #           never counts. From the perception-v2 package tower_state(), re-tuned on our upper cam below.
+        # Our upper cam, 7 bags 2026-11-11 (v4 colors >= 0.5 as truth), cap left out: core share unlit p95 0.027 /
+        # lit 0.18-0.47; core position R 0.36-0.40, Y 0.58-0.63, G 0.80-0.85 (no overlap; ring hue R 13-15 and
+        # Y 11-21 overlap, so hue is off). With the cap in: unlit 0.03-0.13, positions overlapping.
+        color_source: pixels  # 2026-11-12: yolo (yellow 0.75) missed yellow in 2 of 7 bags; pixels 7/7
+        off_class_id: 4        # sign_off
+        locate_min_score: 0.3
+        pixels:
+          cap_fraction: 0.2    # top of the box left out: the white cap (unlit cap bottom p50 0.18, p95 0.20)
+          bright_v: 235        # V of the clipped lamp core
+          on_fraction: 0.10    # core share (below the cap) to be lit: unlit p95 0.027, lit min 0.18
+          use_ring_hue: false  # color by core position only
+          red_cut: 0.49        # core position along the whole box (0 = top): red above (0.36-0.40)
+          yellow_cut: 0.72     # yellow above (0.58-0.63), green below (0.80-0.85)
+          red_by_position: true      # use_ring_hue true only:
+          ring_fraction: 0.06        #   ring width / tower height
+          ring_min_saturation: 80
+          ring_min_pixels: 10
+          green_hue_min: 21.5        #   OpenCV hue 0..179 (package 45; our green 23-40)
+          green_hue_max: 100.0
+          red_hue_below: 0.0
+          red_hue_from: 179.0
+          yellow_hue_max: 21.5
+          upright_ratio: 1.3   # box height >= this x width = upright tower, else glow-hue vote
+      # Puck survey on the same upper-cam frames (schedule.uppercam_puck), only once traffic_light is complete:
+      # signal model until the 12 blinks, this puck model after. Both load at start, so no restart; a
+      # traffic_light reset goes back to the signal model. Pucks and the light are never in view together.
+      # Results join the D435 puck survey (/perception/vision/d435/puck_survey).
+      puck_survey:
+        yolo:
+          model_dir: models/pucks_v8n_v2  # YOLOv8n on pucks-only-v2 (provenance.json); same classes/output as pucks_v8b
+          backend: tensorrt  # Jetson GPU
+          engine: models/pucks_v8n_v2/model.engine
+          ncnn_blobs: [in0, out0]
+          tensorrt_blobs: [images, output0]
+          input_size: 640
+          class_names: [red_cylinder, red_prism, green_cylinder, green_prism]
+          confidence: 0.25
+          nms_iou: 0.45
+          max_detections: 100
+          ncnn_threads: 1
+        red_cylinder_class_id: 0
+        red_prism_class_id: 1
+        green_cylinder_class_id: 2
+        green_prism_class_id: 3
+        min_score: 0.4
+        tag_roi_grow: 1.4     # tags searched only inside each puck box grown by this (CPU: 0.36 vs 12.1 ms/frame full)
+        tag_roi_upscale: 3    # crop upscale before detection; 1080p 2026-11-12: x3 reads the oblique side tags (green prism 1 -> 1.8 tags/box)
+        shape_rule:           # traffic_light.hpp PuckShapeRule: >= 2 tags in a box, or 1 face-on tag on a long box -> cuboid
+          enabled: true
+          red_only: true               # patch for red prism vs red cylinder only; green keeps YOLO
+          face_on_side_ratio: 0.85     # no depth: tag quad shortest/longest side
+          face_on_skew_deg: 10.0       # no depth: tag corner angles within 90 +- this
+          face_on_max_angle_deg: 20.0  # with depth: tag normal vs line of sight
+          side_face_aspect: 1.6        # YOLO box long/short side of a cuboid's 30x60 face
 
     # LiDAR odometry (ScanOdometry, scan_relocalizer's matcher): each /lidar/merged scan is matched to a
     # keyframe scan around the prediction (IMU turn + last LiDAR speed; never the wheels, which slip) ->
@@ -181,6 +322,19 @@ perception_master:
       bins: 720
       range_max: 8.0
       max_age: 0.2  # maximum front/rear timestamp difference [s]
+      # Motion compensation of the merge (2026-11-12, not driven yet): every beam is moved to where the robot of one
+      # moment would have seen it, with the wheel speed and the IMU yaw rate. A sweep takes 0.1 s and the rear sweep is
+      # up to max_age apart from the front one: at the 0.6 rad/s of a turn on the spot the scan was bent 3.4 deg within
+      # a sweep and up to 6.9 deg between the two (simulated: walls 2-7 cm off on average, 0.4 cm with this).
+      # false = beams laid down as measured (as before).
+      motion_compensation: true
+      # The scan stamp is the end of the sweep and index 0 its last beam (coin_d4 driver, reverse: false). Measured from
+      # tour bags: the left part of each LiDAR's half is 42-47 ms after (front) / before (rear) its right part in a
+      # turn = beams run counter-clockwise in base_link. A sweep the other way: false.
+      first_beam_latest: true
+      # The scan is made for the robot pose this long before its stamp: the TF pose looked up at the scan stamp (slam,
+      # obstacle filter) is that much older, ekf.yaml transform_time_offset. Keep the two equal.
+      pose_time_offset: 0.05  # [s]
       # Each LiDAR keeps +-90 deg around its outward axis (front +x, rear -x); out of it nothing is kept
       # (fov_near_m above range_max). Upside-down LiDARs low under the chassis see under it to the far
       # end and hit the floor ~20 cm inward. Same as lidar_processor.launch.py (2026-10-31; was 200 / 0.30).
@@ -199,17 +353,42 @@ perception_master:
       # clear = that angle - 5 deg, bins = 1st percentile floor range - 0.15 m. Cross-validated between the bags:
       # removes ~75-90 % of floor points on an unseen bag, keeps 80-97 % of map-wall points (53-91 % at 55-90 deg).
       # Flat-floor fit (floor_cal_0034): beams dip (cone 0.6 deg), mounts 1.65 deg outward up, 0.1-0.2 deg roll.
+      # 2026-11-10: every max_range_m cut to 80 % of the 11-01 table (noboxes_1110_2105: inside the stepped bins 74 %
+      # of floor hits removed vs 35 %, ~90 % of the newly cut points are floor; below 70 % walls go faster than floor).
       floor_roi:
         enabled: true
         step_deg: 5.0
         front_left_clear_deg: 70.0
-        front_left_max_range_m: [0.48, 0.83, 0.88, 0.62]
+        front_left_max_range_m: [0.38, 0.66, 0.70, 0.50]  # 80 % of [0.48, 0.83, 0.88, 0.62]
         front_right_clear_deg: 60.0
-        front_right_max_range_m: [1.32, 1.32, 1.35, 0.76, 0.68, 0.48]
+        front_right_max_range_m: [1.06, 1.06, 1.08, 0.61, 0.54, 0.38]  # 80 % of [1.32, 1.32, 1.35, 0.76, 0.68, 0.48]
         rear_left_clear_deg: 65.0
-        rear_left_max_range_m: [0.70, 0.71, 0.56, 0.48, 0.45]
+        rear_left_max_range_m: [0.56, 0.57, 0.45, 0.38, 0.36]  # 80 % of [0.70, 0.71, 0.56, 0.48, 0.45]
         rear_right_clear_deg: 50.0
-        rear_right_max_range_m: [0.73, 0.60, 0.55, 0.58, 0.57, 0.50, 0.52, 0.46]
+        rear_right_max_range_m: [0.58, 0.48, 0.44, 0.46, 0.46, 0.40, 0.42, 0.37]  # 80 % of [0.73, 0.60, 0.55, 0.58, 0.57, 0.50, 0.52, 0.46]
+
+    # /lidar/localization (slam.yaml scan_topic): /lidar/merged without the beams ending within box_radius of an arena
+    # box centre (/planning/boxes: the planning.yaml places, the target box where the LiDAR measured it). The boxes are
+    # erased from the pose graph; their points (12-17 % of a scan) pulled the localization 65 mm in front of one
+    # (2026-11-11). Box half diagonal 0.145 m + room for a moved or turned box.
+    localization_scan:
+      box_radius: 0.30  # [m]
+      # No scan to slam_toolbox while the wheel odometry turns faster than max_yaw_rate_deg, and turn_hold_s after it
+      # (2026-11-12, not driven yet): the merged scan is not corrected for the turn during its sweeps (3.4 deg within
+      # one, up to 6.9 deg between front and rear at 0.6 rad/s) and slam_toolbox jumped 3-6 deg on them: 8.4 times a
+      # minute within 1 s of turning over 30 deg/s, 2.9 at 5-15 deg/s, 0.8 when not turning (tour bags). 10 deg/s bends
+      # a scan 1 deg. turn_hold_s: one sweep (0.1 s) + lidar.max_age (0.2 s). 0 deg/s = off (every scan, as before).
+      max_yaw_rate_deg: 0.0   # [deg/s] off since 2026-11-12 (was 10.0: 3 laps, SLAM jumps 3.5 -> 2.8 a minute only, more pose moves after stops); the merge corrects the turn now (lidar.motion_compensation)
+      turn_hold_s: 0.3        # [s] (also after the tilt below)
+      # Nor while the chassis rocks on the bumpy floor (2026-11-13): wheel board IMU roll or pitch rate over this.
+      # Bags mission_1113_1005/1042: driving p90 2.7 deg/s, bumps up to 50 deg/s; over 8 deg/s ~1-3 % of the time.
+      # 0 = off.
+      max_tilt_rate_deg: 8.0  # [deg/s]
+      # Nor while standing tilted on a slope over this from level (wheel board gravity direction). Mapping only:
+      # craft.launch.py mapping_tilt_deg (slamper: 1.2) sets it; 0 = off, as for localization, where a 1-2 deg tilt
+      # changes the wall ranges ~0.05 % and the pose needs every scan (2026-11-13, user). Bag mission_1113_1042:
+      # 1.0-1.7 deg on the start zone and in the S2 lane, where the old map had a doubled east wall.
+      max_slope_deg: 0.0      # [deg]
 
     # LidarPerception -> /lidar/merged + /perception/lidar/obstacle (PoseArray; map frame once the filter has map TF,
     # else the scan frame).
@@ -218,6 +397,13 @@ perception_master:
       max_range_m: 3.0
       stride: 1
       odom_frame: odom  # obstacles at the scan stamp: odom->base_link then, map->odom latest (filter_obstacles)
+      # A hard stop pitches the chassis and the LiDAR plane sweeps the floor (user, 2026-11-10): around a deceleration over
+      # brake_decel [m/s^2] (wheel odometry over brake_window_s), the scans from brake_before_s before to brake_after_s
+      # after it make no obstacles: the filter goes back to before them and the obstacles of then go out again.
+      brake_decel: 0.6      # [m/s^2]
+      brake_window_s: 0.1   # [s]
+      brake_before_s: 0.3   # [s]
+      brake_after_s: 0.3    # [s]
       # Raw points (one per beam) -> points worth avoiding, judged in the map frame (2026-11-01: one noise point
       # or a map wall seen 4 cm off made planning replan). Without map TF the raw points go out.
       filter:
@@ -226,7 +412,7 @@ perception_master:
         cell_m: 0.05
         persist_frames: 3        # the cell (or neighbor_cells around it) seen in this many frames in a row
         neighbor_cells: 2        # 2 x 5 cm per frame at 10 Hz: movers up to ~1 m/s still persist
-        min_cluster_points: 3    # 8-connected kept cells with fewer points this frame are dropped
+        min_cluster_points: 4    # 8-connected kept cells with fewer points this frame are dropped (3 -> 4, 2026-11-10)
         # A kept cell stays an obstacle out of view (past the FOV, or in the floor cut beside the chassis) until the
         # scan's rays pass through it in persist_frames frames in a row, this long after it was last kept, or a new
         # drive starts (planning EXECUTE of a new Navigate task; 2026-11-08: the robot drove into a box it had stopped
@@ -238,10 +424,11 @@ perception_master:
     schedule:
       d435_yolo: {enabled: true}
       apriltag: {enabled: true}
-      knob_depth: {enabled: true}
       object_detector: {enabled: true}
       obstacle_detector: {enabled: true}
       puck_axis: {enabled: true}
-      knob_lever: {enabled: true}
+      traffic_light: {enabled: true}
+      puck_survey: {enabled: true}
+      uppercam_puck: {enabled: true}
       lidar_obstacle: {enabled: true}
       state_estimator: {enabled: true}

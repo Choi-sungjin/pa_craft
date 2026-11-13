@@ -16,8 +16,8 @@
 
 | 항목 | 값 |
 |---|---|
-| 로봇 컴퓨터 | Jetson, Ubuntu 24.04, ROS 2 Lyrical, Fast DDS, `ROS_DOMAIN_ID` 0, Wi-Fi `10.2.17.163` |
-| 노트북 RViz | `export ROS_DOMAIN_ID=0 ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET ROS_STATIC_PEERS=10.2.17.163` 후 `rviz2 -d ~/craft_slam.rviz` (`src/craft_bringup/rviz/slam.rviz`, LiDAR만 볼 땐 `lidar_check.rviz`) |
+| 로봇 컴퓨터 | Jetson, Ubuntu 24.04, ROS 2 Lyrical, Fast DDS, `ROS_DOMAIN_ID` 61 (~/.bashrc), Wi-Fi `10.2.17.163` |
+| 노트북 RViz | `export ROS_DOMAIN_ID=61 ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET ROS_STATIC_PEERS=10.2.17.163` 후 `rviz2 -d ~/craft_slam.rviz` (`src/craft_bringup/rviz/slam.rviz`, LiDAR만 볼 땐 `lidar_check.rviz`) |
 | USB hub `1-2.3` | 앞 LiDAR `1-2.3.4`, 뒤 LiDAR `1-2.3.1`, 바퀴 OpenCR `1-2.3.2`, 팔 OpenCR `1-2.3.3`. udev 규칙 `src/lidar_processor/udev/99-craft-lidar-jetson.rules` (적용됨) |
 | 차체 | 축 간격 0.16 m, 좌우 0.289 m, 바퀴 반지름 0.033 m(순정), base_link = 앞뒤 축 가운데 |
 | LiDAR (LDS-03 ×2) | **업사이드다운** 장착, 바깥쪽으로 약 6° 들림. TF: 앞 (x 0.155, yaw 180°, roll 180°), 뒤 (x −0.1295, yaw 0°, roll 180°), y 0, z 0.021. 스캔 0°가 로봇 안쪽을 향함. 두 LiDAR 가운데 `body_center_x` 0.01275. 병합 FOV 각 180°(바깥쪽 ±90°), `fov_near_m` 10 |

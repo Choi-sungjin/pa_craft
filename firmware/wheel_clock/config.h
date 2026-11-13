@@ -7,6 +7,7 @@
 // Confirm calibration before enabling torque.
 constexpr bool kHardwareConfirmed = true;
 constexpr uint32_t kDxlBaud = 1000000;
+constexpr double kCurrentAPerTick = 0.00269;  // XM430 PRESENT_CURRENT unit: the D line peak currents
 constexpr double kPositionTickRad = craft::kTwoPi / 4096.0;
 constexpr double kVelocityTickRadS = 0.229 * craft::kTwoPi / 60.0;
 

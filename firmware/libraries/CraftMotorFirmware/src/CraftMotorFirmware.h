@@ -11,6 +11,7 @@ constexpr double kTwoPi = 6.2831853071795864769;
 constexpr uint32_t kPeriodMs = 20;
 constexpr uint32_t kCommandTimeoutMs = 250;
 constexpr uint32_t kIoTimeoutMs = 3;
+constexpr unsigned kMaxLostReplies = 3;  // ticks in a row without a motor answer before the fault latches
 constexpr unsigned kDiagTicks = 50;
 // Time-based profile (DRIVE_MODE bit 2): PROFILE_VELOCITY is the travel time [ms] and PROFILE_ACCELERATION the
 // ramp time [ms]; every time-based axis of one command gets the same time, so they start and arrive together.
@@ -184,13 +185,22 @@ public:
     if (static_cast<uint32_t>(now - last_tick_ms_) < kPeriodMs) return;
     last_tick_ms_ = now;
     if (!fault_) {
-      if (!readFeedback()) {
+      const bool read_ok = readFeedback();
+      // A lost status packet (no answer, bad checksum) skips this tick: the motors keep their last goals and the host
+      // its last feedback. Only kMaxLostReplies ticks in a row latch the fault (2026-11-13: one lost reply of motor 1
+      // in ~380k reads stopped the robot mid-mission). A hardware error / rebooted motor still latches at once.
+      if (!read_ok && fault_reason_ == kFaultNoResponse && ++lost_replies_ < kMaxLostReplies) {
+        fault_reason_ = kFaultNone;
+      } else if (!read_ok) {
         tripFault();
-      } else if (!relaxed_) {
-        // Hold is captured once at timeout; no drift-following hold on later ticks.
-        expired_ = commandExpired(millis(), last_command_ms_, received_, kCommandTimeoutMs);
-        if (expired_ && !holding_) { holdTargets(); holding_ = true; }
-        if (!writeTargets()) tripFault();
+      } else {
+        lost_replies_ = 0;
+        if (!relaxed_) {
+          // Hold is captured once at timeout; no drift-following hold on later ticks.
+          expired_ = commandExpired(millis(), last_command_ms_, received_, kCommandTimeoutMs);
+          if (expired_ && !holding_) { holdTargets(); holding_ = true; }
+          if (!writeTargets()) tripFault();
+        }
       }
     }
     if (initialized_) sampleVoltage();
@@ -224,16 +234,19 @@ private:
     const unsigned count = N + follower_count_;
     const unsigned k = voltage_next_ % count;
     const uint8_t id = k < N ? axes_[k].id : followers_[k - N].id;
-    int32_t raw;
-    const double v = readId(ControlTableItem::PRESENT_INPUT_VOLTAGE, id, raw) ? raw * 0.1 : 0.0;
-    temperature_[k] = readId(ControlTableItem::PRESENT_TEMPERATURE, id, raw) ? static_cast<int>(raw) : 0;
+    // PRESENT_INPUT_VOLTAGE (144, 2 bytes) and PRESENT_TEMPERATURE (146) of the X-series table in one read.
+    uint8_t b[3];
+    const bool ok = bus_.read(id, 144, sizeof(b), b, sizeof(b), kIoTimeoutMs) == sizeof(b) && statusOk();
+    const double v = ok ? (b[0] | b[1] << 8) * 0.1 : 0.0;
+    temperature_[k] = ok ? b[2] : 0;
     voltage_[k] = v;
     if (v > 0 && (voltage_min_ == 0 || v < voltage_min_)) voltage_min_ = v;
     voltage_next_ = (k + 1) % count;
   }
 
-  // "D,reason,motor id,code,lowest V since the last line,V per motor (axes, then followers),-1,deg C per motor"
-  // (-1 marks where the temperatures start; 2026-11-07). Starts with a letter so the numeric feedback parsers skip it.
+  // "D,reason,motor id,code,lowest V since the last line,V per motor (axes, then followers),-1,deg C per motor,
+  // -1,peak |current| [A] per motor since the last line" (-1 marks where the temperatures and the currents start;
+  // currents 2026-11-13, 0 without a current scale). Starts with a letter so the numeric feedback parsers skip it.
   void publishDiagnostic() {
     Serial.print('D'); Serial.print(',');
     Serial.print(static_cast<int>(fault_reason_)); Serial.print(',');
@@ -243,6 +256,11 @@ private:
     for (unsigned k = 0; k < N + follower_count_; ++k) { Serial.print(','); Serial.print(voltage_[k], 1); }
     Serial.print(','); Serial.print(-1);
     for (unsigned k = 0; k < N + follower_count_; ++k) { Serial.print(','); Serial.print(temperature_[k]); }
+    Serial.print(','); Serial.print(-1);
+    for (unsigned k = 0; k < N + follower_count_; ++k) {
+      Serial.print(','); Serial.print(peak_current_[k], 2);
+      peak_current_[k] = 0;
+    }
     Serial.println();
     voltage_min_ = 0;
   }
@@ -293,16 +311,30 @@ private:
     return true;
   }
 
-  // Healthy, torque as expected, and its present value (velocity or position).
-  bool readMotor(uint8_t id, bool velocity, int32_t &raw) {
-    int32_t error, torque;
-    if (!readId(ControlTableItem::HARDWARE_ERROR_STATUS, id, error)) return fail(kFaultNoResponse, id);
-    if (error != 0) return fail(kFaultHardwareError, id, error);
-    if (!readId(ControlTableItem::TORQUE_ENABLE, id, torque)) return fail(kFaultNoResponse, id);
-    if (started_ && !relaxed_ && torque != 1) return fail(kFaultTorqueOff, id);
-    if (!readId(velocity ? ControlTableItem::PRESENT_VELOCITY : ControlTableItem::PRESENT_POSITION, id, raw)) {
+  // What one tick needs of a motor, from one read of the X-series control table TORQUE_ENABLE (64) ..
+  // PRESENT_POSITION (132, 4 bytes) (2026-11-12). It used to be 3 reads a motor (+ MOVING, + PRESENT_CURRENT): the
+  // wheel board made 16 reads, 5 writes and 2 voltage reads a tick, 28.6 ms, and sent feedback at 35 Hz instead of 50
+  // (kPeriodMs is the shortest tick, not a fixed period).
+  static constexpr uint16_t kPresentAddr = 64, kPresentLength = 72;
+  struct Present { int32_t velocity, position; int16_t current; bool moving; };
+
+  // Healthy, torque as expected, and its present values.
+  bool readMotor(uint8_t id, Present &p) {
+    uint8_t b[kPresentLength];
+    if (bus_.read(id, kPresentAddr, kPresentLength, b, sizeof(b), kIoTimeoutMs) != kPresentLength || !statusOk()) {
       return fail(kFaultNoResponse, id);
     }
+    const auto at = [&b](uint16_t addr, unsigned bytes) {  // little endian
+      uint32_t v = 0;
+      for (unsigned k = bytes; k-- > 0;) v = v << 8 | b[addr - kPresentAddr + k];
+      return v;
+    };
+    if (const uint32_t error = at(70, 1)) return fail(kFaultHardwareError, id, static_cast<int32_t>(error));
+    if (started_ && !relaxed_ && at(64, 1) != 1) return fail(kFaultTorqueOff, id);
+    p.moving = at(122, 1) != 0;
+    p.current = static_cast<int16_t>(at(126, 2));
+    p.velocity = static_cast<int32_t>(at(128, 4));
+    p.position = static_cast<int32_t>(at(132, 4));
     return true;
   }
 
@@ -328,40 +360,38 @@ private:
     return true;
   }
 
+  // Largest |current| of motor k (axes, then followers) since the last diagnostic line: overload shows up there.
+  void notePeak(unsigned k, int16_t raw) {
+    const double a = fabs(raw * current_scale_);
+    if (a > peak_current_[k]) peak_current_[k] = a;
+  }
+
   bool readFeedback() {
     double sample[N];
     bool moving[N];
     unsigned count[N];
+    double current[N] = {};
     for (unsigned i = 0; i < N; ++i) {
-      int32_t raw;
-      if (!readMotor(axes_[i].id, axes_[i].velocity, raw)) return false;
+      Present p;
+      if (!readMotor(axes_[i].id, p)) return false;
+      notePeak(i, p.current);
+      const int32_t raw = axes_[i].velocity ? p.velocity : p.position;
       // Subtract in double to avoid overflowing signed raw extended positions.
       sample[i] = (static_cast<double>(raw) - zero_[i]) *
                   axes_[i].units_per_tick * axes_[i].direction;
       count[i] = 1;
-      int32_t is_moving = 0;
-      if (!axes_[i].velocity && !read(ControlTableItem::MOVING, i, is_moving)) {
-        return fail(kFaultNoResponse, axes_[i].id);
-      }
-      moving[i] = is_moving != 0;
+      moving[i] = !axes_[i].velocity && p.moving;
+      if (N == 6) current[i] = p.current * current_scale_;  // every arm/LM motor: the host judges overload from these
     }
     for (unsigned k = 0; k < follower_count_; ++k) {
       const auto &f = followers_[k];
-      int32_t raw;
-      if (!readMotor(f.id, true, raw)) return false;
-      sample[f.leader] += raw * axes_[f.leader].units_per_tick * f.direction;
+      Present p;
+      if (!readMotor(f.id, p)) return false;
+      notePeak(N + k, p.current);
+      sample[f.leader] += p.velocity * axes_[f.leader].units_per_tick * f.direction;
       ++count[f.leader];
     }
     for (unsigned i = 0; i < N; ++i) sample[i] /= count[i];
-    double current[N] = {};
-    if (N == 6) {  // every arm/LM motor: the host judges overload from these
-      for (unsigned i = 0; i < N; ++i) {
-        int32_t raw;
-        if (!read(ControlTableItem::PRESENT_CURRENT, i, raw)) return fail(kFaultNoResponse, axes_[i].id);
-        // PRESENT_CURRENT is a signed 16-bit register on the supported X-series.
-        current[i] = static_cast<int16_t>(raw) * current_scale_;
-      }
-    }
     for (unsigned i = 0; i < N; ++i) {
       feedback_[i] = sample[i];
       moving_[i] = moving[i];
@@ -549,10 +579,12 @@ private:
   uint8_t fault_id_ = 0;
   int32_t fault_code_ = 0;
   bool fault_reported_ = false;
+  unsigned lost_replies_ = 0;  // ticks in a row a motor read got no answer
   unsigned diag_ticks_ = 0;
   double voltage_[N + kMaxFollowers] = {};
   double voltage_min_ = 0;
   int temperature_[N + kMaxFollowers] = {};
+  double peak_current_[N + kMaxFollowers] = {};  // [A]
   unsigned voltage_next_ = 0;
 };
 

@@ -12,7 +12,7 @@ struct PuckAxisConfig {
   int min_points = 30, ransac_iterations = 100;
 };
 
-// Port of puck_axis_live.py (donut method, same idea as KnobDepth):
+// Port of puck_axis_live.py (donut method):
 // ring = grown box - box -> RANSAC shelf plane; box points above it = puck;
 // standing -> axis = plane normal, lying -> 2D PCA major axis on the plane.
 class PuckAxis {

@@ -1,0 +1,51 @@
+# AMCL on the brief drawing map (craft.launch.py localization:=amcl, user 2026-11-13): map->odom from a particle
+# filter matching /lidar/localization (merged scan without the arena-box beams) to map_file (brief_arena1cm, served
+# on /perception/lidar/map). ekf_local still owns odom->base_link. global_localize.py finds the start pose over the
+# map and sends it on /initialpose; the initial pose below only lets AMCL publish map->odom before that.
+# Untuned: first values for a 4WD skid steer (wheel slip on turns -> larger rotation noise) at ~0.3 m/s.
+amcl:
+  ros__parameters:
+    use_sim_time: false
+    global_frame_id: map
+    odom_frame_id: odom
+    base_frame_id: base_link
+    scan_topic: /lidar/localization
+    map_topic: /perception/lidar/map
+    tf_broadcast: true
+    transform_tolerance: 0.2
+    robot_model_type: nav2_amcl::DifferentialMotionModel
+    # Odometry noise: alpha1 rotation from rotation, alpha2 rotation from translation, alpha3 translation from
+    # translation, alpha4 translation from rotation. Skid steer slips on turns: alpha1 high.
+    alpha1: 0.4
+    alpha2: 0.1
+    alpha3: 0.1
+    alpha4: 0.1
+    alpha5: 0.1
+    laser_model_type: likelihood_field
+    laser_min_range: 0.15
+    laser_max_range: 8.0           # lidar_processor caps the merge at 8 m
+    max_beams: 90
+    # The drawing differs from the built arena by a few cm: sigma_hit wider than the 1 cm cells.
+    sigma_hit: 0.05
+    z_hit: 0.6
+    z_rand: 0.4                    # things not in the drawing (start boxes, people, outside the arena)
+    z_max: 0.05
+    z_short: 0.05
+    lambda_short: 0.1
+    laser_likelihood_max_dist: 0.5
+    do_beamskip: false
+    min_particles: 300
+    max_particles: 2000
+    pf_err: 0.05
+    pf_z: 0.99
+    resample_interval: 1
+    recovery_alpha_fast: 0.0
+    recovery_alpha_slow: 0.0
+    update_min_d: 0.03             # [m] filter update after this much travel
+    update_min_a: 0.05             # [rad] or this much turn
+    save_pose_rate: 0.5
+    # Placeholder start (start zone centre, facing the light); global_localize.py corrects it on /initialpose.
+    set_initial_pose: true
+    initial_pose: {x: 0.743, y: 0.950, z: 0.0, yaw: 3.14159}
+    always_reset_initial_pose: false
+    first_map_only: true

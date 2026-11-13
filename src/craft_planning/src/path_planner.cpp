@@ -339,6 +339,11 @@ struct Leg
   std::vector<std::size_t> stops; std::size_t expanded = 0;
 };
 
+// A start up to this much inside r_robot still escapes (user 2026-11-13): the robot stops at the edge of an
+// obstacle's padding and the next plan, 1 cm grid + LiDAR points, can put it 1-2 cm inside; with margin 0 that
+// was always "Start is in an obstacle" and the replan loop never got out (sim 04_goal_blocked_replan, 2 of 3).
+constexpr double kStartTolerance = 0.03;
+
 bool point_free(const Grid & g, Point p)
 {
   const int x = static_cast<int>(std::floor(p.x / g.res)), y = static_cast<int>(std::floor(p.y / g.res));
@@ -821,10 +826,12 @@ bool repair_free(const Grid & g, std::vector<Point> & pts, std::size_t first_mov
 // within local_max_dev of the polyline, natural-splined at kLocalSample. approach_from: polyline arc length where the
 // goal approach line starts (kept straight), or infinity.
 std::vector<Point> smooth_global(
-  const Grid & g, const PathPlannerConfig & c, const std::vector<Point> & global, double approach_from)
+  const Grid & g, const PathPlannerConfig & c, const std::vector<Point> & global, double approach_from,
+  bool preserve_progress = false)
 {
   const auto arc = arc_lengths(global);
   auto P = resample(global, kLocalStep);
+  const auto original = preserve_progress ? P : std::vector<Point>{};
   std::vector<uint8_t> fixed(P.size(), 0);
   fixed.front() = fixed.back() = 1;
   for (std::size_t i = 0; i < P.size(); ++i) {
@@ -855,7 +862,15 @@ std::vector<Point> smooth_global(
     }
     for (std::size_t i = 1; i + 1 < n; ++i) {
       if (fixed[i]) {continue;}
-      const Point moved = clip(P[i] + upd[i]);
+      Point moved = clip(P[i] + upd[i]);
+      // A via route may turn back alongside itself. Nearest-polyline clipping alone lets the tip shrink along
+      // the same segment on every iteration and miss the via point. Bound total motion from its own sample.
+      if (preserve_progress) {
+        const double distance = std::sqrt(squared(moved - original[i]));
+        if (distance > c.local_max_dev) {
+          moved = original[i] + (moved - original[i]) * (c.local_max_dev / distance);
+        }
+      }
       if (point_free(g, moved)) {P[i] = moved;}
     }
   }
@@ -1014,13 +1029,25 @@ void open_approach(Grid & g, const PathPlannerConfig & c, const BoxApproach * ap
 }
 }  // namespace
 
-struct PathPlanner::Data {PathPlannerConfig config; Grid grid;};
+// The planner's map, and the same map padded with r_approach for the box dock (the second path, after the turn at
+// the stage point: plan_box's face and dock line checks, collision_free / padding with dock): one padding for the
+// whole map, switched by what is planned.
+struct PathPlanner::Data {PathPlannerConfig config; Grid grid; std::shared_ptr<const Data> approach;};
+
+namespace
+{
+std::shared_ptr<const PathPlanner::Data> for_approach(const std::shared_ptr<const PathPlanner::Data> & d, bool approach)
+{
+  return d && approach && d->approach ? d->approach : d;
+}
+}  // namespace
 
 void PathPlanner::configure(const PathPlannerConfig & config)
 {
   try {
     require(!config.map_file.empty() && !config.map_frame.empty(), "map_file and map_frame are required");
     for (const double p : {config.res, config.block_size, config.prox_band, config.arc_sample}) {require(std::isfinite(p) && p > 0, "Planner lengths must be positive and finite");}
+    require(std::isfinite(config.r_approach) && config.r_approach >= 0, "r_approach must be nonnegative");
     for (const double p : {config.r_robot, config.margin, config.lam, config.w_prox}) {require(std::isfinite(p) && p >= 0, "Planner costs and footprint must be nonnegative and finite");}
     for (const double p : {config.r_hi_global, config.r_tol, config.v_ref, config.w_max, config.a_lat_max,
          config.a_lon_max, config.approach_len, config.wheel_radius, config.wheel_separation, config.max_wheel, config.v_min}) {require(std::isfinite(p) && p > 0, "Planner fillet/speed parameters must be positive and finite");}
@@ -1051,6 +1078,12 @@ void PathPlanner::configure(const PathPlannerConfig & config)
       load_image(grid, path.parent_path() / yaml["image"].as<std::string>(), yaml, config);
     }
     require(std::isfinite(grid.width * grid.res) && std::isfinite(grid.height * grid.res), "Map extent is not finite");
+    if (config.r_approach > 0 && config.r_approach != config.r_robot) {
+      auto approach = std::make_shared<Data>(*data);
+      approach->config.r_robot = config.r_approach;
+      inflate(approach->grid, config.r_approach + config.margin);
+      data->approach = approach;
+    }
     inflate(grid, config.r_robot + config.margin);
     std::atomic_store(&data_, std::shared_ptr<const Data>(data));
   } catch (const std::exception & error) {throw std::invalid_argument(error.what());}
@@ -1058,15 +1091,25 @@ void PathPlanner::configure(const PathPlannerConfig & config)
 
 PathPlan PathPlanner::plan(
   const nav_msgs::msg::Odometry & odom, const geometry_msgs::msg::PoseStamped & goal,
-  const geometry_msgs::msg::PoseArray & map_obstacles, bool heading_required, const BoxTarget * box) const
+  const geometry_msgs::msg::PoseArray & map_obstacles, bool heading_required, const BoxTarget * box,
+  const std::vector<geometry_msgs::msg::Point> * via) const
+{
+  return plan_on(std::atomic_load(&data_), odom, goal, map_obstacles, heading_required, box, via);
+}
+
+PathPlan PathPlanner::plan_on(
+  const std::shared_ptr<const Data> & data, const nav_msgs::msg::Odometry & odom, const geometry_msgs::msg::PoseStamped & goal,
+  const geometry_msgs::msg::PoseArray & map_obstacles, bool heading_required, const BoxTarget * box,
+  const std::vector<geometry_msgs::msg::Point> * via) const
 {
   // A start just inside the margin (tracking error, a robot placed near a wall) leaves straight to the nearest
   // free cell within this distance while the body itself (r_robot) stays clear; it is a STOP_TURN segment.
   constexpr double kEscape = 0.10;
   PathPlan result;
   try {
-    const auto data = std::atomic_load(&data_); require(data != nullptr, "Planner has not been configured");
-    const auto & config = data->config;
+    require(data != nullptr, "Planner has not been configured");
+    auto config = data->config;
+    if (via && !via->empty()) config.local_max_dev = std::min(config.local_max_dev, 0.03);
     require(odom.header.frame_id == config.map_frame && goal.header.frame_id == config.map_frame, "Map, goal and odometry must use the same frame");
     const double start_yaw = pose_yaw(odom.pose.pose), goal_yaw = pose_yaw(goal.pose);
     const bool heading = config.goal_heading_required || heading_required;
@@ -1078,7 +1121,9 @@ PathPlan PathPlanner::plan(
     State from{first % grid.width, first / grid.width, quarter(start_yaw)};
     std::vector<Sample> escape;
     if (grid.blocked[first]) {
-      if (grid.clearance[first] < config.r_robot) {throw RouteUnavailable("Start is in an obstacle");}
+      const double start_clear = grid.clearance[first];
+      if (start_clear < config.r_robot - kStartTolerance) {throw RouteUnavailable("Start is in an obstacle");}
+      const double body = std::min(config.r_robot, start_clear);  // never closer than the start on the way out
       const int reach = static_cast<int>(std::ceil(kEscape / grid.res));
       int chosen = -1; double nearest = kInfinity;
       for (int y = from.y - reach; y <= from.y + reach; ++y) {
@@ -1090,13 +1135,18 @@ PathPlan PathPlanner::plan(
           bool body_clear = true;
           for (int k = 0; k <= std::ceil(d / (grid.res / 2)) && body_clear; ++k) {
             const int cell = grid.cell(lerp(start, p, d > 0 ? std::min(1.0, k * grid.res / 2 / d) : 1.0));
-            body_clear = cell >= 0 && grid.clearance[cell] >= config.r_robot;
+            body_clear = cell >= 0 && grid.clearance[cell] >= body;
           }
           if (body_clear) {nearest = d; chosen = grid.index(x, y);}
         }
       }
       if (chosen < 0) {throw RouteUnavailable("Start is in an inflated obstacle with no free cell nearby");}
       const Point p = grid.center(chosen);
+      // The way out counts as free for the rest of this plan: global_local smooths and checks from the start itself.
+      for (int k = 0, n = std::max(1, static_cast<int>(std::ceil(nearest / (grid.res / 4)))); k <= n; ++k) {
+        const int cell = grid.cell(lerp(start, p, static_cast<double>(k) / n));
+        if (cell >= 0 && !grid.occupied[cell] && grid.clearance[cell] >= body) {grid.blocked[cell] = 0;}
+      }
       const double yaw = std::atan2(p.y - start.y, p.x - start.x);
       const int k = std::max(1, static_cast<int>(std::ceil(nearest / 0.02)));
       for (int i = 0; i < k; ++i) {escape.push_back({lerp(start, p, static_cast<double>(i) / k), yaw, 0.0, config.v_ref});}
@@ -1117,12 +1167,23 @@ PathPlan PathPlanner::plan(
           throw RouteUnavailable("Goal approach line crosses an inflated obstacle");
         }
       }
-      std::vector<Point> cells;
-      for (const int i : astar8_search(grid, config, grid.index(from.x, from.y), goal_cell, result.expanded)) {
-        cells.push_back(grid.center(i));
+      // One A* + pruning per stretch (start -> via points -> goal): pruning the whole route at once would cut a via
+      // point off, and a route coming back near its start down to nothing.
+      std::vector<int> ends;
+      for (const auto & v : via ? *via : std::vector<geometry_msgs::msg::Point>{}) {
+        const int cell = grid.cell(grid.local(v));
+        require(cell >= 0 && !grid.blocked[cell], "Via point outside the map or in the padding");
+        ends.push_back(cell);
       }
+      ends.push_back(goal_cell);
       std::vector<Point> global{start};
-      for (const auto & q : prune_los(grid, cells)) {if (squared(q - global.back()) > 1e-12) {global.push_back(q);}}
+      int at = grid.index(from.x, from.y);
+      for (const int to : ends) {
+        std::vector<Point> cells;
+        for (const int i : astar8_search(grid, config, at, to, result.expanded)) {cells.push_back(grid.center(i));}
+        for (const auto & q : prune_los(grid, cells)) {if (squared(q - global.back()) > 1e-12) {global.push_back(q);}}
+        at = to;
+      }
       if (entry) {  // the exact entry instead of its cell centre, so the approach keeps the goal heading
         if (global.size() > 1 && segment_free(grid, global[global.size() - 2], *entry)) {global.back() = *entry;}
         else if (squared(*entry - global.back()) > 1e-12) {global.push_back(*entry);}
@@ -1132,7 +1193,7 @@ PathPlan PathPlanner::plan(
       const auto arc = arc_lengths(global);
       const double approach_from = approach && global.size() >= 2 ?
         arc.back() - std::sqrt(squared(target - global[global.size() - 2])) : std::numeric_limits<double>::infinity();
-      const auto smooth = smooth_global(grid, config, global, approach_from);
+      const auto smooth = smooth_global(grid, config, global, approach_from, via && !via->empty());
       result.global.header.frame_id = config.map_frame;
       for (std::size_t i = 0; i < smooth.size(); ++i) {
         const Point d = i + 1 < smooth.size() ? smooth[i + 1] - smooth[i] : smooth[i] - smooth[i - 1];
@@ -1189,16 +1250,38 @@ PathPlan PathPlanner::plan(
   return result;
 }
 
+// True when a path planned with the goal heading doubles back into its straight approach: within 0.3 m before the
+// approach entry (approach_len before the goal) the path heads more than 100 deg away from the goal heading.
+static bool hairpin_at_entry(const nav_msgs::msg::Path & path, double heading, double approach_len)
+{
+  const auto & poses = path.poses;
+  if (poses.size() < 3) {return false;}
+  std::vector<double> arc(poses.size(), 0.0);
+  for (std::size_t i = 1; i < poses.size(); ++i) {
+    const auto & a = poses[i - 1].pose.position, & b = poses[i].pose.position;
+    arc[i] = arc[i - 1] + std::hypot(b.x - a.x, b.y - a.y);
+  }
+  const double entry = arc.back() - approach_len, ux = std::cos(heading), uy = std::sin(heading);
+  for (std::size_t i = 1; i < poses.size(); ++i) {
+    if (arc[i] < entry - 0.30 || arc[i - 1] > entry) {continue;}
+    const auto & a = poses[i - 1].pose.position, & b = poses[i].pose.position;
+    const double len = std::hypot(b.x - a.x, b.y - a.y);
+    if (len > 1e-6 && ((b.x - a.x) * ux + (b.y - a.y) * uy) / len < std::cos(100.0 * kPi / 180.0)) {return true;}
+  }
+  return false;
+}
+
 PathPlan PathPlanner::plan_box(
   const nav_msgs::msg::Odometry & odom, const BoxTarget & box, const geometry_msgs::msg::PoseArray & map_obstacles,
-  const double * face_normal, double stage_lead) const
+  const double * face_normal, double stage_lead, const std::vector<double> * allowed_normals) const
 {
   PathPlan best;
   double best_length = kInfinity;
   std::string why;
   bool retryable = !map_obstacles.poses.empty();
   try {
-    const auto data = std::atomic_load(&data_); require(data != nullptr, "Planner has not been configured");
+    const auto data = std::atomic_load(&data_);
+    const auto dock_data = for_approach(data, true);  // the dock (second path, stage -> face): r_approach require(data != nullptr, "Planner has not been configured");
     const auto & config = data->config;
     require(std::isfinite(box.x) && std::isfinite(box.y) && std::isfinite(box.yaw) && box.side > 0 && box.standoff > 0,
       "Invalid box target");
@@ -1206,6 +1289,9 @@ PathPlan PathPlanner::plan_box(
     for (int k = 0; k < 4; ++k) {
       const double normal = box.yaw + k * kPi / 2, heading = normal + kPi;
       if (face_normal && std::abs(std::remainder(normal - *face_normal, 2 * kPi)) > kPi / 4) {continue;}
+      // Only the faces the box can be approached from (planning.yaml <box>_faces): within 45 deg of one of them.
+      if (allowed_normals && std::none_of(allowed_normals->begin(), allowed_normals->end(), [normal](double a) {
+            return std::abs(std::remainder(normal - a, 2 * kPi)) <= kPi / 4;})) {continue;}
       geometry_msgs::msg::PoseStamped goal;
       goal.header.frame_id = config.map_frame;
       goal.pose.position.x = box.x + reach * std::cos(normal);
@@ -1214,7 +1300,7 @@ PathPlan PathPlanner::plan_box(
       char face[48];
       std::snprintf(face, sizeof(face), "face %d (normal %.0f deg)", k, normal * 180 / kPi);
       // plan() rejects a face before A* when its goal, entry or approach line is in the padding (box padding aside).
-      auto p = plan(odom, goal, map_obstacles, true, &box);
+      auto p = plan_on(dock_data, odom, goal, map_obstacles, true, &box);
       if (!p.ok) {why += std::string(face) + ": " + p.error + "; "; retryable = retryable || p.retryable; continue;}
       if (stage_lead > 0) {  // stop at the stage point, then dock straight (the face itself checked above)
         // A stage point in the padding (a face toward a wall) moves up in 5 cm steps, at the latest to the approach
@@ -1228,8 +1314,18 @@ PathPlan PathPlanner::plan_box(
           nav_msgs::msg::Path line; line.header.frame_id = config.map_frame;
           line.poses = {stage, goal};
           const BoxApproach dock{box, goal.pose};
-          if (!collision_free(line, map_obstacles, &dock)) {stage_why = "dock line in the padding"; continue;}
-          auto q = plan(odom, stage, map_obstacles);
+          if (!collision_free_on(dock_data, line, map_obstacles, &dock)) {stage_why = "dock line in the padding"; continue;}
+          // Into the stage point straight along the face normal (approach_len), so the tracking error is steered
+          // out before it stops there: control's arrival takes any side offset up to wheel_goal_tolerance and the
+          // dock starts from it (2026-11-10: arriving from the side left 48 mm, the dock swung to -16 deg and
+          // touched the box). No room for that straight, or a route that would double back into it (a hairpin at
+          // the entry: Pure Pursuit cuts it and spins in place; S1 east in the simulator, 2026-11-10): any arrival
+          // direction, as before.
+          auto q = plan_on(data, odom, stage, map_obstacles, true);
+          std::string entry = q.ok ? "straight entry" : "no straight entry (" + q.error + ")";
+          if (q.ok && hairpin_at_entry(q.global, heading, config.approach_len)) {q.ok = false; entry = "hairpin, no straight entry";}
+          if (!q.ok) {q = plan_on(data, odom, stage, map_obstacles);}
+          if (q.ok) {why += std::string(face) + " " + entry + ", ";}
           if (!q.ok) {stage_why = "stage: " + q.error; retryable = retryable || q.retryable; continue;}
           p = std::move(q); staged = true;
         }
@@ -1240,15 +1336,44 @@ PathPlan PathPlanner::plan_box(
         const auto & a = p.global.poses[i - 1].pose.position, & b = p.global.poses[i].pose.position;
         length += std::hypot(b.x - a.x, b.y - a.y);
       }
+      {char t[64]; std::snprintf(t, sizeof(t), "%s: %.2f m; ", face, length); why += t;}
       if (length < best_length) {best_length = length; best = std::move(p); best.goal = goal; best.face_normal = normal;}
     }
     if (!best.ok) {
       best = PathPlan(); best.error = "No approachable box face: " + why; best.retryable = retryable;
     }
+    best.faces = why;
   } catch (const std::exception & error) {
     best = PathPlan(); best.error = error.what();
   }
   return best;
+}
+
+nav_msgs::msg::OccupancyGrid PathPlanner::padding(
+  const geometry_msgs::msg::PoseArray & map_obstacles, const BoxApproach * approach, bool dock) const
+{
+  nav_msgs::msg::OccupancyGrid out;
+  const auto full = std::atomic_load(&data_);
+  const auto data = for_approach(full, dock);
+  if (data == nullptr) {return out;}
+  auto grid = obstacle_snapshot(data->grid, map_obstacles, data->config);
+  open_approach(grid, data->config, approach);
+  out.header.frame_id = data->config.map_frame;
+  out.info.resolution = static_cast<float>(grid.res);
+  out.info.width = static_cast<uint32_t>(grid.width); out.info.height = static_cast<uint32_t>(grid.height);
+  out.info.origin.position.x = grid.ox; out.info.origin.position.y = grid.oy;
+  out.info.origin.orientation.z = std::sin(grid.yaw / 2); out.info.origin.orientation.w = std::cos(grid.yaw / 2);
+  out.data.resize(grid.occupied.size());
+  for (std::size_t i = 0; i < out.data.size(); ++i) {
+    // RViz costmap colours: 100 lethal (purple), 99 inscribed (cyan, one flat colour), 50 (mid gradient), 0 transparent.
+    out.data[i] = grid.occupied[i] ? 100 : grid.blocked[i] ? 99 : 0;
+  }
+  // A box approach: the cells r_robot pads but r_approach frees (the padding taken off) as 50 (another colour).
+  if (data != full) {
+    const auto normal = obstacle_snapshot(full->grid, map_obstacles, full->config);
+    for (std::size_t i = 0; i < out.data.size(); ++i) {if (out.data[i] == 0 && normal.blocked[i]) {out.data[i] = 50;}}
+  }
+  return out;
 }
 
 PathPlan PathPlanner::plan_toward(
@@ -1289,7 +1414,8 @@ PathPlan PathPlanner::plan_toward(
 
 PathPlan PathPlanner::local_path(
   const nav_msgs::msg::Path & global, const nav_msgs::msg::Odometry & odom,
-  const geometry_msgs::msg::PoseArray & map_obstacles, const BoxApproach * approach) const
+  const geometry_msgs::msg::PoseArray & map_obstacles, const BoxApproach * approach,
+  std::optional<double> progress) const
 {
   PathPlan result;
   try {
@@ -1303,7 +1429,9 @@ PathPlan PathPlanner::local_path(
     const auto pts = local_points(grid, global);
     require(pts.size() >= 2, "Global path needs two distinct poses");
     const auto arc = arc_lengths(pts);
-    const double s_ego = project(pts, arc, grid.local(odom.pose.pose.position)).s;
+    require(!progress || (std::isfinite(*progress) && *progress >= 0), "Progress must be finite and nonnegative");
+    const double s_ego = progress ? std::min(*progress, arc.back()) :
+      project(pts, arc, grid.local(odom.pose.pose.position)).s;
     fill_local(result, grid, local_window(grid, config, pts, s_ego), config.map_frame);
     if (s_ego + config.local_ahead >= arc.back()) {result.path.poses.back().pose.position = global.poses.back().pose.position;}
     result.global = global;
@@ -1316,33 +1444,93 @@ PathPlan PathPlanner::local_path(
   return result;
 }
 
-double path_progress(const nav_msgs::msg::Path & path, const geometry_msgs::msg::Point & p)
+double path_progress(const nav_msgs::msg::Path & path, const geometry_msgs::msg::Point & p,
+  double min_s, double max_s)
 {
   std::vector<Point> pts;
   for (const auto & pose : path.poses) {pts.push_back({pose.pose.position.x, pose.pose.position.y});}
   if (pts.size() < 2) {return 0.0;}
-  return project(pts, arc_lengths(pts), {p.x, p.y}).s;
+  require(std::isfinite(min_s) && min_s >= 0 && !std::isnan(max_s) && max_s >= min_s,
+    "Progress interval is invalid");
+  const auto arc = arc_lengths(pts);
+  min_s = std::min(min_s, arc.back()); max_s = std::min(max_s, arc.back());
+  double best_s = min_s, best_distance = std::numeric_limits<double>::infinity();
+  for (std::size_t i = 1; i < pts.size(); ++i) {
+    const double length = arc[i] - arc[i - 1];
+    if (length <= 1e-12 || arc[i] < min_s || arc[i - 1] > max_s) continue;
+    const Point d = pts[i] - pts[i - 1], delta{p.x - pts[i - 1].x, p.y - pts[i - 1].y};
+    const double t = std::clamp((delta.x * d.x + delta.y * d.y) / (length * length),
+      std::max(0.0, (min_s - arc[i - 1]) / length), std::min(1.0, (max_s - arc[i - 1]) / length));
+    const double distance = squared(Point{p.x, p.y} - lerp(pts[i - 1], pts[i], t));
+    if (distance < best_distance) {best_distance = distance; best_s = arc[i - 1] + t * length;}
+  }
+  return best_s;
+}
+
+double path_length(const nav_msgs::msg::Path & path)
+{
+  double total = 0;
+  for (std::size_t i = 1; i < path.poses.size(); ++i) {
+    const auto &a = path.poses[i - 1].pose.position, &b = path.poses[i].pose.position;
+    total += std::hypot(b.x - a.x, b.y - a.y);
+  }
+  return total;
 }
 
 bool PathPlanner::collision_free(
-  const nav_msgs::msg::Path & path, const geometry_msgs::msg::PoseArray & map_obstacles, const BoxApproach * approach) const
+  const nav_msgs::msg::Path & path, const geometry_msgs::msg::PoseArray & map_obstacles, const BoxApproach * approach,
+  bool dock) const
+{
+  return collision_free_on(for_approach(std::atomic_load(&data_), dock), path, map_obstacles, approach);
+}
+
+bool PathPlanner::collision_free_on(
+  const std::shared_ptr<const Data> & data, const nav_msgs::msg::Path & path,
+  const geometry_msgs::msg::PoseArray & map_obstacles, const BoxApproach * approach) const
+{
+  return std::isinf(clear_length_on(data, path, map_obstacles, approach));
+}
+
+double PathPlanner::clear_length(
+  const nav_msgs::msg::Path & path, const geometry_msgs::msg::PoseArray & map_obstacles, const BoxApproach * approach,
+  bool dock) const
+{
+  return clear_length_on(for_approach(std::atomic_load(&data_), dock), path, map_obstacles, approach);
+}
+
+double PathPlanner::clear_length_on(
+  const std::shared_ptr<const Data> & data, const nav_msgs::msg::Path & path,
+  const geometry_msgs::msg::PoseArray & map_obstacles, const BoxApproach * approach) const
 {
   try {
-    const auto data = std::atomic_load(&data_);
-    if (!data || path.poses.empty() || path.header.frame_id != data->config.map_frame) {return false;}
+    if (!data || path.poses.empty() || path.header.frame_id != data->config.map_frame) {return 0.0;}
     auto grid = obstacle_snapshot(data->grid, map_obstacles, data->config);
     open_approach(grid, data->config, approach);
     Point previous{};
+    double length = 0;
+    // The robot standing just inside the padding (kStartTolerance) leaves it along the path: the leading stretch
+    // that stays that clear and never gets closer is not "blocked ahead" (it would re-pause every escape).
+    bool leaving = true;
+    double floor = kInfinity;
     for (std::size_t i = 0; i < path.poses.size(); ++i) {
       const auto & pose = path.poses[i]; pose_yaw(pose.pose);
-      if (!pose.header.frame_id.empty() && pose.header.frame_id != path.header.frame_id) {return false;}
+      if (!pose.header.frame_id.empty() && pose.header.frame_id != path.header.frame_id) {return 0.0;}
       const auto current = grid.local(pose.pose.position);
       const Point from = i ? previous : current;
-      const int steps = std::max(1, static_cast<int>(std::ceil(std::hypot(current.x - from.x, current.y - from.y) / (grid.res / 2))));
-      for (int k = 0; k <= steps; ++k) {if (!point_free(grid, lerp(from, current, static_cast<double>(k) / steps))) {return false;}}
-      previous = current;
+      const double span = std::hypot(current.x - from.x, current.y - from.y);
+      const int steps = std::max(1, static_cast<int>(std::ceil(span / (grid.res / 2))));
+      for (int k = 0; k <= steps; ++k) {
+        const Point q = lerp(from, current, static_cast<double>(k) / steps);
+        if (point_free(grid, q)) {leaving = false; continue;}
+        const double d = clearance_at(grid, q);
+        if (leaving && d >= data->config.r_robot - kStartTolerance && (floor == kInfinity || d >= floor - 1e-9)) {
+          floor = d; continue;
+        }
+        return length + span * k / steps;
+      }
+      length += span; previous = current;
     }
-    return true;
-  } catch (const std::exception &) {return false;}
+    return std::numeric_limits<double>::infinity();
+  } catch (const std::exception &) {return 0.0;}
 }
 }  // namespace craft_planning

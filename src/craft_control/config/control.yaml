@@ -8,10 +8,16 @@ control_master:
     camera_distance_max_speed: 0.02
     camera_distance_kp: 10.0
     wheel_heading_tolerance: 0.5
-    wheel_rotate_angular_speed: 0.6  # [rad/s] in-place turn before tracking/final alignment
+    wheel_rotate_angular_speed: 0.72  # [rad/s] in-place turn before tracking/final alignment (user 2026-11-13: +20 %, was 0.6)
+    wheel_goal_rotate_angular_speed: 0.25  # [rad/s] in-place turn at the goal (final heading); user 2026-11-10: 0.57 overshot and slid off a stage point
+    wheel_goal_rotate_min_speed: 0.10      # [rad/s] slowest in-place turn at the goal, near the heading (user 2026-11-10: slow down into the heading; 0.15 overshot 0.87 deg, 0.06 too slow)
     settle_time_s: 0.1
     stop_position_tolerance_rad: 0.002
     wheel_stop_tolerance_rad_s: 0.02
+    # Clock (steering) angle settle: its feedback jitters past stop_position_tolerance_rad (0.002) at rest, which
+    # restarted the settle timer every sample (2026-11-10, noboxes runs: settled_for 0.00-0.04 s, stage stop
+    # "box stop acknowledgement timeout"). 0.01 rad provisional: the diagnostic line prints clock vs anchor to measure.
+    clock_stop_tolerance_rad: 0.01
     arm_lm_port: /dev/opencr_arm_lm    # LM + four rotational arm motors + gripper OpenCR
     clock_wheel_port: /dev/opencr_wheel_clock  # clock + wheel x2 OpenCR
 
@@ -84,7 +90,36 @@ control_master:
     lookahead_distances: [0.18, 0.18, 0.25]  # [m]
     # Multiplies the Pure Pursuit turn command (not the in-place turn). bag roi_1422 (2026-11-02): lateral
     # error RMSE 33 mm, max 77 mm, mostly to the outside after corners (under steer) -> 1.2. 1.0 = plain PP.
-    wheel_tracking_gain: 1.2
+    # 1.0 since 2026-11-11 (was 1.2, the same at every bearing): the gain is wheel_tracking_gain_scales below alone.
+    wheel_tracking_gain: 1.0
+    # Heading offset added to the pose yaw for path tracking (2026-11-11, not driven yet). 14 tour laps over 4.5 h:
+    # yaw - travel direction = -3.2 deg median (-2.9 to -3.5 per complete lap), -4.5 driving up the map, -0.7 driving
+    # down. +3 centres it; what is left (+-2 deg by place and direction) is the lateral integral's. Not used in a box
+    # dock, camera distance mode or the goal heading alignment. 0 = off. Measure again after a new map or LiDAR mount.
+    # 3.0 -> 1.0 (2026-11-12): 2 deg of it went into the LiDAR mount yaw (lidar_processor.launch.py front_yaw_deg 178,
+    # rear_yaw_deg -2), so the pose yaw itself reads 2 deg less to the right. Keep the sum at what the laps measure.
+    # 1.0 -> 0.0 (2026-11-12): the whole 4.3 deg is in the LiDAR mount yaw now (front_yaw_deg 175.7, rear_yaw_deg -4.3).
+    # What is left by place and direction (+-1 to 1.5 deg) is the lateral integral's. Set it again from a tour lap
+    # (tools/tracking_rmse/tour_report.py, heading offset median) if that is not near 0.
+    wheel_heading_offset_deg: 0.0
+    # Turn gain by the bearing of the lookahead point off the heading (adaptive): linear between the entries, held at
+    # the ends. [0.0] -> [1.2] = the constant 1.2 used until 2026-11-11.
+    # tour_h3 laps (fixed 1.2 times [0.7, 1.0], so 0.84 near the path): mean offset 0 but the spread inside the first
+    # 1.5 m of a leg went from 1.0 to 1.3-1.4 cm. Now (not driven yet): plain Pure Pursuit (1.0) within 1 deg, 1.2 from
+    # 3 deg. Above 1.2 at large bearings is untried: the turn follows 0.1 s late and overshoots.
+    wheel_tracking_gain_errors_deg: [1.0, 3.0]
+    wheel_tracking_gain_scales: [1.0, 1.2]
+    # Lateral error integral on Pure Pursuit (2026-11-11, not driven yet): curvature -= integral, the integral grows by
+    # gain * offset [m] * distance driven [m], within +-limit. Tour bags: the pose heading reads 2-3 deg right of the
+    # travel direction, so Pure Pursuit runs lookahead * tan(that) = +0.9 cm left on every straight (cruise RMSE 1.43 cm).
+    # Ideal simulation (3 deg, lookahead 0.25, no turn delay; test LateralIntegralRemovesTheOffsetOfAHeadingBias): 13 mm
+    # without it; gain 15 leaves 5.9 mm after 2 m and 1.2 mm after 5 m; gain 100 is within 1.2 mm after 1 m with a small
+    # overshoot. The real turn delay (0.1 s) makes high gains weave sooner: start at 30. 0 = off (plain Pure Pursuit).
+    # Box docks and camera distance mode never use it.
+    # Laps 2026-11-11: off RMSE 1.43 cm, mean +0.9; 30 -> 1.28, +0.5; 60 -> 1.27, +0.4 but the path is crossed 1.4-1.8
+    # times per m instead of 1.0-1.1 (weaving). Back to 30 with wheel_heading_offset_deg taking the fixed part.
+    wheel_lateral_integral_gain: 30.0  # [1/m^3]
+    wheel_lateral_integral_limit: 1.0  # [1/m] holds 2 * tan(b) / lookahead: 3 deg needs 0.42, 5 deg 0.70 (lookahead 0.25)
     wheel_goal_tolerance: 0.10  # [m] stop when the path endpoint is within this distance, matches planning goal_tolerance (was 0.03: below SLAM pose noise, overshoot -> 180 deg turn back)
     # Incoming straight path segments are subdivided at path_spacing without changing geometry
     # and republished on /control/tracking_path. Keep it well below lookahead.
@@ -101,7 +136,7 @@ control_master:
     # OpenCR must accept/report unwrapped motor radians (e.g. 12 -> 7 commands -5*pi/6).
     clock_slot_count: 12
     clock_slot_angle: 0.5235987755982988  # [motor rad/slot] 30 degrees
-    clock_zero_angle: 2.8693212902786778  # [motor rad] 164.4 degrees, slot 12 at the loading guide (2026-11-07, checked by checkwheel at 12; was 135.2, 45.4, 44.8, 73.9, 166.4)
+    clock_zero_angle: 1.316156  # [motor rad] 75.4 degrees, slot 12 at the loading guide (2026-11-11, checkwheel reading with the clock set at 12; was 164.4, 135.2, 45.4, 44.8, 73.9, 166.4)
     # Firmware clock zero_tick stays 0: apply this offset here only.
     # Recheck physical alignment after a motor power cycle/multi-turn reset.
     clock_direction: 1.0  # +1: CCW motor rotation increases slot numbers; -1: reverse

@@ -124,6 +124,7 @@ void LateralController::set_target(
 void LateralController::clear_target()
 {
   path_ = nav_msgs::msg::Path{}; arc_.clear(); speed_limit_.clear(); node_ = 0; rotating_ = false; rotating_direction_ = 0;
+  continuous_tracking_ = false;
 }
 
 double LateralController::speed_limit() const
@@ -167,6 +168,24 @@ void LateralController::update_node()
 }
 
 // Arc-length progress of the robot projected onto the path segments adjacent to my node.
+// 내 노드 앞뒤 선분에 로봇을 투영한 부호 있는 횡오차 [m]: 경로 진행 방향의 왼쪽이 +.
+std::optional<double> LateralController::lateral_offset() const
+{
+  if (!have_odom_ || path_.poses.size() < 2 || path_.header.frame_id != odom_.header.frame_id) return std::nullopt;
+  const auto & p = odom_.pose.pose.position;
+  std::optional<double> best;
+  const auto lo = node_ > 0 ? node_ - 1 : 0, hi = std::min(path_.poses.size() - 1, node_ + 1);
+  for (std::size_t i = lo; i < hi; ++i) {
+    const auto & a = path_.poses[i].pose.position, & b = path_.poses[i + 1].pose.position;
+    const double dx = b.x - a.x, dy = b.y - a.y, len = std::hypot(dx, dy);
+    if (len < 1e-9) continue;
+    const double t = std::clamp(((p.x - a.x) * dx + (p.y - a.y) * dy) / (len * len), 0.0, 1.0);
+    const double ex = p.x - (a.x + t * dx), ey = p.y - (a.y + t * dy);
+    if (!best || std::hypot(ex, ey) < std::abs(*best)) best = std::copysign(std::hypot(ex, ey), dx * ey - dy * ex);
+  }
+  return best;
+}
+
 double LateralController::projected_arc() const
 {
   auto p = odom_.pose.pose.position;
@@ -270,13 +289,16 @@ void LateralController::set_task_tolerances(double goal_tolerance, double headin
 // the configured tolerance (Pure Pursuit steers small errors out).
 bool LateralController::needs_rotation(double target_v) const
 {
+  if (continuous_tracking_ && arc_[node_] > kNodeWindow * path_spacing_ && !at_goal()) {rotating_ = false; rotate_sign_ = 0; return false;}
   const int direction = target_v < 0.0 ? -1 : 1;
   if (direction != rotating_direction_) {rotating_ = false; rotating_direction_ = direction;}
   const auto error = heading_error(target_v);
   const bool fine = task_heading_tolerance_ > 0.0 && !path_.poses.empty() &&
     (arc_[node_] <= kNodeWindow * path_spacing_ || (!camera_distance_mode_ && at_goal()));
   const double tolerance = fine ? task_heading_tolerance_ : heading_tolerance_;
-  rotating_ = error && std::abs(*error) > (rotating_ ? 0.5 * tolerance : tolerance);
+  // One threshold to start and to stop (user, 2026-11-10: 0.5 x tolerance to stop beside tolerance to start was
+  // two numbers to think about); the slow approach near the heading (compute_command) keeps the overshoot small.
+  rotating_ = error && std::abs(*error) > tolerance;
   if (!rotating_) rotate_sign_ = 0;
   return rotating_;
 }
@@ -315,6 +337,27 @@ bool LateralController::is_target_reached() const
   return true;
 }
 
+double LateralController::tracking_yaw() const
+{
+  const auto & q = odom_.pose.pose.orientation;
+  const double yaw = std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+  return task_lookahead_ > 0.0 || camera_distance_mode_ ? yaw : yaw + heading_offset_;
+}
+
+double LateralController::gain_scale(double bearing) const
+{
+  if (gain_errors_.empty() || gain_errors_.size() != gain_scales_.size()) return 1.0;
+  const double e = std::abs(bearing);
+  if (e <= gain_errors_.front()) return gain_scales_.front();
+  for (std::size_t i = 1; i < gain_errors_.size(); ++i) {
+    if (e <= gain_errors_[i]) {
+      const double t = (e - gain_errors_[i - 1]) / (gain_errors_[i] - gain_errors_[i - 1]);
+      return gain_scales_[i - 1] + t * (gain_scales_[i] - gain_scales_[i - 1]);
+    }
+  }
+  return gain_scales_.back();
+}
+
 std::optional<double> LateralController::heading_error(double target_v) const
 {
   if (!have_odom_ || path_.poses.empty() || path_.header.frame_id != odom_.header.frame_id) {
@@ -334,6 +377,8 @@ std::optional<double> LateralController::heading_error(double target_v) const
     const auto target = target_point();
     desired = std::atan2(target.y - p.y, target.x - p.x);
     if (target_v < 0.0) desired += std::acos(-1.0);
+    // Toward the lookahead point the robot goes where it travels, not where the pose points (heading_offset_).
+    return std::remainder(desired - tracking_yaw(), 2.0 * std::acos(-1.0));
   }
   return std::remainder(desired - current, 2.0 * std::acos(-1.0));
 }
@@ -343,7 +388,7 @@ std::optional<double> LateralController::heading_error(double target_v) const
 // 변환해 kappa = 2*y / (x*x + y*y)를 구한다. 경로 전체에서 차체 앞쪽 점을 찾지 않으므로 먼 구간을 집지 않고,
 // 목표점이 뒤나 옆에 있으면 needs_rotation()이 제자리 회전을 먼저 시킨다. 후진(v < 0)도 같은 원을 따른다.
 // odom/경로 없음, 좌표계 불일치, 종점 도달이면 nullopt를 반환한다.
-std::optional<double> LateralController::get_curvature(double /*target_v*/) const
+std::optional<double> LateralController::get_curvature(double /*target_v*/, double * bearing) const
 {
   if (!have_odom_ || path_.poses.empty() || path_.header.frame_id != odom_.header.frame_id) {
     return std::nullopt;
@@ -352,15 +397,14 @@ std::optional<double> LateralController::get_curvature(double /*target_v*/) cons
     return std::nullopt;
   }
   const auto & p = odom_.pose.pose.position;
-  const auto & q = odom_.pose.pose.orientation;
-  const double yaw = std::atan2(
-    2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+  const double yaw = tracking_yaw();
   const auto point = target_point();
   const double dx = point.x - p.x, dy = point.y - p.y;
   const double x = std::cos(yaw) * dx + std::sin(yaw) * dy;
   const double y = -std::sin(yaw) * dx + std::cos(yaw) * dy;
   const double distance = std::hypot(x, y);
   if (distance < 1e-9) return std::nullopt;
+  if (bearing) *bearing = std::atan2(y, x);
   // Circle through the robot tangent to its heading; the same arc serves reverse travel (v < 0).
   return 2.0 * (y / distance) / distance;
 }
@@ -369,6 +413,11 @@ std::optional<double> LateralController::get_curvature(double /*target_v*/) cons
 // false이면 ControlMaster가 longitudinal 목표를 정지시킨다.
 bool LateralController::can_track(double target_v) const
 {
+  if (continuous_tracking_ && !path_.poses.empty() && have_odom_ &&
+      arc_[node_] > kNodeWindow * path_spacing_ && !at_goal()) {
+    const auto error = heading_error(target_v);
+    if (!error || std::abs(*error) >= std::acos(-1.0) / 2) return false;
+  }
   return get_curvature(target_v).has_value() && !needs_rotation(target_v);
 }
 
@@ -381,23 +430,56 @@ std::array<double, 2> LateralController::compute_command(double linear_speed, do
 {
   if (std::isfinite(target_v_hint) && std::abs(target_v_hint) <= 1e-12) return {0.0, 0.0};
   const double direction = std::isfinite(target_v_hint) ? target_v_hint : linear_speed;
+  if (continuous_tracking_ && !path_.poses.empty() && have_odom_ &&
+      arc_[node_] > kNodeWindow * path_spacing_ && !at_goal()) {
+    const auto error = heading_error(direction);
+    if (!error || std::abs(*error) >= std::acos(-1.0) / 2) return {0.0, 0.0};
+  }
   // ControlMaster always supplies the direction hint; it has also cleared forward motion when can_track()
   // said to turn. Direct callers without a hint never turn in place.
   if (std::isfinite(target_v_hint) && needs_rotation(direction)) {
-    // One direction per turn: a target that jumps across (a path doubling back near itself, pose noise) must not
-    // swing the robot back and forth (box L1, 2026-11-08: 40 s of alternating turns). Within kTurnSlow of the
-    // target heading the turn slows down (a fine tolerance is not overshot) and may reverse to correct an overshoot.
-    constexpr double kTurnSlow = 0.3, kTurnMin = 0.15;  // [rad], [rad/s]
+    // The shorter way round (user 2026-11-13: a turn kept its first side and went the long way, 323 deg at S4). Only
+    // a target within kTurnBack of straight behind keeps the side the turn started on: there pose noise and a path
+    // doubling back near itself flip the shorter side (box L1, 2026-11-08: 40 s of alternating turns). Within
+    // kTurnSlow of the target heading the turn slows down (a fine tolerance is not overshot).
+    constexpr double kTurnSlow = 0.3, kTurnMin = 0.15, kTurnBack = 0.5;  // [rad], [rad/s], [rad]
+    // The offset the integral holds belongs to the direction just driven (the pose heading is 0 to 5 deg off depending
+    // on place and direction): after a turn on the spot it starts again. tour_i30_1111_1928 kept it and the first
+    // 0.5 m of every leg spread 1.9 cm instead of 1.0-1.3.
+    integral_ = 0.0;
     const double error = *heading_error(direction);
-    if (rotate_sign_ == 0 || std::abs(error) < kTurnSlow) rotate_sign_ = error >= 0.0 ? 1 : -1;
-    const double speed = std::clamp(rotate_angular_speed_ * std::abs(error) / kTurnSlow, kTurnMin, rotate_angular_speed_);
+    if (rotate_sign_ == 0 || std::abs(error) < std::acos(-1.0) - kTurnBack) rotate_sign_ = error >= 0.0 ? 1 : -1;
+    // At the goal (the final heading alignment) at most goal_rotate_angular_speed_: a fast turn there overshoots and
+    // slips off the goal (2026-11-10: 0.57 rad/s at a stage point, past the heading, 10 cm off, circling).
+    const bool goal = !camera_distance_mode_ && goal_rotate_angular_speed_ > 0.0 && at_goal();
+    const double top = goal ? std::min(goal_rotate_angular_speed_, rotate_angular_speed_) : rotate_angular_speed_;
+    // Slowing down toward the heading as toward a goal point: proportional to the error within kTurnSlow, down to
+    // goal_rotate_min_speed_ at the goal (2026-11-10: the 0.15 rad/s floor ran 0.87 deg past a stage heading).
+    const double floor = goal && goal_rotate_min_speed_ > 0.0 ? goal_rotate_min_speed_ : kTurnMin;
+    const double speed = std::clamp(top * std::abs(error) / kTurnSlow, std::min(floor, top), top);
     return wheel_delta(rotate_sign_ * speed);
   }
-  const auto curvature = get_curvature(direction);
+  double bearing = 0.0;
+  const auto curvature = get_curvature(direction, &bearing);
   if (!curvature) {
     return {0.0, 0.0};
   }
-  return wheel_delta(tracking_gain_ * linear_speed * *curvature);
+  // Backwards-facing travel sees the lookahead point behind the body: the bearing off the travel direction counts.
+  if (direction < 0.0) bearing = std::remainder(bearing - std::acos(-1.0), 2.0 * std::acos(-1.0));
+  double kappa = gain_scale(bearing) * *curvature;
+  if (integral_gain_ > 0.0 && task_lookahead_ <= 0.0 && !camera_distance_mode_) {
+    // A new path can start well beside the robot (a pose jump at the stop before it, 9-11 cm, tour_1111_1716): only
+    // kOffsetMax of the offset counts, so one such start cannot fill the integral.
+    constexpr double kOffsetMax = 0.05;  // [m]
+    if (const auto d = lateral_offset()) {
+      integral_ = std::clamp(
+        integral_ + integral_gain_ * std::clamp(*d, -kOffsetMax, kOffsetMax) * std::abs(linear_speed) * integral_dt_,
+        -integral_limit_, integral_limit_);
+    }
+    // Left of the path -> turn right of the travel direction; backwards-facing travel (v < 0) mirrors the body curvature.
+    kappa -= (direction < 0.0 ? -1.0 : 1.0) * integral_;
+  }
+  return wheel_delta(tracking_gain_ * linear_speed * kappa);
 }
 
 }  // namespace craft_control

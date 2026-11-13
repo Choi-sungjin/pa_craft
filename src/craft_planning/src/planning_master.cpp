@@ -2,7 +2,6 @@
 #include "craft_planning/planning_config.hpp"
 
 #include <ament_index_cpp/get_package_share_path.hpp>
-#include <craft_perception/msg/knob_observation_array.hpp>
 #include <craft_perception/msg/puck_observation_array.hpp>
 #include <diagnostic_msgs/msg/diagnostic_array.hpp>
 #include <std_msgs/msg/bool.hpp>
@@ -17,6 +16,7 @@
 #include <tf2_ros/transform_listener.hpp>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <deque>
@@ -89,7 +89,11 @@ struct Computation
     bool ok = false;
     Pose box_goal;  // box approach: the chosen face goal (empty frame otherwise)
     double face_normal = 0;  // box approach: outward normal of the chosen face [rad, map]
+    std::string faces;       // box approach: each face tried, its path length or why not
+    std::string through_obstacles;  // no route past the obstacles (this error): the map-only route instead
     bool retryable = false;
+    bool local_renewal = false;
+    std::vector<geometry_msgs::msg::Point> route_via;  // retained via points of a fresh global replan
     Path path;
     std::vector<double> speed_limit;  // per path pose [m/s]
     std::vector<std::size_t> stops;  // STOP_TURN corners: the path is sent one segment at a time
@@ -115,6 +119,15 @@ struct PlanningMaster::Impl
     std::shared_ptr<tf2_ros::Buffer> tf;
     std::shared_ptr<tf2_ros::TransformListener> listener;
     Sample<Odom> odom, lidar_odom;
+    // The dock by wheel odometry (box_approach.dock_wheel_odometry): the map pose at the dock's start plus the wheel
+    // odometry's motion since, in place of the localization's pose while CameraDock / FinalStop / CameraVerify.
+    Sample<Odom> wheel_odom;
+    struct DockAnchor {double mx, my, myaw, wx, wy, wyaw;};
+    std::optional<DockAnchor> dock_anchor;
+    // [stamp s, x, y] of /perception/state/odom over the last odom_trail_s: how far the robot moved since a camera
+    // frame was taken (travel_since).
+    std::deque<std::array<double, 3>> odom_trail;
+    static constexpr double odom_trail_s = 2.0;
     Sample<sensor_msgs::msg::Imu> imu;
     int64_t lidar_stamp = 0, imu_stamp = 0;
     Sample<Joints> joints;
@@ -146,9 +159,21 @@ struct PlanningMaster::Impl
       CameraStageStop, LidarPerceive, LidarRelease, LidarDock, HandoffStop, CameraPerceive, CameraRelease, CameraDock, FinalStop, CameraVerify};
     BoxPhase box_phase = BoxPhase::Stage;
     Sample<BoxObservation> box_observation;
+    // LiDAR observations taken standing still at the stage point (LidarPerceive, after settle_s): their median
+    // makes the dock line (lidar_window_s).
+    std::vector<BoxObservation> lidar_samples;
+    // One stage (box_approach.one_shot): the newest LiDAR observations while driving to the stage point and while
+    // docking (their median makes the dock path), and when the dock path was last made from them.
+    std::vector<BoxObservation> track_samples;
+    double dock_updated_at = 0;
+    double dock_curve_radius = 0;  // the tightest radius of the last dock curve refused (dock_min_radius)
     BoxObservationRequest box_request;
     rclcpp::Publisher<BoxObservationRequest>::SharedPtr box_request_pub;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr box_phase_pub;
+    // /planning/boxes: every arena box centre (planning.yaml; the target box where the LiDAR measured it), 1 Hz:
+    // perception leaves the beams on them out of the scan slam_toolbox localizes on.
+    rclcpp::Publisher<Points>::SharedPtr boxes_pub;
+    double boxes_pub_at = 0;
     double box_request_at = 0, camera_stop_at = 0, handoff_lidar_gap = 0;
     double handoff_ack_at = 0;
     int64_t handoff_ack_stamp = 0;
@@ -161,6 +186,15 @@ struct PlanningMaster::Impl
     double box_perceive_at = 0;
     double box_settle_at = 0;
     int box_corrections = 0;
+    bool box_reoriented = false;  // this box step already planned again for a turned box
+    bool stage_turned = false;    // the stage drive was replaced by a turn in place (stuck circling off its point)
+    bool stage_final = false;     // within stage_final_m of the stage point: short target
+    bool restage_back = false;    // restage: back onto the measured dock line once control has released the hold
+    bool stage_reverse = false;   // the stage drive is that back-out (drives at -reverse_speed)
+    double restage_at = 0;
+    std::optional<double> stage_still_since;  // turned in place within the heading tolerance and standing still since
+    std::optional<double> stage_near_since;  // within stage_capture_m of the stage point: since the last cm closer
+    double stage_near_best = 0;              // the closest it got [m]
     bool box_reported = false;  // the END line went out
     std::optional<double> box_face;  // outward normal of the face being approached [rad, map]
     enum class BoxMove {None, Dock, Reverse};
@@ -175,7 +209,10 @@ struct PlanningMaster::Impl
     // global_local mode: the global path of the current Navigate step and the global arc length of the robot when
     // the local path being driven was made (renewed after path_planner.local_update of progress).
     Path global_path;
-    double local_origin = 0;
+    double local_origin = 0, global_progress = 0, global_length = 0;
+    std::vector<geometry_msgs::msg::Point> route_via;
+    std::vector<double> route_via_s;
+    std::size_t next_route_via = 0;
     Pose resolved_goal;
     uint64_t next_id = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
       std::chrono::system_clock::now().time_since_epoch()).count());
@@ -205,6 +242,10 @@ struct PlanningMaster::Impl
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr state_pub;
     rclcpp::Publisher<Pose>::SharedPtr box_goal_pub;  // /planning/approach_goal: the chosen box face goal
     rclcpp::Publisher<Pose>::SharedPtr box_search_pub;  // /planning/box_search: where the box step expects its box
+    rclcpp::Publisher<Points>::SharedPtr ignored_pub;  // /planning/ignored_obstacles: obstacle points dropped for the box
+    rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr padding_pub;  // /planning/padding: what plans are checked against
+    double padding_pub_at = -1e9;
+    mutable double ignored_pub_at = -1e9;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr box_status_pub;  // /planning/box_status: one line per step
     std::string box_blocked_by;  // why the last dock/back-out line was not clear
     std::string last_compute_error;
@@ -256,6 +297,12 @@ struct PlanningMaster::Impl
         sample.valid = false;
         if (config.require_lidar_localization && active()) {
           const auto now = seconds();
+          // Which input and why (2026-11-11: the run failed in the stage turn with nothing but the reason below).
+          RCLCPP_ERROR(node.get_logger(), "[LOCALIZATION INPUT] %s rejected: values %s, stamp %+.1f ms after the previous "
+                       "one (must be > 0), age %.1f ms (limit %.0f ms)",
+                       std::is_same_v<T, sensor_msgs::msg::Imu> ? "/perception/imu/data" : "/perception/lidar/odom",
+                       values_valid ? "valid" : "INVALID", (stamp - last_stamp) * 1e-6,
+                       (node.now().nanoseconds() - stamp) * 1e-6, config.localization_observation_timeout_s * 1000);
           fsm.fail("invalid lidar odom or IMU observation", now);
           remaining.clear(); result.reset(); waiting_for_path = false; route_paused = false;
           TaskCommand c; c.header.stamp = node.now(); c.operation = TaskCommand::STOP;
@@ -335,11 +382,63 @@ struct PlanningMaster::Impl
                 points.poses.insert(points.poses.end(), input->value.poses.begin(), input->value.poses.end());
             }
         }
+        // The box being approached is an obstacle like any other until the last approach path (the dock, after the
+        // stage point) is made; from then on (docking()) every point within ignore_radius of it as the LiDAR measured
+        // it goes (user, 2026-11-10; its turned or smeared points fell outside the footprint the approach frees and
+        // blocked the dock). Not around the planning.yaml place: a box standing off it would be partly freed.
+        Points ignored; ignored.header = points.header; ignored.header.stamp = node.now();
+        if (step && !step->box.empty() && box_seen && docking()) {
+          const double r2 = config.box.ignore_radius * config.box.ignore_radius, cx = box_seen->x, cy = box_seen->y;
+          auto &v = points.poses;
+          const auto cut = std::stable_partition(v.begin(), v.end(), [&](const geometry_msgs::msg::Pose &q) {
+            const double dx = q.position.x - cx, dy = q.position.y - cy; return dx * dx + dy * dy > r2;});
+          ignored.poses.assign(cut, v.end()); v.erase(cut, v.end());
+        }
+        // /planning/ignored_obstacles: the points dropped for the box (RViz, green), at most 5 Hz.
+        if (ignored_pub && now - ignored_pub_at >= 0.2) {ignored_pub_at = now; ignored_pub->publish(ignored);}
         return points;
     }
     // A box step drives at box_approach.speed to the stage point (no heading), docks at dock_speed with the face
     // heading required and backs out at -reverse_speed.
     bool box_in(BoxPhase phase) const {return step && !step->box.empty() && box_phase == phase;}
+    // /planning/state below Run.Execute (user 2026-11-13), one line for all layers:
+    //   what:  .Box.<BoxPhase> (a box step: Stage, LidarPerceive, CameraDock, ...), .Leave (backing out of a dock),
+    //          nothing for a plain drive;
+    //   then:  .Blocked (paused, waiting block_wait_s for it to clear), .Replan (still blocked: computing a way
+    //          around), .DockBlocked (dock / back-out line blocked, waiting dock_block_wait_s), .NoRoute (no way
+    //          around yet, retrying); nothing while it moves.
+    //   e.g. Run.Execute, Run.Execute.Blocked, Run.Execute.Box.LidarPerceive, Run.Execute.Box.Stage.Replan.
+    static const char *box_phase_name(BoxPhase phase) {
+      switch (phase) {
+        case BoxPhase::Stage: return "Stage";
+        case BoxPhase::Perceive: return "Perceive";
+        case BoxPhase::Dock: return "Dock";
+        case BoxPhase::Settle: return "Settle";
+        case BoxPhase::Reverse: return "Reverse";
+        case BoxPhase::CameraStageStop: return "StageStop";
+        case BoxPhase::LidarPerceive: return "LidarPerceive";
+        case BoxPhase::LidarRelease: return "LidarRelease";
+        case BoxPhase::LidarDock: return "LidarDock";
+        case BoxPhase::HandoffStop: return "HandoffStop";
+        case BoxPhase::CameraPerceive: return "CameraPerceive";
+        case BoxPhase::CameraRelease: return "CameraRelease";
+        case BoxPhase::CameraDock: return "CameraDock";
+        case BoxPhase::FinalStop: return "FinalStop";
+        case BoxPhase::CameraVerify: return "CameraVerify";
+      }
+      return "Unknown";
+    }
+    std::string execute_detail() const {
+      std::string text;
+      if (step && !step->box.empty()) text = std::string(".Box.") + box_phase_name(box_phase);
+      else if (step && step->leave) text = ".Leave";
+      const bool dock = box_in(BoxPhase::Dock) || box_in(BoxPhase::Reverse) ||
+                        box_in(BoxPhase::LidarDock) || box_in(BoxPhase::CameraDock);
+      if (box_blocked_at || (blocked_since && dock)) return text + ".DockBlocked";
+      if (blocked_since) return text + (worker.valid() ? ".Replan" : ".Blocked");
+      if (route_failed) return text + ".NoRoute";
+      return text;
+    }
     // One line per box step for the operator (run_corner prints /planning/box_status), also in the log.
     void say(const std::string &text) {
       RCLCPP_INFO(node.get_logger(), "%s", text.c_str());
@@ -380,19 +479,29 @@ struct PlanningMaster::Impl
       box_reported = true;
       const auto b = box_seen ? *box_seen : box_target(step->box);
       const auto &o = odom.value.pose.pose.position;
-      char t[300];
+      char t[480];
       if (box_face) {
         const double n = face_normal(b), reach = b.side / 2 + b.standoff;
-        const bool camera_target = config.box.camera_enabled &&
-          (box_phase == BoxPhase::CameraPerceive || box_phase == BoxPhase::CameraRelease ||
-           box_phase == BoxPhase::CameraDock || box_phase == BoxPhase::FinalStop || box_phase == BoxPhase::CameraVerify);
         const double gx = b.x + reach * std::cos(n), gy = b.y + reach * std::sin(n);
         const double face = (o.x - b.x) * std::cos(n) + (o.y - b.y) * std::sin(n) - b.side / 2;  // centre -> face
+        // The box centre in base_link (x ahead, y left) and the yaw to the face, by odometry; the upper cam's last
+        // gap when it has one (2026-11-10: the distance after the dock, for the operator).
+        const auto &q = odom.value.pose.pose.orientation;
+        const double yaw = std::atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z));
+        const double cx = std::cos(yaw) * (b.x - o.x) + std::sin(yaw) * (b.y - o.y);
+        const double cy = -std::sin(yaw) * (b.x - o.x) + std::cos(yaw) * (b.y - o.y);
+        const double yaw_err = std::remainder(yaw - (n + M_PI), 2 * M_PI);
+        char cam[80] = "";
+        const auto &c = box_observation.value;
+        if (box_observation.valid && c.source == "uppercam" && c.valid)
+          std::snprintf(cam, sizeof(cam), " | upper cam gap %.1f mm", c.gap_m * 1000);
         std::snprintf(t, sizeof(t), "[box %s] END %s | %.1f mm from the face goal %s | box face %.1f mm from the "
-                      "robot centre, %.1f mm from the front (target gap %.0f mm)", step->box.c_str(), how.c_str(),
+                      "robot centre, %.1f mm from the front (target gap %.0f mm)%s | box centre in base_link "
+                      "x %.1f y %+.1f mm, yaw %+.2f deg", step->box.c_str(), how.c_str(),
                       std::hypot(o.x - gx, o.y - gy) * 1000, xy(gx, gy).c_str(), face * 1000,
                       (face - config.box.front_face_x) * 1000,
-                      (camera_target ? config.box.camera_final_gap : config.box.gap) * 1000);
+                      (config.box.camera_enabled ? config.box.camera_final_gap : config.box.gap) * 1000, cam,
+                      cx * 1000, cy * 1000, yaw_err * 180 / M_PI);
       } else {
         std::snprintf(t, sizeof(t), "[box %s] END %s | box centre %s %.3f m from the robot", step->box.c_str(),
                       how.c_str(), xy(b.x, b.y).c_str(), std::hypot(o.x - b.x, o.y - b.y));
@@ -400,7 +509,8 @@ struct PlanningMaster::Impl
       say(t);
     }
     double drive_speed() const {
-      if (box_in(BoxPhase::Reverse)) return -config.box.reverse_speed;
+      if (box_in(BoxPhase::Reverse) || (step && step->leave) || (stage_reverse && box_in(BoxPhase::Stage)))
+        return -config.box.reverse_speed;
       if (box_in(BoxPhase::CameraDock))
         return config.box.camera_only_longitudinal ? config.box.camera_fast_speed : config.box.camera_speed;
       if (box_in(BoxPhase::Dock) || box_in(BoxPhase::LidarDock)) return config.box.dock_speed;
@@ -578,6 +688,7 @@ struct PlanningMaster::Impl
                     say("[box " + (step ? step->box : std::string("?")) + "] 1/5 shortest of the approachable faces: " +
                         faces[face] + " face, driving to its stage point " + xy(end.x, end.y) + " (face goal " +
                         xy(value.box_goal.pose.position.x, value.box_goal.pose.position.y) + ")");
+                    RCLCPP_INFO(node.get_logger(), "[box %s] 1/5 faces: %s", step ? step->box.c_str() : "?", value.faces.c_str());
                     box_goal_pub->publish(value.box_goal);
                 }
             }
@@ -622,6 +733,7 @@ struct PlanningMaster::Impl
           if (!out.ok) out.error = "near entry requires held stopped control and box in front lidar FOV";
           result = std::move(out); return;
         }
+        if (step->leave) {result = leave_path(); return;}
         if (step->kind != StepKind::Navigate && step->kind != StepKind::Tcp) {
             Computation out; out.generation = fsm.generation(); out.ok = valid_request(*step);
             result = out; return;
@@ -633,7 +745,7 @@ struct PlanningMaster::Impl
         if (!box.empty()) {
           // A new box step forgets the previous one's box: the stage drive goes by the known (planning.yaml) box.
           if (fsm.phase() == RunPhase::Compute) {
-            box_seen.reset(); box_phase = BoxPhase::Stage; camera_engaged = true; box_corrections = 0; box_face.reset(); box_reported = false;
+            box_seen.reset(); box_phase = BoxPhase::Stage; camera_engaged = true; box_corrections = 0; box_face.reset(); box_reported = false; box_reoriented = false; stage_turned = false; stage_near_since.reset(); stage_final = false; stage_still_since.reset(); restage_back = stage_reverse = false;
             box_pending = BoxMove::None; box_blocked_at.reset();
           }
           const auto expected = box_target(box);
@@ -647,7 +759,13 @@ struct PlanningMaster::Impl
         const auto current_odom = odom.value;
         const auto current_joints = joints.value;
         const auto points = obstacles(now);
-        worker = std::async(std::launch::async, [this, generation, goal, kind, box, seen, face, current_odom, current_joints, points] {
+        advance_route_progress();
+        // Replan through only the still-unvisited route points, preserving their order through repeated corridors.
+        auto via = step->via;
+        if (!via.empty() && fsm.phase() != RunPhase::Compute && !global_path.poses.empty()) {
+          via.assign(route_via.begin() + static_cast<std::ptrdiff_t>(next_route_via), route_via.end());
+        }
+        worker = std::async(std::launch::async, [this, generation, goal, kind, box, seen, face, current_odom, current_joints, points, via] {
             Computation output;
             output.generation = generation;
             output.start = current_odom;
@@ -660,10 +778,37 @@ struct PlanningMaster::Impl
                     // kept, on a replan), the shortest path wins.
                     const auto target = box.empty() ? BoxTarget{} : seen.value_or(box_target(box));
                     const double face_normal = face.value_or(0.0);
-                    const auto plan = box.empty() ? path_planner.plan(current_odom, goal, points) :
-                      path_planner.plan_box(current_odom, target, points, face ? &face_normal : nullptr, config.box.stage_lead);
+                    const auto route = [&](const geometry_msgs::msg::PoseArray &seen_obstacles) {
+                      auto usable_via = via;
+                      if (!via.empty() && !seen_obstacles.poses.empty()) {
+                        // A via point occupied by the new obstacle cannot be visited. Let A* connect the free
+                        // points either side of it instead of making the obstructed reference mandatory forever.
+                        const auto padding = path_planner.padding(seen_obstacles);
+                        const auto &o = padding.info.origin;
+                        const double yaw = std::atan2(2*(o.orientation.w*o.orientation.z + o.orientation.x*o.orientation.y),
+                          1-2*(o.orientation.y*o.orientation.y + o.orientation.z*o.orientation.z));
+                        usable_via.erase(std::remove_if(usable_via.begin(), usable_via.end(), [&](const auto &v) {
+                          const double dx=v.x-o.position.x, dy=v.y-o.position.y;
+                          const int x=static_cast<int>(std::floor((std::cos(yaw)*dx+std::sin(yaw)*dy)/padding.info.resolution));
+                          const int y=static_cast<int>(std::floor((-std::sin(yaw)*dx+std::cos(yaw)*dy)/padding.info.resolution));
+                          return x<0 || y<0 || x>=static_cast<int>(padding.info.width) || y>=static_cast<int>(padding.info.height) ||
+                            padding.data[static_cast<std::size_t>(y)*padding.info.width+x]>=99;
+                        }), usable_via.end());
+                      }
+                      output.route_via = usable_via;
+                      return box.empty() ? path_planner.plan(current_odom, goal, seen_obstacles, false, nullptr, &usable_via) :
+                        path_planner.plan_box(current_odom, target, seen_obstacles, face ? &face_normal : nullptr,
+                                              config.box.stage_lead, &config.box.box_faces.at(box));};
+                    auto plan = route(points);
+                    // No route past the LiDAR obstacles: the map-only route, driven up to the obstacle (the blocked
+                    // path check stops block_stop_distance before it and keeps replanning; user, 2026-11-10).
+                    if (!plan.ok && !points.poses.empty()) {
+                      auto open = route(geometry_msgs::msg::PoseArray());
+                      if (open.ok) {output.through_obstacles = plan.error; plan = std::move(open);}
+                    }
                     output.box_goal = plan.goal;
                     output.face_normal = plan.face_normal;
+                    output.faces = plan.faces;
                     output.plan_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - began).count();
                     output.ok = plan.ok;
                     output.retryable = plan.retryable;
@@ -689,6 +834,41 @@ struct PlanningMaster::Impl
             return output;
         });
     }
+    // /planning/leave_box: straight back along the robot's own heading. Only the end pose is checked against the map
+    // and the LiDAR obstacles: the start is inside the padding of the box just docked at, and the line back is the
+    // one the dock came in on.
+    Computation leave_path() {
+      Computation out; out.generation = fsm.generation();
+      if (!odom.fresh(seconds(), config.odom_timeout_s)) {out.retryable = true; out.error = "leave: no fresh odom"; return out;}
+      const auto &pose = odom.value.pose.pose;
+      const double yaw = 2 * std::atan2(pose.orientation.z, pose.orientation.w), ux = std::cos(yaw), uy = std::sin(yaw);
+      const auto points = obstacles(seconds());
+      for (double d = config.box.reverse_distance; d >= config.box.reverse_min_distance - 1e-9; d -= 0.05) {
+        const int n = std::max(1, static_cast<int>(std::ceil(d / 0.02)));
+        Path path; path.header.frame_id = config.path.map_frame; path.header.stamp = node.now();
+        std::vector<double> speeds;
+        for (int i = 0; i <= n; ++i) {
+          Pose p; p.header = path.header; p.pose.orientation = pose.orientation;
+          p.pose.position.x = pose.position.x - ux * d * i / n;
+          p.pose.position.y = pose.position.y - uy * d * i / n;
+          path.poses.push_back(p);
+          const double left = d * (n - i) / n;
+          speeds.push_back(std::clamp(std::sqrt(2 * config.path.a_lon_max * left), config.path.v_min, config.box.reverse_speed));
+        }
+        Path end = path; end.poses.erase(end.poses.begin(), end.poses.end() - 1);
+        if (!path_planner.collision_free(end, points)) continue;
+        out.ok = true; out.path = std::move(path); out.speed_limit = std::move(speeds);
+        say("[leave " + step->leave_from + "] back out " + std::to_string(d).substr(0, 4) + " m at " +
+            std::to_string(config.box.reverse_speed).substr(0, 4) + " m/s");
+        return out;
+      }
+      out.retryable = true;
+      out.error = "leave: no free end " + std::to_string(config.box.reverse_min_distance).substr(0, 4) + ".." +
+        std::to_string(config.box.reverse_distance).substr(0, 4) + " m behind the robot";
+      return out;
+    }
+    // Past the drive to the stage point (turned there, the dock path): the map padded with r_approach.
+    bool docking() const {return approach.has_value() && box_phase != BoxPhase::Stage;}
     void command(double now, bool update = false) {
       if (step->box_near_entry && !update) {
         result.reset(); command_at = now; dispatched = false;
@@ -705,6 +885,9 @@ struct PlanningMaster::Impl
           if (!result->box_goal.header.frame_id.empty()) {
             approach = BoxApproach{box_seen.value_or(box_target(step->box)), result->box_goal.pose};
             box_face = result->face_normal; box_phase = BoxPhase::Stage; camera_engaged = true;
+            // One stage: the LiDAR looks for the box all the way to the stage point (splice_dock).
+            if (config.box.one_shot && config.box.camera_enabled && config.box.camera_only_longitudinal &&
+                box_request.source != "lidar") request_box_observation("lidar", now);
           } else if (step->box.empty() || !update) {approach.reset();}
           c.path = result->path; c.path.header.stamp = node.now(); c.speed = drive_speed();
           {
@@ -727,9 +910,18 @@ struct PlanningMaster::Impl
             if (!global_path.poses.empty()) {
               // A local path that ends short of the global end is a segment: if it is driven to its end without a
               // renewal (local planning kept failing), that end plans the rest like a STOP_TURN segment end.
-              local_origin = path_progress(global_path, odom.value.pose.pose.position);
-              const auto &a = c.path.poses.back().pose.position, &b = global_path.poses.back().pose.position;
-              more_segments = std::hypot(a.x - b.x, a.y - b.y) > 1e-6;
+              if (!result->local_renewal) {
+                global_progress = 0.0;
+                route_via = result->route_via; next_route_via = 0; route_via_s.clear();
+                double from = 0.0;
+                for (const auto &v : route_via) {
+                  from = path_progress(global_path, v, from);
+                  route_via_s.push_back(from);
+                }
+              }
+              global_length = path_length(global_path);
+              local_origin = global_progress;
+              more_segments = global_progress + config.path.local_ahead < global_length - 1e-6;
             }
           }
           const bool camera_final_stage = config.box.camera_enabled && box_in(BoxPhase::Stage) && !more_segments;
@@ -739,14 +931,34 @@ struct PlanningMaster::Impl
             auto &q = c.path.poses.back().pose.orientation;
             q.x = q.y = 0.0; q.z = std::sin(heading / 2.0); q.w = std::cos(heading / 2.0);
             c.tolerance_rad = config.box.yaw_tolerance;
+            // The last stage_final_m into the stage point slowly (stage_final_speed), and once there a short target
+            // (stage_final_lookahead from base_link, see camera_box_tick) instead of the speed table's 0.18 m: a point
+            // to stop at, not a line to follow (2026-11-10: 4-14 cm off and circling).
+            double left = 0;
+            for (std::size_t i = c.path.poses.size(); i-- > 0;) {
+              if (i + 1 < c.path.poses.size()) {
+                const auto &a = c.path.poses[i].pose.position, &b = c.path.poses[i + 1].pose.position;
+                left += std::hypot(b.x - a.x, b.y - a.y);
+              }
+              if (left > config.box.stage_final_m) break;
+              if (i < c.speed_limit.size()) c.speed_limit[i] = std::min(c.speed_limit[i], config.box.stage_final_speed);
+            }
+            if (stage_final) {c.tracking_reference_x = 0.0; c.lookahead_distance = config.box.stage_final_lookahead;}
           }
+          c.continuous_tracking = step && !step->via.empty();
+          if (c.continuous_tracking) c.duration_s = 600.0;
           c.require_goal_heading = heading_required();
           // The stage drive stops close to the face normal (the dock starts there).
           c.goal_tolerance = box_in(BoxPhase::Stage) ? config.box.stage_goal_tolerance : 0.0;
           active_goal_tolerance = c.goal_tolerance; active_heading_tolerance = c.tolerance_rad;
-          active_tracking_reference_x = 0; active_lookahead_distance = 0;
+          active_tracking_reference_x = c.tracking_reference_x; active_lookahead_distance = c.lookahead_distance;
           active_camera_distance_control = false; active_camera_stamp_ns = 0;
           active_path = c.path; active_speed = c.speed_limit; route_paused = false; route_failed = false; blocked_since.reset();
+          if (!result->through_obstacles.empty()) {
+            say("no route past the LiDAR obstacles (" + result->through_obstacles + "): driving the map route up to the obstacle");
+          }
+          // Blocked right ahead (a map-only route, or a replan standing at the obstacle): sent standing still.
+          if (!step->leave && !remaining_path_clear(now)) {c.speed = 0.0; route_paused = true;}
           break;
         }
         case StepKind::Tcp: c.joints = result->joints; c.joints.header.stamp = node.now(); break;
@@ -762,6 +974,50 @@ struct PlanningMaster::Impl
     // robot's foot on it, as a new task: reverse_distance, or the longest clear one down to reverse_min_distance
     // (5 cm steps). The line, not the robot's own heading: the dock lane can be tight, and a robot a couple of cm
     // off the line already sits in a wall's padding (L1 west face, 2026-11-08). False when none is clear.
+    // Restage onto the measured dock line by backing straight onto it (2026-11-13, bags mission_1113_*: the forward
+    // stage drive to the measured stage point 5 cm behind turned 60 deg toward it, the 2 s stuck rule gave up there,
+    // and every S1 dock started 1-4 cm off its line). Target: on the line, |sideways| / tan(restage_reverse_deg) behind
+    // the robot's foot (at least reverse_min_distance), facing the box. False when too far or blocked.
+    bool send_restage_reverse(double now) {
+      if (!box_seen || !odom.fresh(now, config.odom_timeout_s)) return false;
+      const auto &b = *box_seen;
+      const double normal = face_normal(b), heading = normal + M_PI, ux = std::cos(heading), uy = std::sin(heading);
+      const double reach = b.side / 2 + b.standoff, gx = b.x + reach * std::cos(normal), gy = b.y + reach * std::sin(normal);
+      const auto &r = odom.value.pose.pose.position;
+      const double along = (gx - r.x) * ux + (gy - r.y) * uy;  // the robot's foot behind the stage point
+      const double lateral = -(r.x - gx) * uy + (r.y - gy) * ux;
+      const double back = std::max(config.box.reverse_min_distance,
+                                   std::abs(lateral) / std::tan(config.box.restage_reverse_deg * M_PI / 180));
+      if (back > config.box.reverse_distance) return false;
+      const double tx = gx - (along + back) * ux, ty = gy - (along + back) * uy;
+      const double d = std::hypot(tx - r.x, ty - r.y);
+      const int n = std::max(1, static_cast<int>(std::ceil(d / 0.02)));
+      Path path; path.header.frame_id = config.path.map_frame; path.header.stamp = node.now();
+      std::vector<double> speeds;
+      for (int i = 0; i <= n; ++i) {
+        Pose p; p.header = path.header;
+        p.pose.orientation.z = std::sin(heading / 2); p.pose.orientation.w = std::cos(heading / 2);
+        p.pose.position.x = r.x + (tx - r.x) * i / n; p.pose.position.y = r.y + (ty - r.y) * i / n;
+        path.poses.push_back(p);
+        const double left = d * (n - i) / n;
+        speeds.push_back(std::clamp(std::sqrt(2 * config.path.a_lon_max * left), config.path.v_min, config.box.stage_final_speed));
+      }
+      if (!path_planner.collision_free(path, obstacles(now), approach ? &*approach : nullptr, docking())) {
+        say("[box " + step->box + "] 1/5 restage: the line behind is blocked by " + blocker(path, now) +
+            ": the forward stage drive instead");
+        return false;
+      }
+      char t[200];
+      std::snprintf(t, sizeof(t), "[box %s] 1/5 restage: backing %.0f mm straight onto the measured dock line "
+                    "(%+.1f mm sideways, %.1f deg off its heading on the way)", step->box.c_str(), d * 1000, lateral * 1000,
+                    std::atan2(std::abs(lateral), back) * 180 / M_PI);
+      say(t);
+      stage_reverse = true;
+      global_path.poses.clear(); more_segments = false;
+      send_box_move(now, path, speeds, config.box.stage_goal_tolerance, config.box.yaw_tolerance);
+      stage_final = true;  // no short-target renewal: this path is already the last few cm
+      return true;
+    }
     bool send_reverse(double now) {
       const auto &b = *box_seen;
       const double normal = face_normal(b), heading = normal + M_PI, ux = std::cos(heading), uy = std::sin(heading);
@@ -788,7 +1044,7 @@ struct PlanningMaster::Impl
           const double left = d * (n - i) / n;  // slow down at a_lon_max to v_min at the end
           speeds.push_back(std::clamp(std::sqrt(2 * config.path.a_lon_max * left), config.path.v_min, config.box.reverse_speed));
         }
-        clear = path_planner.collision_free(path, points, approach ? &*approach : nullptr);
+        clear = path_planner.collision_free(path, points, approach ? &*approach : nullptr, docking());
       }
       if (!clear) {box_blocked_by = blocker(path, now); return false;}
       box_phase = BoxPhase::Reverse;
@@ -804,6 +1060,7 @@ struct PlanningMaster::Impl
     }
     void request_box_observation(const std::string &source, double now) {
       box_request = BoxObservationRequest{};
+      lidar_samples.clear(); track_samples.clear();
       box_request.header.frame_id = config.path.map_frame; box_request.header.stamp = node.now();
       box_request.request_id = ++next_id; box_request.source = source; box_request.box_id = step->box;
       const auto b = box_seen.value_or(box_target(step->box));
@@ -847,11 +1104,58 @@ struct PlanningMaster::Impl
         config.box.camera_timeout;
       return box_observation.fresh(now, timeout) && is_fresh_input(box_observation.value.header, timeout);
     }
+    // Median of LiDAR observations: gap, yaw (about the first) and the box position; the position from only the
+    // scans that saw both face ends when at least half did (face_centre_observed then), else from all.
+    static BoxObservation median_observation(const std::vector<BoxObservation> &all) {
+      const auto median = [](std::vector<double> v) {
+        std::sort(v.begin(), v.end()); const std::size_t k = v.size() / 2;
+        return v.size() % 2 ? v[k] : (v[k - 1] + v[k]) / 2;
+      };
+      const auto yaw_of = [](const BoxObservation &o) {
+        const auto &q = o.box_pose.orientation;
+        return std::atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z));
+      };
+      std::vector<const BoxObservation *> seen;
+      for (const auto &o : all) if (o.face_centre_observed) seen.push_back(&o);
+      const bool centre = 2 * seen.size() >= all.size();
+      if (!centre) {seen.clear(); for (const auto &o : all) seen.push_back(&o);}
+      std::vector<double> x, y, gap, yaw;
+      const double yaw0 = yaw_of(all.front());
+      for (const auto *o : seen) {x.push_back(o->box_pose.position.x); y.push_back(o->box_pose.position.y);}
+      for (const auto &o : all) {gap.push_back(o.gap_m); yaw.push_back(yaw0 + std::remainder(yaw_of(o) - yaw0, 2 * M_PI));}
+      BoxObservation m = all.back();
+      m.box_pose.position.x = median(x); m.box_pose.position.y = median(y); m.gap_m = median(gap);
+      const double w = median(yaw);
+      m.box_pose.orientation.x = m.box_pose.orientation.y = 0;
+      m.box_pose.orientation.z = std::sin(w / 2); m.box_pose.orientation.w = std::cos(w / 2);
+      m.face_centre_observed = centre;
+      return m;
+    }
     BoxTarget observed_box(const BoxObservation &o, double gap) const {
       auto b = box_target(step->box);
-      b.x = o.box_pose.position.x; b.y = o.box_pose.position.y;
       const auto &q = o.box_pose.orientation;
-      b.yaw = std::atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z));
+      const double seen_yaw = std::atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z));
+      // square_boxes (L1-L3, user 2026-11-12: they are not turned) take the map yaw like yaw_from_map: the dock
+      // line no longer swings with the LiDAR yaw (175.6-186.4 deg over four docks of L1), so the robot standing
+      // square at the stage point is on it and the second stage drive + second LiDAR measurement (turned box /
+      // off the measured line, below) does not come up for them.
+      const auto &square = config.box.square_boxes;
+      const bool map_yaw = config.box.yaw_from_map || std::find(square.begin(), square.end(), step->box) != square.end();
+      if (!map_yaw) {
+        b.x = o.box_pose.position.x; b.y = o.box_pose.position.y; b.yaw = seen_yaw;
+      } else {
+        // The boxes sit square to the map (planning.yaml): its yaw, to the nearest quarter turn of the one seen
+        // (2026-11-10: the LiDAR yaw of one box still varied 175.6-186.4 deg over four docks, the dock line with
+        // it). From the LiDAR only the distance along the approached face's normal; along the face too only when
+        // both face ends were seen (face_centre_observed), else the map's (every dock so far: not seen).
+        const double known = b.yaw;
+        b.yaw = known + std::round(std::remainder(seen_yaw - known, 2 * M_PI) / (M_PI / 2)) * (M_PI / 2);
+        const double n = face_normal(b), nx = std::cos(n), ny = std::sin(n);
+        const double dx = o.box_pose.position.x - b.x, dy = o.box_pose.position.y - b.y;
+        const double along_normal = dx * nx + dy * ny, along_face = -dx * ny + dy * nx;
+        const double face = o.face_centre_observed ? along_face : 0.0;
+        b.x += along_normal * nx - face * ny; b.y += along_normal * ny + face * nx;
+      }
       b.standoff = config.box.front_face_x + gap;
       return b;
     }
@@ -871,6 +1175,22 @@ struct PlanningMaster::Impl
             std::abs(std::atan2(lateral, forward)) > half_fov) return false;
       }
       return true;
+    }
+    // Odometry travel along heading [rad, map] from stamp t [s] to the newest odometry; the pose at t is interpolated
+    // between the odometry samples around it. Empty when t is older than odom_trail (or there is none).
+    std::optional<double> travel_since(double t, double heading) const {
+      if (odom_trail.empty() || !std::isfinite(t) || t < odom_trail.front()[0]) return std::nullopt;
+      const auto &last = odom_trail.back();
+      double x = last[1], y = last[2];
+      for (std::size_t i = 1; i < odom_trail.size(); ++i) {
+        const auto &a = odom_trail[i - 1], &b = odom_trail[i];
+        if (t <= b[0]) {
+          const double k = (t - a[0]) / (b[0] - a[0]);
+          x = a[1] + k * (b[1] - a[1]); y = a[2] + k * (b[2] - a[2]);
+          break;
+        }
+      }
+      return (last[1] - x) * std::cos(heading) + (last[2] - y) * std::sin(heading);
     }
     bool camera_path_alignment(double now, bool final = false) const {
       if (!box_seen || !box_face || !odom.fresh(now, config.odom_timeout_s) ||
@@ -896,12 +1216,13 @@ struct PlanningMaster::Impl
       char buf[240];
       std::snprintf(buf, sizeof(buf), "base_lat=%+.1fmm front_lat=%+.1fmm (tol %.1fmm) yaw_err=%+.2fdeg (tol %.2fdeg) final=%d",
                     lateral*1000.0, front_lateral*1000.0, config.box.lateral_tolerance*1000.0,
-                    yaw_err*180.0/M_PI, config.box.yaw_tolerance*180.0/M_PI, final ? 1 : 0);
+                    yaw_err*180.0/M_PI, (final ? config.box.final_yaw_tolerance : config.box.yaw_tolerance)*180.0/M_PI,
+                    final ? 1 : 0);
       last_alignment_detail = buf;
       const double eff_lat = std::min(std::abs(lateral), std::abs(front_lateral));
       return std::isfinite(lateral) && std::isfinite(front_lateral) && std::isfinite(yaw) &&
         eff_lat <= config.box.lateral_tolerance &&
-        (!final || std::abs(yaw_err) <= config.box.yaw_tolerance);
+        (!final || std::abs(yaw_err) <= config.box.final_yaw_tolerance);
     }
     void camera_box_tick(double now, FsmInput &input) {
       input.completed = false;
@@ -919,10 +1240,105 @@ struct PlanningMaster::Impl
       const bool stationary = stopping || phase == BoxPhase::LidarPerceive || phase == BoxPhase::CameraPerceive || phase == BoxPhase::CameraVerify;
       if (stationary) hold(true);
       if (phase == BoxPhase::Stage) {
-        if (task_result.valid && task_result.value.status == TaskResult::SUCCEEDED && more_segments) {
+        // Planning again for a turned box: control keeps repeating the stopped stage task's STOPPED until the new
+        // stage drive goes out (next_segment), which is not that drive's result.
+        if (next_segment) return;
+        if (restage_back) {
+          if (!control_fresh(now) || control.value.held || control.at < restage_at) return;  // the hold released first
+          restage_back = false;
+          if (!send_restage_reverse(now)) {next_segment = true; result.reset(); last_replan = now - config.replan_period_s;}
+          return;
+        }
+        if (config.box.one_shot && splice_dock(now)) return;
+        // Stuck circling just off the stage point (2026-11-10 noboxes_1505/1559: 4-14 cm off its 3 cm arrival,
+        // control kept turning at full rate toward the path's target beside it, 90 s): within stage_capture_m for
+        // stage_capture_s without arriving, turn in place to the stage heading instead; the dock takes the offset.
+        // Only this stage drive's own result counts (a replaced or stopped one keeps being repeated by control).
+        const bool own = task_result.valid && task_result.value.task_id == step->task_id;
+        // Within stage_final_m of the stage point: the same path with the short target (and on every renewal).
+        if (!stage_final && !stage_turned && !more_segments && own && task_result.value.status == TaskResult::RUNNING &&
+            !active_path.poses.empty() && odom.fresh(now, config.odom_timeout_s)) {
+          const auto &e = active_path.poses.back().pose.position, &o = odom.value.pose.pose.position;
+          if (std::hypot(e.x - o.x, e.y - o.y) <= config.box.stage_final_m) {
+            stage_final = true;
+            active_tracking_reference_x = 0.0; active_lookahead_distance = config.box.stage_final_lookahead;
+            TaskCommand c; c.header.stamp = node.now(); c.task_id = step->task_id; c.revision = ++revision;
+            c.operation = TaskCommand::UPDATE_PATH; c.kind = TaskCommand::NAVIGATE;
+            c.path = active_path; c.path.header.stamp = node.now(); c.speed = route_paused ? 0.0 : drive_speed();
+            c.speed_limit = active_speed; c.require_goal_heading = heading_required();
+            c.goal_tolerance = active_goal_tolerance; c.tolerance_rad = active_heading_tolerance;
+            c.tracking_reference_x = active_tracking_reference_x; c.lookahead_distance = active_lookahead_distance;
+      c.continuous_tracking = step && !step->via.empty();
+            camera_fields(c); command_pub->publish(c); last_replan = now;
+          }
+        }
+        if (!stage_turned && box_face && !more_segments && own &&
+            task_result.value.status == TaskResult::RUNNING && !active_path.poses.empty() && odom.fresh(now, config.odom_timeout_s)) {
+          const auto &e = active_path.poses.back().pose.position, &o = odom.value.pose.pose.position;
+          const double d = std::hypot(e.x - o.x, e.y - o.y);
+          // Stuck = no centimetre closer for stage_capture_s (a slow but steady arrival keeps closing in).
+          // Arrived (within the arrival tolerance), or stuck (no centimetre closer for stage_capture_s): turn in place
+          // there with the arrival latched (user 2026-11-10: the heading turn at the stage point slid 10 cm off it,
+          // left the 3 cm arrival and the robot circled again).
+          const bool arrived = d <= config.box.stage_goal_tolerance;
+          if (!arrived && d > config.box.stage_capture_m) {stage_near_since.reset();}
+          else if (!arrived && (!stage_near_since || d < stage_near_best - 0.01)) {stage_near_since = now; stage_near_best = d;}
+          else if (arrived || now - *stage_near_since >= config.box.stage_capture_s) {
+            if (!stage_near_since) stage_near_since = now;
+            const double heading = *box_face + M_PI;
+            Pose a; a.header.frame_id = config.path.map_frame; a.header.stamp = node.now();
+            a.pose.position = o; a.pose.orientation.z = std::sin(heading / 2); a.pose.orientation.w = std::cos(heading / 2);
+            Pose b = a; b.pose.position.x += 0.001 * std::cos(heading); b.pose.position.y += 0.001 * std::sin(heading);
+            Path turn; turn.header = a.header; turn.poses = {a, b};
+            char text[160];
+            std::snprintf(text, sizeof(text), arrived ? "[box %s] 1/5 at the stage point (%.0f mm, %.1f s): turning in place to %.0f deg" :
+                          "[box %s] 1/5 %.0f mm off the stage point, no closer for %.1f s: turning in place to %.0f deg",
+                          step->box.c_str(), std::hypot(e.x - o.x, e.y - o.y) * 1000, now - *stage_near_since,
+                          std::remainder(heading, 2 * M_PI) * 180 / M_PI);
+            say(text);
+            // The running stage task's path becomes this point (control takes no new task while one runs): it is
+            // at its goal at once and turns to the heading, then SUCCEEDED as the stage drive. No local renewal
+            // may put the old route back.
+            stage_turned = true; stage_reverse = false;
+            active_path = turn; active_speed = {config.box.speed, config.box.speed};
+            global_path.poses.clear(); more_segments = false;
+            TaskCommand c; c.header.stamp = node.now(); c.task_id = step->task_id; c.revision = ++revision;
+            c.operation = TaskCommand::UPDATE_PATH; c.kind = TaskCommand::NAVIGATE;
+            c.path = active_path; c.speed = drive_speed(); c.speed_limit = active_speed; c.require_goal_heading = true;
+            // stage_capture_m as the arrival distance: sliding a little while turning does not undo the arrival.
+            active_goal_tolerance = config.box.stage_capture_m; active_tracking_reference_x = 0; active_lookahead_distance = 0;
+            c.goal_tolerance = active_goal_tolerance; c.tolerance_rad = active_heading_tolerance;
+            c.tracking_reference_x = active_tracking_reference_x; c.lookahead_distance = active_lookahead_distance;
+      c.continuous_tracking = step && !step->via.empty();
+            camera_fields(c); command_pub->publish(c); route_paused = false; last_replan = now;
+            return;
+          }
+        }
+        // After the turn in place: within yaw_tolerance and standing still for stage_still_s, go on without
+        // control's SUCCEEDED (2026-11-10: the turn ended 0.87 deg off, within 1 deg, and the task stayed RUNNING).
+        if (stage_turned && own && task_result.value.status == TaskResult::RUNNING && box_face &&
+            odom.fresh(now, config.odom_timeout_s) && wheel_odom.fresh(now, config.odom_timeout_s)) {
+          const auto &q = odom.value.pose.pose.orientation;
+          const double yaw = std::atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z));
+          const double err = std::abs(std::remainder(yaw - (*box_face + M_PI), 2 * M_PI));
+          const auto &tw = wheel_odom.value.twist.twist;
+          if (err <= config.box.yaw_tolerance && std::abs(tw.linear.x) < 0.005 && std::abs(tw.angular.z) < 0.01) {
+            if (!stage_still_since) stage_still_since = now;
+            else if (now - *stage_still_since >= config.box.stage_still_s) {
+              char text[160];
+              std::snprintf(text, sizeof(text), "[box %s] 1/5 turned to the stage heading (%.2f deg off) and still for %.1f s; "
+                            "control has not reported it done: going on", step->box.c_str(), err * 180 / M_PI,
+                            now - *stage_still_since);
+              say(text);
+              if (!box_in_front_lidar_fov(yaw)) {fail("box corners outside front lidar field of view"); return;}
+              camera_stop(BoxPhase::CameraStageStop, now); return;
+            }
+          } else {stage_still_since.reset();}
+        }
+        if (own && task_result.value.status == TaskResult::SUCCEEDED && more_segments) {
           input.completed = true; return;  // existing segmentation logic continues the stage path
         }
-        if (task_result.valid && task_result.value.status == TaskResult::SUCCEEDED) {
+        if (own && task_result.value.status == TaskResult::SUCCEEDED) {
           if (!box_face || !odom.fresh(now, config.odom_timeout_s) ||
               !is_fresh_input(odom.value.header, config.odom_timeout_s)) {
             fail("box stage heading unavailable"); return;
@@ -938,7 +1354,7 @@ struct PlanningMaster::Impl
           if (!box_in_front_lidar_fov(yaw)) {fail("box corners outside front lidar field of view"); return;}
           camera_stop(BoxPhase::CameraStageStop, now);
         }
-        else if (task_result.valid && (task_result.value.status == TaskResult::FAILED || task_result.value.status == TaskResult::REJECTED || task_result.value.status == TaskResult::STOPPED)) fail("stage task failed");
+        else if (own && (task_result.value.status == TaskResult::FAILED || task_result.value.status == TaskResult::REJECTED || task_result.value.status == TaskResult::STOPPED)) fail("stage task failed");
         return;
       }
       if (stopping) {
@@ -989,17 +1405,37 @@ struct PlanningMaster::Impl
         fail("camera initial held/stopped acknowledgement lost"); return;
       }
       if (config.box.camera_only_longitudinal && phase == BoxPhase::CameraDock) {
+        // One stage: the dock path made again from the newest LiDAR median until the LiDAR gap is
+        // dock_lidar_until_gap, then held; the upper cam takes over as the stop trigger.
+        if (box_request.source == "lidar") track_dock(now);
         // Plain LiDAR-line tracking at camera_speed; the upper cam is only the stop trigger at camera_final_gap
         // (user, 2026-11-09): no camera speed control, invalid frames (box out of its range) are ignored.
-        if (box_observation_fresh(now)) {
+        if (box_request.source == "uppercam" && box_observation_fresh(now)) {
           const auto &o = box_observation.value;
           const double taken = o.header.stamp.sec + o.header.stamp.nanosec * 1e-9;
           const double age = std::max(0.0, node.now().seconds() - taken);
-          const double gap_now = o.gap_m - config.box.camera_speed * age;  // travel since the frame was taken
+          // Travel since the frame was taken, measured by the odometry (2026-11-10; was camera_speed x age, wrong
+          // whenever the dock was not at exactly camera_speed). No odometry that old: the old estimate.
+          const auto moved = travel_since(taken, face_normal(*box_seen) + M_PI);
+          const double travel = moved ? *moved : config.box.camera_speed * age;
+          const double gap_now = o.gap_m - travel;
           if (gap_now <= config.box.camera_final_gap + config.box.camera_gap_tolerance) {
+            char text[200];
+            std::snprintf(text, sizeof(text), "[box %s] 4/5 upper cam %.1f mm (frame %.0f ms old, moved %.1f mm %s, "
+                          "now ~%.1f mm): stop", step->box.c_str(), o.gap_m * 1000, age * 1000, travel * 1000,
+                          moved ? "by odom" : "assumed", gap_now * 1000);
+            say(text); camera_stop(BoxPhase::FinalStop, now); return;
+          }
+        }
+        if (approach && odom.fresh(now, config.odom_timeout_s)) {
+          // The dock path runs on into the box: dock_overrun past the face goal by odometry stops it anyway.
+          const double heading = face_normal(*box_seen) + M_PI;
+          const auto &p = odom.value.pose.pose.position, &g = approach->goal.position;
+          const double past = (p.x - g.x) * std::cos(heading) + (p.y - g.y) * std::sin(heading);
+          if (past >= config.box.dock_overrun) {
             char text[160];
-            std::snprintf(text, sizeof(text), "[box %s] 4/5 upper cam %.1f mm (frame %.0f ms old, now ~%.1f mm): stop",
-                          step->box.c_str(), o.gap_m * 1000, age * 1000, gap_now * 1000);
+            std::snprintf(text, sizeof(text), "[box %s] 4/5 %.1f mm past the face goal by odometry before the upper cam "
+                          "trigger: stop, the upper cam checks", step->box.c_str(), past * 1000);
             say(text); camera_stop(BoxPhase::FinalStop, now); return;
           }
         }
@@ -1011,7 +1447,10 @@ struct PlanningMaster::Impl
         return;
       }
       if (!box_observation_fresh(now)) {
-        if (box_had_observation || phase == BoxPhase::LidarDock || phase == BoxPhase::CameraDock ||
+        // Standing still at the stage point collecting LiDAR samples, a gap (a rejected sample, 2026-11-13 S2: one wall
+        // fit, then 0.2 s without an accepted one) is waited out up to observation_initial_timeout from the request.
+        const bool collecting = phase == BoxPhase::LidarPerceive;
+        if ((box_had_observation && !collecting) || phase == BoxPhase::LidarDock || phase == BoxPhase::CameraDock ||
             phase == BoxPhase::LidarRelease || phase == BoxPhase::CameraRelease ||
             now - box_request_at > config.box.observation_initial_timeout)
           fail("box observation invalid or stale");
@@ -1039,7 +1478,73 @@ struct PlanningMaster::Impl
         }
         if (config.box.camera_only_longitudinal) {
           // The LiDAR box pose only makes the dock line, to camera_final_gap; its gap decides nothing (user, 2026-11-09).
-          box_seen = observed_box(o, config.box.camera_final_gap); box_phase = BoxPhase::LidarRelease; camera_stop_at = now;
+          // The median of the scans over lidar_window_s (2026-11-10: one scan's box centre varies ~4 mm, and the
+          // face ends are found in about three scans of four).
+          if (now - box_request_at < config.box.settle_s + config.box.lidar_window_s ||
+              lidar_samples.size() < 3) return;
+          const auto m = median_observation(lidar_samples);
+          {
+            const auto &q = m.box_pose.orientation;
+            char text[220];
+            std::snprintf(text, sizeof(text), "[box %s] 2/5 LiDAR, median of %zu scans: box %s, face normal %.1f deg, "
+                          "centre along the face %s", step->box.c_str(), lidar_samples.size(),
+                          xy(m.box_pose.position.x, m.box_pose.position.y).c_str(),
+                          std::atan2(2 * q.w * q.z, 1 - 2 * q.z * q.z) * 180 / M_PI,
+                          m.face_centre_observed ? "measured (both face ends seen)" : "from the expected box (ends not seen)");
+            say(text);
+          }
+          const auto seen = observed_box(m, config.box.camera_final_gap);
+          const double turned = std::abs(std::remainder(face_normal(seen) - *box_face, 2 * M_PI));
+          // The robot against the measured box's dock line (the face normal through the face goal).
+          double lateral = 0, yaw_off = 0;
+          {
+            const double heading = face_normal(seen) + M_PI, reach = seen.side / 2 + seen.standoff;
+            const double gx = seen.x - reach * std::cos(heading), gy = seen.y - reach * std::sin(heading);
+            const auto &rp = odom.value.pose.pose.position; const auto &rq = odom.value.pose.pose.orientation;
+            lateral = -(rp.x - gx) * std::sin(heading) + (rp.y - gy) * std::cos(heading);
+            yaw_off = std::remainder(std::atan2(2 * (rq.w * rq.z + rq.x * rq.y), 1 - 2 * (rq.y * rq.y + rq.z * rq.z)) - heading, 2 * M_PI);
+          }
+          const bool turned_away = turned > config.box.reorient_deg * M_PI / 180;
+          const bool off_line = std::abs(lateral) > config.box.restage_lateral_m ||
+            std::abs(yaw_off) > config.box.restage_yaw_deg * M_PI / 180;
+          const bool square_box = std::find(config.box.square_boxes.begin(), config.box.square_boxes.end(), step->box) !=
+            config.box.square_boxes.end();
+          if (square_box && off_line) {
+            // A square box (L1-L3): no second stage drive; the dock curve takes the offset onto the normal.
+            char text[200];
+            std::snprintf(text, sizeof(text), "[box %s] 2/5 square box: %+.1f mm sideways, %+.1f deg off the dock line, "
+                          "docking from here (no second stage drive)", step->box.c_str(), lateral * 1000, yaw_off * 180 / M_PI);
+            say(text);
+          }
+          if ((turned_away || off_line) && !box_reoriented && !square_box) {
+            // The box stands turned from where this stage point faces (2026-11-10: a box turned 45 deg): plan again
+            // from the box as measured, its allowed faces, the shortest. Or the robot stands off the measured dock
+            // line (user, 2026-11-10): to the measured box's stage point of the same face, square to it, and the
+            // LiDAR measures again head-on before the dock. Once per box step.
+            char text[260];
+            if (turned_away) {
+              std::snprintf(text, sizeof(text), "[box %s] 2/5 the box is turned %.1f deg from the face approached: "
+                            "planning again to the stage point of its measured faces", step->box.c_str(), turned * 180 / M_PI);
+            } else {
+              std::snprintf(text, sizeof(text), "[box %s] 2/5 the robot is %+.1f mm sideways, %+.1f deg off the measured dock "
+                            "line: to the measured box's stage point, then the LiDAR measures again", step->box.c_str(),
+                            lateral * 1000, yaw_off * 180 / M_PI);
+            }
+            say(text);
+            box_reoriented = true; box_seen = seen;
+            if (turned_away) box_face.reset(); else box_face = face_normal(seen);
+            box_phase = BoxPhase::Stage; hold(false); stage_turned = false; stage_near_since.reset(); stage_final = false; stage_still_since.reset(); restage_back = stage_reverse = false;
+            box_seen->standoff = box_target(step->box).standoff;  // the stage point as far out as the first one
+            task_result.valid = false;  // the stopped stage task's STOPPED is not this new stage drive's result
+            // ... and the result watchdog (feedback_timeout_s after the last command) starts again from here: with the
+            // last command the hold 1.7 s ago, the invalidated result read as stale before control's next one came
+            // (2026-11-14 mission_1114_0008 S4: "stale control task result" 30 ms after the restage decision).
+            command_at = now;
+            if (!turned_away) {restage_back = true; restage_at = now; return;}
+            next_segment = true; result.reset(); last_replan = now - config.replan_period_s;
+            return;
+          }
+          box_seen = seen; box_phase = BoxPhase::LidarRelease; camera_stop_at = now;
           return;
         }
         if (o.gap_m <= config.box.handoff_gap) {fail("lidar handoff gap already reached"); return;}
@@ -1069,6 +1574,9 @@ struct PlanningMaster::Impl
       } else if (phase == BoxPhase::CameraRelease) {
         if (control_fresh(now) && !control.value.held && control.at >= camera_stop_at) {
           box_phase = BoxPhase::CameraDock;
+          // Trigger mode (the near entry gets here too): the upper cam only stops the dock, as after LidarRelease;
+          // engaged, the dock went out at camera_fast_speed with camera distance control, which control rejects.
+          if (config.box.camera_only_longitudinal) camera_engaged = false;
           if (!send_dock(now)) fail("camera dock path blocked");
         } else if (now - camera_stop_at > config.fsm.ready_timeout_s) fail("camera dock release timeout");
       } else if (phase == BoxPhase::CameraDock) {
@@ -1084,11 +1592,19 @@ struct PlanningMaster::Impl
           static_cast<int64_t>(std::llround(config.box.settle_s * 1000000000.0));
         if (stamp < settle_stamp || stamp == camera_last_confirm_stamp) return;
         camera_last_confirm_stamp = stamp;
-        (void)camera_path_alignment(now, true);
-        if (std::abs(o.gap_m - config.box.camera_final_gap) > config.box.camera_gap_tolerance ||
-            !camera_path_alignment(now, false)) {
-          fail("camera final gap or alignment out of tolerance (" + last_alignment_detail + ")"); return;
-        }
+        // Where the dock stopped is trusted (user 2026-11-13: faults only when things are truly broken; S1 stopped at the
+        // LiDAR face goal with the upper cam at 24.2 mm for a 20 +- 3 mm target and faulted). The error is measured
+        // and reported instead, for the puck placing to correct: /planning/box_alignment [lateral m, yaw rad,
+        // forward m (upper cam gap - camera_final_gap, + = farther), aligned 0/1, correction] from the upper cam.
+        const double gap_error = o.gap_m - config.box.camera_final_gap;
+        const bool aligned = std::abs(gap_error) <= config.box.camera_gap_tolerance && camera_path_alignment(now, true);
+        std_msgs::msg::Float64MultiArray report;
+        report.data = {o.lateral_m, o.yaw_rad, gap_error, aligned ? 1.0 : 0.0, static_cast<double>(box_corrections)};
+        box_alignment_pub->publish(report);
+        RCLCPP_INFO(node.get_logger(), "[box %s] 5/5 dock error (upper cam): gap %.1f mm (target %.1f, %+.1f), lateral "
+                    "%+.1f mm, yaw %+.2f deg; odom %s: %s", step ? step->box.c_str() : "", o.gap_m * 1000,
+                    config.box.camera_final_gap * 1000, gap_error * 1000, o.lateral_m * 1000, o.yaw_rad * 180 / M_PI,
+                    last_alignment_detail.c_str(), aligned ? "within tolerance" : "off tolerance, accepted");
         if (++camera_confirmed >= config.box.camera_confirm_count) {
           request_box_observation("off", now); input.completed = true;
         }
@@ -1097,46 +1613,219 @@ struct PlanningMaster::Impl
     // The dock: the face normal itself, from the point on it nearest the robot to the face goal of the box as
     // perceived, at dock_speed; control turns toward its lookahead point first (yaw_tolerance), pulls the robot onto
     // the line (the target stays lookahead ahead past the goal) and arrives within dock_goal_tolerance along it.
-    // A new task. False when the line is blocked.
-    bool send_dock(double now) {
+    // Trigger mode (camera_only_longitudinal): a curve onto the normal, through the goal into the box (the upper
+    // cam, or dock_overrun by odometry, stops it). A new task. False when the line is blocked.
+    // One stage, driving to the stage point: once the LiDAR has seen the box in splice_samples scans in a row (and the
+    // robot is farther than dock_straight from the face goal), the dock path from the median (send_dock: the stage path
+    // up to a junction, a curve of at least dock_min_radius onto the face normal) replaces the stage path in the
+    // running task. True when it did.
+    bool splice_dock(double now) {
+      // Not while backing onto the measured line (stage_reverse): the dock built on that backward path made the robot
+      // turn round to drive "forward" to a point behind it, then round again, 2 x 180 deg (S4, mission_1113_2320).
+      if (!config.box.camera_enabled || !config.box.camera_only_longitudinal || box_request.source != "lidar" ||
+          stage_turned || stage_reverse || !box_face || worker.valid() || result ||
+          static_cast<int>(track_samples.size()) < config.box.splice_samples || !box_observation_fresh(now) ||
+          !odom.fresh(now, config.odom_timeout_s) || !task_result.valid || task_result.value.task_id != step->task_id ||
+          task_result.value.status != TaskResult::RUNNING) return false;
+      const std::vector<BoxObservation> recent(track_samples.end() - config.box.splice_samples, track_samples.end());
+      const auto seen = observed_box(median_observation(recent), config.box.camera_final_gap);
+      const double normal = face_normal(seen), heading = normal + M_PI, reach = seen.side / 2 + seen.standoff;
+      const double gx = seen.x + reach * std::cos(normal), gy = seen.y + reach * std::sin(normal);
+      const auto &o = odom.value.pose.pose.position; const auto &q = odom.value.pose.pose.orientation;
+      const double yaw = std::atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z));
+      const double along = (gx - o.x) * std::cos(heading) + (gy - o.y) * std::sin(heading);
+      if (along < config.box.dock_straight + 0.02) return false;  // too close for the curve onto the line
+      (void)yaw;  // the curve's radius (send_dock, dock_min_radius) decides whether it can be driven from here
+      const auto before_face = box_face; const auto before_seen = box_seen;
+      box_seen = seen; box_face = normal; box_phase = BoxPhase::CameraDock; camera_engaged = false;
+      if (!send_dock(now, true, true)) {box_phase = BoxPhase::Stage; box_face = before_face; box_seen = before_seen; return false;}
+      dock_updated_at = now;
+      char text[260];
+      std::snprintf(text, sizeof(text), "[box %s] 2/5 seen by the LiDAR on the way (%d scans, gap %.0f mm, %.2f m from "
+                    "the face goal): box %s, face normal %.1f deg; docking on in one go",
+                    step->box.c_str(), config.box.splice_samples, recent.back().gap_m * 1000,
+                    std::hypot(gx - o.x, gy - o.y), xy(seen.x, seen.y).c_str(),
+                    std::remainder(normal, 2 * M_PI) * 180 / M_PI);
+      say(text);
+      std::snprintf(text, sizeof(text), "[box %s] 3/5 dock: curve onto the face normal, straight %.2f m before the face "
+                    "goal %s, on %.2f m into the box; %.2f m/s, %.2f m/s from %.0f mm; the path follows the LiDAR to "
+                    "%.0f mm, the upper cam stops it", step->box.c_str(), config.box.dock_straight, xy(gx, gy).c_str(),
+                    config.box.dock_extend, config.box.camera_fast_speed, config.box.camera_speed,
+                    config.box.camera_slow_gap * 1000, config.box.dock_lidar_until_gap * 1000);
+      say(text);
+      return true;
+    }
+    // One stage, docking: every dock_update_period_s the dock path is made again from the robot's pose and the median
+    // of the newest LiDAR scans; at a LiDAR gap of dock_lidar_until_gap the path holds and the upper cam is asked for.
+    void track_dock(double now) {
+      if (!approach || !box_seen || !odom.fresh(now, config.odom_timeout_s)) return;
+      // The gap now by the odometry against the face goal (at camera_final_gap): the LiDAR loses the face up close.
+      const double heading = face_normal(*box_seen) + M_PI;
+      const auto &p = odom.value.pose.pose.position, &g = approach->goal.position;
+      const double gap = (g.x - p.x) * std::cos(heading) + (g.y - p.y) * std::sin(heading) + config.box.camera_final_gap;
+      if (gap <= config.box.dock_lidar_until_gap) {
+        char text[200];
+        std::snprintf(text, sizeof(text), "[box %s] 3/5 %.0f mm from the face: dock path held, the upper cam stops it",
+                      step->box.c_str(), gap * 1000);
+        say(text); request_box_observation("uppercam", now); return;
+      }
+      if (track_samples.empty() || !box_observation_fresh(now) ||
+          now - dock_updated_at < config.box.dock_update_period_s || worker.valid() || result) return;
+      dock_updated_at = now;
+      const std::size_t n = std::min<std::size_t>(track_samples.size(), static_cast<std::size_t>(std::max(config.box.splice_samples, 3)));
+      const std::vector<BoxObservation> recent(track_samples.end() - static_cast<std::ptrdiff_t>(n), track_samples.end());
+      const auto before = box_seen;
+      box_seen = observed_box(median_observation(recent), config.box.camera_final_gap);
+      if (!send_dock(now, true, true)) box_seen = before;  // blocked: keep driving the last clear one
+    }
+    bool send_dock(double now, bool update = false, bool quiet = false) {
       const auto &b = *box_seen;
       const double normal = face_normal(b);
       const double heading = normal + M_PI, ux = std::cos(heading), uy = std::sin(heading), reach = b.side / 2 + b.standoff;
       const double gx = b.x + reach * std::cos(normal), gy = b.y + reach * std::sin(normal);
       const auto &o = odom.value.pose.pose.position;
       const double along = std::max((gx - o.x) * ux + (gy - o.y) * uy, 0.02);  // robot -> goal along the normal
-      std::vector<std::pair<double, double>> corners{{gx - along * ux, gy - along * uy}, {gx, gy}};
       Pose goal; goal.header.frame_id = config.path.map_frame; goal.header.stamp = node.now();
       goal.pose.position.x = gx; goal.pose.position.y = gy;
       goal.pose.orientation.z = std::sin(heading / 2); goal.pose.orientation.w = std::cos(heading / 2);
       Path path; path.header = goal.header;
-      for (std::size_t k = 1; k < corners.size(); ++k) {
-        const auto [ax, ay] = corners[k - 1]; const auto [bx, by] = corners[k];
-        const int n = std::max(1, static_cast<int>(std::ceil(std::hypot(bx - ax, by - ay) / 0.02)));
-        for (int i = (k == 1 ? 0 : 1); i <= n; ++i) {
-          Pose p = goal; p.pose.position.x = ax + (bx - ax) * i / n; p.pose.position.y = ay + (by - ay) * i / n;
-          path.poses.push_back(p);
-        }
+      const auto add_to = [&goal](Path &p, double x, double y, double yaw) {
+        Pose q = goal; q.pose.position.x = x; q.pose.position.y = y;
+        q.pose.orientation.z = std::sin(yaw / 2); q.pose.orientation.w = std::cos(yaw / 2);
+        p.poses.push_back(q);
+      };
+      const auto add = [&](double x, double y, double yaw) {add_to(path, x, y, yaw);};
+      const bool trigger = config.box.camera_only_longitudinal && box_in(BoxPhase::CameraDock);
+      std::size_t goal_index = 0;  // the sample at the face goal
+      dock_anchor.reset();
+      if (trigger && config.box.dock_wheel_odometry && wheel_odom.fresh(now, config.odom_timeout_s)) {
+        const auto &m = odom.value.pose.pose, &w = wheel_odom.value.pose.pose;
+        dock_anchor = DockAnchor{m.position.x, m.position.y, 2 * std::atan2(m.orientation.z, m.orientation.w),
+                                 w.position.x, w.position.y, 2 * std::atan2(w.orientation.z, w.orientation.w)};
       }
-      std::vector<double> speeds(path.poses.size());
-      double left = 0;
-      for (std::size_t i = path.poses.size(); i-- > 0;) {  // slow down at a_lon_max to v_min at the goal
-        if (i + 1 < path.poses.size()) {
-          const auto &a = path.poses[i].pose.position, &c = path.poses[i + 1].pose.position;
-          left += std::hypot(c.x - a.x, c.y - a.y);
+      const double straight = std::min(config.box.dock_straight, along);
+      const double mx = gx - straight * ux, my = gy - straight * uy;  // the line entry
+      // Cubic Hermite from (sx, sy) heading syaw onto the normal at the line entry (tangents chord long). Its
+      // tightest radius [m] (infinite: straight).
+      const auto hermite = [&](Path &p, double sx, double sy, double syaw) {
+        const double chord = std::hypot(mx - sx, my - sy);
+        const int n = std::max(2, static_cast<int>(std::ceil(chord / 0.01)));
+        const double t0x = chord * std::cos(syaw), t0y = chord * std::sin(syaw), t1x = chord * ux, t1y = chord * uy;
+        const std::size_t first = p.poses.size();
+        for (int i = 0; i < n; ++i) {
+          const double t = static_cast<double>(i) / n, t2 = t * t, t3 = t2 * t;
+          const double h00 = 2 * t3 - 3 * t2 + 1, h10 = t3 - 2 * t2 + t, h01 = -2 * t3 + 3 * t2, h11 = t3 - t2;
+          const double d00 = 6 * t2 - 6 * t, d10 = 3 * t2 - 4 * t + 1, d01 = -6 * t2 + 6 * t, d11 = 3 * t2 - 2 * t;
+          add_to(p, h00 * sx + h10 * t0x + h01 * mx + h11 * t1x, h00 * sy + h10 * t0y + h01 * my + h11 * t1y,
+                 std::atan2(d00 * sy + d10 * t0y + d01 * my + d11 * t1y, d00 * sx + d10 * t0x + d01 * mx + d11 * t1x));
         }
+        add_to(p, mx, my, heading);
+        double tightest = 0;
+        for (std::size_t i = first + 1; i + 1 < p.poses.size(); ++i) {
+          const auto &a = p.poses[i - 1].pose, &c = p.poses[i + 1].pose;
+          const double ds = std::hypot(c.position.x - a.position.x, c.position.y - a.position.y);
+          const double da = std::remainder(2 * std::atan2(c.orientation.z, c.orientation.w) -
+                                           2 * std::atan2(a.orientation.z, a.orientation.w), 2 * M_PI);
+          if (ds > 1e-6) tightest = std::max(tightest, std::abs(da) / ds);
+        }
+        p.poses.pop_back();  // the line entry itself comes with the straight
+        return tightest > 0 ? 1.0 / tightest : std::numeric_limits<double>::infinity();
+      };
+      if (trigger && update) {
+        // One stage (user 2026-11-13: a curve coming in square to the face, a straight before it, no turn on the spot):
+        // the path being driven up to a junction, from there a Hermite curve onto the face normal dock_straight before
+        // the face goal. The junction: the farthest sample (5 cm apart) of the path ahead of the robot, at least
+        // dock_straight + 2 cm before the goal along the normal, whose curve is nowhere tighter than dock_min_radius
+        // (the robot's own pose last). None: not sent, the stage drive (or the last dock path) goes on.
+        std::size_t nearest = 0; double best = std::numeric_limits<double>::infinity();
+        for (std::size_t i = 0; i < active_path.poses.size(); ++i) {
+          const auto &q = active_path.poses[i].pose.position;
+          const double d = std::hypot(q.x - o.x, q.y - o.y);
+          if (d < best) {best = d; nearest = i;}
+        }
+        std::vector<std::size_t> junctions;
+        double run = 0;
+        for (std::size_t i = nearest + 1; i < active_path.poses.size(); ++i) {
+          const auto &a = active_path.poses[i - 1].pose.position, &c = active_path.poses[i].pose.position;
+          run += std::hypot(c.x - a.x, c.y - a.y);
+          if (run < 0.05) continue;
+          run = 0;
+          if ((gx - c.x) * ux + (gy - c.y) * uy >= config.box.dock_straight + 0.02) junctions.push_back(i);
+        }
+        double tightest = 0;
+        bool found = false;
+        for (auto k = junctions.rbegin(); k != junctions.rend() && !found; ++k) {
+          Path trial; trial.header = path.header;
+          for (std::size_t i = nearest; i <= *k; ++i) trial.poses.push_back(active_path.poses[i]);
+          for (auto &q : trial.poses) q.header = goal.header;
+          const auto &jp = active_path.poses[*k].pose;
+          const double radius = hermite(trial, jp.position.x, jp.position.y, 2 * std::atan2(jp.orientation.z, jp.orientation.w));
+          if (radius >= config.box.dock_min_radius) {path = std::move(trial); found = true;}
+          else tightest = std::max(tightest, 1.0 / radius);
+        }
+        if (!found && along >= config.box.dock_straight + 0.02) {
+          const auto &q = odom.value.pose.pose.orientation;
+          Path trial; trial.header = path.header;
+          const double radius = hermite(trial, o.x, o.y, std::atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z)));
+          if (radius >= config.box.dock_min_radius) {path = std::move(trial); found = true;}
+          else tightest = std::max(tightest, 1.0 / radius);
+        }
+        if (!found && along >= config.box.dock_straight + 0.02) {
+          dock_curve_radius = tightest > 0 ? 1.0 / tightest : 0.0;
+          RCLCPP_INFO_THROTTLE(node.get_logger(), *node.get_clock(), 1000, "[box %s] no dock curve of %.2f m radius or "
+                               "wider from the path ahead (tightest %.2f m): not sent yet", step->box.c_str(),
+                               config.box.dock_min_radius, dock_curve_radius);
+          return false;
+        }
+      } else if (trigger && along > config.box.dock_straight + 0.02 && std::hypot(mx - o.x, my - o.y) > 0.02) {
+        // From the robot's pose a cubic Hermite curve onto the normal dock_straight before the goal.
+        const auto &q = odom.value.pose.pose.orientation;
+        hermite(path, o.x, o.y, std::atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z)));
+      }
+      if (trigger) {
+        // Along the normal from -straight (or the robot's projection) through the goal (s = 0) to dock_extend.
+        const double from = path.poses.empty() ? -std::max(along, 0.02) : -straight;
+        const int before = std::max(1, static_cast<int>(std::ceil(-from / 0.01)));
+        const int after = std::max(1, static_cast<int>(std::ceil(config.box.dock_extend / 0.01)));
+        for (int i = 0; i < before; ++i) add(gx + from * (1.0 - static_cast<double>(i) / before) * ux,
+                                             gy + from * (1.0 - static_cast<double>(i) / before) * uy, heading);
+        goal_index = path.poses.size();
+        for (int i = 0; i <= after; ++i) {
+          const double s = config.box.dock_extend * i / after;
+          add(gx + s * ux, gy + s * uy, heading);
+        }
+      } else {
+        std::vector<std::pair<double, double>> corners{{gx - along * ux, gy - along * uy}, {gx, gy}};
+        for (std::size_t k = 1; k < corners.size(); ++k) {
+          const auto [ax, ay] = corners[k - 1]; const auto [bx, by] = corners[k];
+          const int n = std::max(1, static_cast<int>(std::ceil(std::hypot(bx - ax, by - ay) / 0.02)));
+          for (int i = (k == 1 ? 0 : 1); i <= n; ++i) add(ax + (bx - ax) * i / n, ay + (by - ay) * i / n, heading);
+        }
+        goal_index = path.poses.size() - 1;
+      }
+      // Arc length from each sample to the face goal (negative past it): the speed limits.
+      std::vector<double> arc(path.poses.size(), 0.0), speeds(path.poses.size());
+      for (std::size_t i = 1; i < path.poses.size(); ++i) {
+        const auto &a = path.poses[i - 1].pose.position, &c = path.poses[i].pose.position;
+        arc[i] = arc[i - 1] + std::hypot(c.x - a.x, c.y - a.y);
+      }
+      for (std::size_t i = 0; i < path.poses.size(); ++i) {
+        const double left = std::max(arc[goal_index] - arc[i], 0.0);
         const double limit = box_in(BoxPhase::CameraDock) ? config.box.camera_speed : config.box.dock_speed;
         speeds[i] = std::clamp(std::sqrt(2 * config.path.a_lon_max * left), std::min(config.path.v_min, limit), limit);
-        if (config.box.camera_only_longitudinal && box_in(BoxPhase::CameraDock)) {
-          // Fast until camera_slow_gap before the face (the line ends at camera_final_gap), camera_speed after it.
+        if (trigger) {
+          // Fast until camera_slow_gap before the face (the goal is at camera_final_gap), down to camera_speed at
+          // a_lon_max, camera_speed from there on and past the goal.
           const double slow_zone = config.box.camera_slow_gap - config.box.camera_final_gap;
           const double v = config.box.camera_speed;
           speeds[i] = left <= slow_zone ? v : std::min(config.box.camera_fast_speed,
             std::sqrt(v * v + 2 * config.path.a_lon_max * (left - slow_zone)));
         }
       }
+      // The collision check stops at the goal: the extension runs into the box on purpose.
+      Path checked = path; checked.poses.resize(goal_index + 1);
       const BoxApproach dock{b, goal.pose};
-      if (!path_planner.collision_free(path, obstacles(now), &dock)) {
+      if (!path_planner.collision_free(checked, obstacles(now), &dock, true)) {
         box_blocked_by = blocker(path, now);
         RCLCPP_ERROR(node.get_logger(), "[DOCK PATH BLOCKED] box=%s phase=%d goal=(%.3f,%.3f) box_seen=(%.3f,%.3f) blocked_by=%s",
                      step ? step->box.c_str() : "", static_cast<int>(box_phase), gx, gy, b.x, b.y, box_blocked_by.c_str());
@@ -1144,30 +1833,33 @@ struct PlanningMaster::Impl
       }
       approach = dock;
       if (!config.box.camera_enabled) box_phase = BoxPhase::Dock;
-      {
+      if (!quiet) {
         const auto &a = path.poses.front().pose.position;
-        char t[160];
+        char t[240];
         if (config.box.camera_only_longitudinal && box_in(BoxPhase::CameraDock))
-          std::snprintf(t, sizeof(t), "[box %s] 3/5 dock: straight %.2f m to %s, %.2f m/s, %.2f m/s from %.0f mm",
-                        step->box.c_str(), std::hypot(gx - a.x, gy - a.y), xy(gx, gy).c_str(), config.box.camera_fast_speed,
-                        config.box.camera_speed, config.box.camera_slow_gap * 1000);
+          std::snprintf(t, sizeof(t), "[box %s] 3/5 dock: path %.2f m onto the face normal to %s (+%.2f m into the box), "
+                        "%.2f m/s, %.2f m/s from %.0f mm; the upper cam stops it", step->box.c_str(),
+                        std::hypot(gx - a.x, gy - a.y), xy(gx, gy).c_str(), config.box.dock_extend,
+                        config.box.camera_fast_speed, config.box.camera_speed, config.box.camera_slow_gap * 1000);
         else
         std::snprintf(t, sizeof(t), "[box %s] 3/5 dock: turn square, then straight %.2f m at %.2f m/s to %s",
                       step->box.c_str(), std::hypot(gx - a.x, gy - a.y), config.box.dock_speed, xy(gx, gy).c_str());
         say(t);
       }
       send_box_move(now, path, speeds, config.box.camera_enabled ? 0.001 : config.box.dock_goal_tolerance,
-                    box_in(BoxPhase::CameraDock) ? 0.0 : config.box.yaw_tolerance, true);
+                    box_in(BoxPhase::CameraDock) ? 0.0 : config.box.yaw_tolerance, true, update);
       box_goal_pub->publish(goal);
       return true;
     }
+    // update: the running task takes the path (UPDATE_PATH; one stage, the stage drive becomes the dock), else a new task.
     void send_box_move(double now, const Path &path, const std::vector<double> &speeds, double goal_tolerance,
-                       double heading_tolerance, bool dock_tracking = false) {
-      TaskCommand c; c.header.stamp = node.now(); c.task_id = step->task_id = ++next_id; c.revision = ++revision;
-      c.operation = TaskCommand::EXECUTE; c.kind = TaskCommand::NAVIGATE;
+                       double heading_tolerance, bool dock_tracking = false, bool update = false) {
+      TaskCommand c; c.header.stamp = node.now(); c.revision = ++revision;
+      c.task_id = update ? step->task_id : (step->task_id = ++next_id);
+      c.operation = update ? TaskCommand::UPDATE_PATH : TaskCommand::EXECUTE; c.kind = TaskCommand::NAVIGATE;
       c.path = path; c.speed = drive_speed(); c.speed_limit = speeds; c.require_goal_heading = heading_required();
       c.goal_tolerance = goal_tolerance; c.tolerance_rad = heading_tolerance;
-      c.tracking_reference_x = dock_tracking ? config.box.front_face_x : 0.0;
+      c.tracking_reference_x = dock_tracking ? config.box.dock_reference_x : 0.0;
       c.lookahead_distance = dock_tracking ? config.box.dock_lookahead : 0.0;
       c.camera_distance_control = dock_tracking && box_in(BoxPhase::CameraDock) && camera_engaged;
       if (c.camera_distance_control) {
@@ -1176,7 +1868,8 @@ struct PlanningMaster::Impl
         c.camera_observation_stamp = box_observation.value.header.stamp;
       }
       command_pub->publish(c);
-      command_at = now; dispatched = true; task_result.valid = false; last_replan = now; result.reset();
+      if (!update) {command_at = now; dispatched = true; task_result.valid = false;}
+      last_replan = now; result.reset(); next_segment = false; stage_final = false;
       active_path = path; active_speed = speeds; active_goal_tolerance = goal_tolerance;
       active_tracking_reference_x = c.tracking_reference_x; active_lookahead_distance = c.lookahead_distance;
       active_camera_distance_control = c.camera_distance_control;
@@ -1202,6 +1895,7 @@ struct PlanningMaster::Impl
       c.speed_limit = active_speed; c.require_goal_heading = heading_required();
       c.goal_tolerance = active_goal_tolerance; c.tolerance_rad = active_heading_tolerance;
       c.tracking_reference_x = active_tracking_reference_x; c.lookahead_distance = active_lookahead_distance;
+      c.continuous_tracking = step && !step->via.empty();
       camera_fields(c); command_pub->publish(c);
     }
     // After settling at the face goal: the robot against the goal of that face of the box as perceived now.
@@ -1243,16 +1937,27 @@ struct PlanningMaster::Impl
       return std::nullopt;
     }
     // global_local: renew the local path after local_update of progress along the global path.
-    bool local_due() const
+    void advance_route_progress()
     {
+      if (global_path.poses.empty() || !odom.valid) return;
+      global_progress = std::max(global_progress, path_progress(global_path, odom.value.pose.pose.position,
+        std::max(0.0, global_progress - 0.10), global_progress + 0.20));
+      while (next_route_via < route_via_s.size() && route_via_s[next_route_via] <= global_progress + 0.03)
+        ++next_route_via;
+    }
+    bool local_due()
+    {
+      // Track the final window too: a later obstacle replan must not resurrect the points already passed there.
+      advance_route_progress();
       if (global_path.poses.empty() || route_paused || !more_segments || !odom.valid) return false;
-      return path_progress(global_path, odom.value.pose.pose.position) - local_origin >= config.path.local_update;
+      return global_progress - local_origin >= config.path.local_update;
     }
     // false = no new local path: the caller then runs the current one's collision check (remaining_path_clear).
     bool refresh_local(double now)
     {
       const auto began = std::chrono::steady_clock::now();
-      const auto plan = path_planner.local_path(global_path, odom.value, obstacles(now), approach ? &*approach : nullptr);
+      const auto plan = path_planner.local_path(global_path, odom.value, obstacles(now),
+        approach ? &*approach : nullptr, global_progress);
       const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - began).count();
       if (!plan.ok) {
         // Keep driving the current local path; its collision check pauses and replans the global path if needed.
@@ -1262,7 +1967,7 @@ struct PlanningMaster::Impl
       }
       RCLCPP_INFO(node.get_logger(), "local path %.1f ms, %zu poses", ms, plan.path.poses.size());
       Computation out; out.generation = fsm.generation(); out.ok = true; out.path = plan.path; out.speed_limit = plan.speed_limit;
-      out.global = plan.global;
+      out.global = plan.global; out.local_renewal = true;
       out.start = odom.value; out.plan_ms = ms;
       result = std::move(out);
       command(now, true);
@@ -1280,7 +1985,18 @@ struct PlanningMaster::Impl
       }
       Path rest = active_path;
       rest.poses.erase(rest.poses.begin(), rest.poses.begin() + static_cast<std::ptrdiff_t>(nearest));
-      return path_planner.collision_free(rest, obstacles(now), approach ? &*approach : nullptr);
+      if (approach && rest.poses.size() > 1) {
+        // A trigger mode dock path runs on into the box past its face goal: only up to the goal is checked.
+        const auto &g = approach->goal;
+        const double heading = 2 * std::atan2(g.orientation.z, g.orientation.w);
+        while (rest.poses.size() > 1) {
+          const auto &q = rest.poses.back().pose.position;
+          if ((q.x - g.position.x) * std::cos(heading) + (q.y - g.position.y) * std::sin(heading) <= 1e-6) break;
+          rest.poses.pop_back();
+        }
+      }
+      // Blocked further ahead than block_stop_distance: not yet, the robot drives up to the obstacle first.
+      return path_planner.clear_length(rest, obstacles(now), approach ? &*approach : nullptr, docking()) > config.block_stop_distance;
     }
     // Nearest puck (base_link) of one observation message -> graspable check and its debounce.
     void check_pucks(const craft_perception::msg::PuckObservationArray &msg)
@@ -1336,6 +2052,7 @@ struct PlanningMaster::Impl
       c.require_goal_heading = heading_required();
       c.goal_tolerance = active_goal_tolerance; c.tolerance_rad = active_heading_tolerance;
       c.tracking_reference_x = active_tracking_reference_x; c.lookahead_distance = active_lookahead_distance;
+      c.continuous_tracking = step && !step->via.empty();
       camera_fields(c);
       command_pub->publish(c); route_paused = false; last_replan = now;
     }
@@ -1347,11 +2064,14 @@ struct PlanningMaster::Impl
       c.require_goal_heading = heading_required();
       c.goal_tolerance = active_goal_tolerance; c.tolerance_rad = active_heading_tolerance;
       c.tracking_reference_x = active_tracking_reference_x; c.lookahead_distance = active_lookahead_distance;
+      c.continuous_tracking = step && !step->via.empty();
       camera_fields(c);
       command_pub->publish(c); route_paused = true; last_replan = now;
     }
     void report(double now) {
-      std_msgs::msg::String state; state.data = fsm.label(); state_pub->publish(state);
+      std_msgs::msg::String state; state.data = fsm.label();
+      if (state.data == "Run.Execute") state.data += execute_detail();  // consumers match "Run." / exact others
+      state_pub->publish(state);
       std_msgs::msg::String box_state;
       if (!config.box.camera_enabled || !step || step->box.empty() || fsm.state() == SystemState::Fault) box_state.data = "off";
       else switch (box_phase) {
@@ -1439,6 +2159,9 @@ void PlanningMaster::connect()
     p.box_request_pub = create_publisher<BoxObservationRequest>("/planning/box_observation_request", rclcpp::QoS(1).transient_local());
     p.box_goal_pub = create_publisher<Pose>("/planning/approach_goal", rclcpp::QoS(1).transient_local());
     p.box_search_pub = create_publisher<Pose>("/planning/box_search", rclcpp::QoS(1).transient_local());
+    p.boxes_pub = create_publisher<Points>("/planning/boxes", rclcpp::QoS(1).transient_local());
+    p.ignored_pub = create_publisher<Points>("/planning/ignored_obstacles", 10);
+    p.padding_pub = create_publisher<nav_msgs::msg::OccupancyGrid>("/planning/padding", 1);
     p.box_status_pub = create_publisher<std_msgs::msg::String>("/planning/box_status", 10);
     p.box_alignment_pub = create_publisher<std_msgs::msg::Float64MultiArray>("/planning/box_alignment", 10);
     p.diagnostics_pub = create_publisher<diagnostic_msgs::msg::DiagnosticArray>("/planning/diagnostics", 10);
@@ -1474,6 +2197,17 @@ void PlanningMaster::connect()
             << ':' << msg.pose.orientation.w;
         p.accept(step, {}, key.str());
     });
+    // One drive through several points without stopping: the last pose is the goal, the others are passed in order
+    // (demo/corner/run_tour.py, 2026-11-12).
+    p.subscribe<Path>("/planning/target_base_route", [&p](const Path &msg) {
+        if (msg.poses.empty()) return;
+        PlanningStep step;
+        step.id = "base_goal";
+        step.kind = StepKind::Navigate;
+        step.goal = msg.poses.back(); step.goal.header = msg.header;
+        for (std::size_t i = 0; i + 1 < msg.poses.size(); ++i) step.via.push_back(msg.poses[i].pose.position);
+        p.accept(step, {}, "route:" + std::to_string(msg.header.stamp.sec) + ':' + std::to_string(msg.header.stamp.nanosec));
+    });
     // The box as perceived (map frame; orientation = yaw of a face normal). Box detection publishes it; one taken
     // standing still at the stage point starts the dock.
     p.subscribe<BoxObservation>("/perception/box/observation", [&p](const BoxObservation &msg) {
@@ -1486,8 +2220,9 @@ void PlanningMaster::connect()
       const bool valid = msg.valid && !msg.extrapolated && valid_pose(pose) &&
         std::isfinite(msg.gap_m) && msg.gap_m >= 0.0 &&
         std::isfinite(msg.lateral_m) && std::isfinite(msg.yaw_rad) &&
-        std::hypot(msg.box_pose.position.x - p.box_request.expected_box.position.x,
-                   msg.box_pose.position.y - p.box_request.expected_box.position.y) <= p.config.box.max_offset &&
+        p.step && !p.step->box.empty() &&  // only near the box's planning.yaml place (not the last perceived one)
+        std::hypot(msg.box_pose.position.x - p.box_target(p.step->box).x,
+                   msg.box_pose.position.y - p.box_target(p.step->box).y) <= p.config.box.max_offset &&
         std::isfinite(msg.gap_uncertainty_m) && msg.gap_uncertainty_m >= 0 &&
         msg.gap_uncertainty_m <= p.config.box.lidar_uncertainty_max + 1e-12 &&
         msg.header.stamp.sec >= 0 && msg.header.stamp.nanosec < 1000000000U &&
@@ -1506,6 +2241,14 @@ void PlanningMaster::connect()
       p.box_last_observation_stamp = stamp;
       p.box_had_observation = true;
       p.box_observation.observe(msg, seconds());
+      if (p.box_phase == PlanningMaster::Impl::BoxPhase::LidarPerceive &&
+          stamp >= requested + static_cast<int64_t>(std::llround(p.config.box.settle_s * 1e9)))
+        p.lidar_samples.push_back(msg);
+      if (p.box_phase == PlanningMaster::Impl::BoxPhase::Stage || p.box_phase == PlanningMaster::Impl::BoxPhase::CameraDock) {
+        p.track_samples.push_back(msg);
+        const auto keep = static_cast<std::size_t>(std::max(p.config.box.splice_samples, 5));
+        if (p.track_samples.size() > keep) p.track_samples.erase(p.track_samples.begin());
+      }
     });
     // The continuous camera provides only a longitudinal gap in base_link.
     // Its acquisition stamp, never a transformed/request-response stamp, gates use.
@@ -1572,6 +2315,13 @@ void PlanningMaster::connect()
         p.say("[box " + msg.data + "] 1/5 known box " + p.xy(b[0], b[1]) + ": planning to the stage points of its "
               "approachable faces");
     });
+    // Back straight out of a dock (box_approach.reverse_distance); the String is the box left, for the log only.
+    p.subscribe<std_msgs::msg::String>("/planning/leave_box", [&p](const std_msgs::msg::String &msg) {
+        PlanningStep step; step.id = "leave_box"; step.kind = StepKind::Navigate; step.leave = true;
+        step.leave_from = msg.data;
+        step.goal.header.frame_id = p.config.path.map_frame; step.goal.pose.orientation.w = 1.0;
+        p.accept(step);
+    });
     p.subscribe<std_msgs::msg::String>("/planning/approach_box_near", [&p](const std_msgs::msg::String &msg) {
         if (!p.config.box.camera_enabled || !p.config.box.boxes.count(msg.data)) {
           RCLCPP_WARN(p.node.get_logger(), "near box entry unavailable or unknown box '%s'", msg.data.c_str()); return;
@@ -1616,6 +2366,9 @@ void PlanningMaster::connect()
           std::isfinite(a.z) && std::isfinite(w.x) && std::isfinite(w.y) && std::isfinite(w.z);
         p.receive_localization(msg, p.imu, p.imu_stamp, valid);
     }));
+    // control publishes it best effort (SensorDataQoS): the reliable default of subscribe() got nothing (2026-11-10).
+    p.subscriptions.push_back(p.node.create_subscription<Odom>("/control/wheel/odom", rclcpp::SensorDataQoS(),
+        [&p](const Odom &msg) {p.wheel_odom.observe(msg, seconds());}));
     p.subscribe<Odom>("/perception/state/odom", [&p](const Odom &msg) {
         Pose pose;
         pose.header = msg.header;
@@ -1624,7 +2377,30 @@ void PlanningMaster::connect()
         if (valid_pose(pose) && msg.header.frame_id == p.config.path.map_frame &&
             p.is_fresh_input(msg.header, p.config.odom_timeout_s))
         {
-            p.odom.observe(msg, seconds());
+            Odom adjusted = msg;
+            const bool docking = p.step && !p.step->box.empty() &&
+              (p.box_phase == PlanningMaster::Impl::BoxPhase::CameraDock || p.box_phase == PlanningMaster::Impl::BoxPhase::FinalStop ||
+               p.box_phase == PlanningMaster::Impl::BoxPhase::CameraVerify);
+            if (!docking) p.dock_anchor.reset();
+            if (docking && p.dock_anchor && p.wheel_odom.fresh(seconds(), p.config.odom_timeout_s)) {
+              // 2026-11-10 (L1cam_1110_1116): on the last 0.3 m the localization moved the robot 30 mm sideways
+              // against its wheels (+17 vs -13 mm); control steered after it and stopped 5.4 deg off the face.
+              const auto &a = *p.dock_anchor;
+              const auto &w = p.wheel_odom.value.pose.pose;
+              const double wyaw = 2 * std::atan2(w.orientation.z, w.orientation.w);
+              const double dx = w.position.x - a.wx, dy = w.position.y - a.wy;
+              const double lx = std::cos(a.wyaw) * dx + std::sin(a.wyaw) * dy, ly = -std::sin(a.wyaw) * dx + std::cos(a.wyaw) * dy;
+              const double yaw = a.myaw + std::remainder(wyaw - a.wyaw, 2 * M_PI);
+              adjusted.pose.pose.position.x = a.mx + std::cos(a.myaw) * lx - std::sin(a.myaw) * ly;
+              adjusted.pose.pose.position.y = a.my + std::sin(a.myaw) * lx + std::cos(a.myaw) * ly;
+              adjusted.pose.pose.orientation.x = adjusted.pose.pose.orientation.y = 0;
+              adjusted.pose.pose.orientation.z = std::sin(yaw / 2); adjusted.pose.pose.orientation.w = std::cos(yaw / 2);
+            }
+            p.odom.observe(adjusted, seconds());
+            const double t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9;
+            if (!p.odom_trail.empty() && t <= p.odom_trail.back()[0]) p.odom_trail.clear();  // time went back
+            p.odom_trail.push_back({t, adjusted.pose.pose.position.x, adjusted.pose.pose.position.y});
+            while (p.odom_trail.front()[0] < t - p.odom_trail_s) p.odom_trail.pop_front();
         }
     });
     p.subscribe<Joints>(p.config.joint_state_topic, [&p](const Joints &msg) {
@@ -1658,23 +2434,6 @@ void PlanningMaster::connect()
             values.push_back({pose, -1, 1.0});
         }
     });
-    p.subscribe<craft_perception::msg::KnobObservationArray>(
-        "/perception/vision/d435/knob_observations", [&p](const craft_perception::msg::KnobObservationArray &msg) {
-            auto &values = p.observations["d435_knob"];
-            values.clear();
-            for (const auto &value : msg.observations)
-            {
-                if (!value.depth_valid)
-                {
-                    continue;
-                }
-                Pose pose;
-                pose.header = msg.header;
-                pose.pose.position = value.position;
-                pose.pose.orientation.w = 1.0;
-                values.push_back({pose, value.detection.class_id, value.detection.confidence});
-            }
-        });
     p.subscribe<craft_perception::msg::PuckObservationArray>(
         "/perception/vision/d435/puck_observations", [&p](const craft_perception::msg::PuckObservationArray &msg) {
             p.check_pucks(msg);
@@ -1702,6 +2461,22 @@ void PlanningMaster::planning_loop() {
   const double now = seconds();
   try {
     p.collect();
+    if (now - p.boxes_pub_at >= 1.0) {
+      p.boxes_pub_at = now;
+      Points boxes; boxes.header.frame_id = p.config.path.map_frame; boxes.header.stamp = p.node.now();
+      for (const auto &[name, b] : p.config.box.boxes) {
+        geometry_msgs::msg::Pose q; q.position.x = b[0]; q.position.y = b[1]; q.orientation.w = 1.0;
+        if (p.step && p.step->box == name && p.box_seen) {q.position.x = p.box_seen->x; q.position.y = p.box_seen->y;}
+        boxes.poses.push_back(q);
+      }
+      p.boxes_pub->publish(boxes);
+    }
+    // /planning/padding once a second (RViz): the map and the obstacles as planning uses them, padded.
+    if (p.padding_pub->get_subscription_count() > 0 && now - p.padding_pub_at >= 1.0) {
+      p.padding_pub_at = now;
+      auto grid = p.path_planner.padding(p.obstacles(now), p.approach ? &*p.approach : nullptr, p.docking());
+      grid.header.stamp = p.node.now(); p.padding_pub->publish(grid);
+    }
     if (p.localization_fresh(now) && p.odom.fresh(now, p.config.odom_timeout_s) &&
         p.is_fresh_input(p.odom.value.header, p.config.odom_timeout_s)) p.odom_pub->publish(p.odom.value);
     if (p.reset_requested && p.control_fresh(now) && p.control.value.held && p.control.value.stopped &&
@@ -1721,6 +2496,9 @@ void PlanningMaster::planning_loop() {
       p.result.reset(); p.task_result.valid = false; p.dispatched = false; p.revision = 0;
       p.waiting_for_path = false; p.route_paused = false; p.active_path = Path{};
       p.more_segments = p.next_segment = false; p.global_path.poses.clear(); p.blocked_since.reset(); p.route_failed = false; p.no_progress = 0;
+      // The previous box's last phase (FinalStop / CameraVerify) would keep control held through this step's
+      // PrepareTask (camera_stationary_hold), so the next request never got released: start every step in Stage.
+      p.box_phase = decltype(p.box_phase)::Stage;
       p.fsm.start(p.step->kind, now);
     }
     const auto phase = p.fsm.phase();
@@ -1732,6 +2510,7 @@ void PlanningMaster::planning_loop() {
       (phase == RunPhase::PrepareTask || phase == RunPhase::Compute || phase == RunPhase::Execute);
     p.hold(!needs_release);
     FsmInput input;
+    if (p.step && !p.step->via.empty()) input.execution_timeout_s = 600.0;
     input.ready = p.fsm.state() == SystemState::Idle ? p.system_ready(now) :
       phase == RunPhase::PrepareTask && p.ready(now);
     input.stopped = p.control_fresh(now) && p.control.value.held && p.control.value.stopped &&
@@ -1775,15 +2554,15 @@ void PlanningMaster::planning_loop() {
         using BoxPhase = decltype(p.box_phase);
         input.completed = false;
         if (p.box_pending != decltype(p.box_pending)::None) {
-          // A dock or back-out goes as soon as its line is clear; blocked longer than block_wait_s fails.
+          // A dock or back-out goes as soon as its line is clear; blocked longer than dock_block_wait_s fails.
           const bool dock = p.box_pending == decltype(p.box_pending)::Dock;
           if (dock ? p.send_dock(now) : p.send_reverse(now)) {p.box_pending = decltype(p.box_pending)::None; p.box_blocked_at.reset();}
           else if (!p.box_blocked_at) {
             p.box_blocked_at = now;
             p.readiness_reason = dock ? "box: dock line blocked; waiting" : "box: nothing clear behind to back out on; waiting";
             p.say("[box " + p.step->box + "] " + (dock ? "dock line" : "back-out line") + " blocked by " + p.box_blocked_by +
-                  ": waiting up to " + std::to_string(p.config.block_wait_s).substr(0, 4) + " s");
-          } else if (now - *p.box_blocked_at >= p.config.block_wait_s) {
+                  ": waiting up to " + std::to_string(p.config.dock_block_wait_s).substr(0, 4) + " s");
+          } else if (now - *p.box_blocked_at >= p.config.dock_block_wait_s) {
             input.healthy = false;
             input.error = "box " + p.step->box + (dock ? ": the dock line stays blocked by " : ": no clear line behind (" +
               std::to_string(p.config.box.reverse_min_distance).substr(0, 4) + " m) to back out on, blocked by ") + p.box_blocked_by;
@@ -1837,7 +2616,9 @@ void PlanningMaster::planning_loop() {
       // Replanning stays in Run.Execute; within a segment it preserves the task ID (UPDATE_PATH).
       const bool camera_stationary = camera_box && p.box_phase != decltype(p.box_phase)::Stage &&
         p.box_phase != decltype(p.box_phase)::LidarDock && p.box_phase != decltype(p.box_phase)::CameraDock;
-      if (input.healthy && input.feedback_fresh && !input.completed && !camera_stationary && p.step->kind == StepKind::Navigate) {
+      // A leave is one short straight path back out of the padding: no blocked checks or replans on it.
+      if (input.healthy && input.feedback_fresh && !input.completed && !camera_stationary && p.step->kind == StepKind::Navigate &&
+          !p.step->leave) {
         if (p.result) {
           if (!p.result->ok && p.result->retryable) {
             p.readiness_reason = "route unavailable (" + p.result->error + "); pausing navigation and retrying";
@@ -1860,14 +2641,19 @@ void PlanningMaster::planning_loop() {
           } else if (!p.blocked_since) {
             p.blocked_since = now; p.readiness_reason = "path blocked; waiting before replanning";
             p.pause_navigation(now);
-          } else if (now - *p.blocked_since >= p.config.block_wait_s) {
+          } else {
             using BoxPhase = decltype(p.box_phase);
-            if (p.box_in(BoxPhase::Dock) || p.box_in(BoxPhase::Reverse) ||
-                p.box_in(BoxPhase::LidarDock) || p.box_in(BoxPhase::CameraDock)) {
+            const bool dock = p.box_in(BoxPhase::Dock) || p.box_in(BoxPhase::Reverse) ||
+                              p.box_in(BoxPhase::LidarDock) || p.box_in(BoxPhase::CameraDock);
+            const double waited = now - *p.blocked_since;
+            if (dock && waited < p.config.dock_block_wait_s) {
+              p.readiness_reason = "dock path blocked; waiting up to " +
+                std::to_string(p.config.dock_block_wait_s).substr(0, 4) + " s for it to clear";
+            } else if (dock) {
               // No global replan in the dock or a back-out (it would lead off the face normal): fail instead.
               input.healthy = false;
               input.error = "box " + p.step->box + ": the dock or back-out path stays blocked (obstacle or padding)";
-            } else {p.readiness_reason = "path still blocked; replanning"; p.compute(now);}
+            } else if (waited >= p.config.block_wait_s) {p.readiness_reason = "path still blocked; replanning"; p.compute(now);}
           }
         }
       }

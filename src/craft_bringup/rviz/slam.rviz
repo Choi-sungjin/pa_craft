@@ -30,6 +30,16 @@ Visualization Manager:
         Depth: 1
       Alpha: 0.8
       Color Scheme: map
+    # planning_master: the map and obstacles padded as planning plans with them (1 Hz; costmap colours).
+    - Class: rviz_default_plugins/Map
+      Name: planning padding
+      Enabled: true
+      Topic:
+        Value: /planning/padding
+        Reliability Policy: Reliable
+        Depth: 1
+      Alpha: 0.5
+      Color Scheme: costmap
     - Class: rviz_default_plugins/LaserScan
       Name: merged scan
       Enabled: true
@@ -62,6 +72,14 @@ Visualization Manager:
         Value: /perception/lidar/slam_toolbox/graph_visualization
         Reliability Policy: Reliable
         Depth: 5
+    # box_marker.py: grey = box asked for, green = LiDAR detection, blue = upper cam, dots = every detection centre.
+    - Class: rviz_default_plugins/MarkerArray
+      Name: box detection
+      Enabled: true
+      Topic:
+        Value: /perception/box/markers
+        Reliability Policy: Reliable
+        Depth: 10
     - Class: rviz_default_plugins/Marker
       Name: EKF odometry
       Enabled: true

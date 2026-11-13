@@ -11,8 +11,13 @@
   <depend>rclcpp</depend>
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
-  <depend>libopencv-dev</depend>
   <depend>librealsense2</depend>
+  <depend>craft_interfaces</depend>
+  <depend>geometry_msgs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+  <depend>libopencv-dev</depend>
+  <depend>eigen</depend>
 
   <export>
     <build_type>ament_cmake</build_type>

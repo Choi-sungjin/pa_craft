@@ -7,8 +7,9 @@ bool LidarPerception::configure(const lidar_processing::MergerConfig &config,
 }
 std::optional<sensor_msgs::msg::LaserScan> LidarPerception::merge(
   const sensor_msgs::msg::LaserScan &front, const lidar_processing::Pose2D &front_pose,
-  const sensor_msgs::msg::LaserScan *rear, const lidar_processing::Pose2D *rear_pose) const {
-  return merger_.merge(front, front_pose, rear, rear_pose);
+  const sensor_msgs::msg::LaserScan *rear, const lidar_processing::Pose2D *rear_pose,
+  const lidar_processing::Motion *motion) const {
+  return merger_.merge(front, front_pose, rear, rear_pose, motion);
 }
 std::optional<geometry_msgs::msg::PoseArray> LidarPerception::detect_obstacles(
   const sensor_msgs::msg::LaserScan &scan) const {

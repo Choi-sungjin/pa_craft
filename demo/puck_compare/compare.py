@@ -1,12 +1,15 @@
 #!/usr/bin/python3
-"""Run PuckAxis (puck_axis_offline, production C++) and CenterPose on the same record.py sessions.
-
-Writes <session>/results/{ours.csv, centerpose.csv}; analyze.py turns them into tables.
+"""Run the three puck-axis methods on the same record.py sessions (D435 colour + aligned depth):
+  tag        PuckTagAxis  (puck_axis_offline --box tag): AprilTag faces only, no depth
+  depth      PuckAxis     (puck_axis_offline --box yolo|apriltag): puck box + depth shelf plane (donut)
+  centerpose CenterPose   (centerpose_adapter.py): YOLO box crop -> 9 cuboid points -> PnP
+Writes <session>/results/{tag,depth,centerpose}.csv; analyze.py turns them into tables.
 Methods run one after another so the latency numbers do not fight over the CPU/GPU.
 
 Usage: source ~/craft/install/setup.bash
-       /usr/bin/python3 compare.py ~/bags/puck_compare/stand_a_*            # both methods
-       /usr/bin/python3 compare.py SESSIONS --only ours --box yolo          # puck_blue box instead of tags
+       PY=~/yolov8-ubuntu24-practice/.venv-yolo/bin/python   # torch + ultralytics for centerpose
+       $PY compare.py ~/bags/puck_compare/*_*                       # all three
+       /usr/bin/python3 compare.py SESSIONS --methods tag,depth    # no torch needed
 """
 import argparse
 import csv
@@ -19,21 +22,25 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from centerpose_adapter import CenterPoseAdapter
+CenterPoseAdapter = None  # imported only when centerpose runs (needs torch)
 
 HERE = Path(__file__).resolve().parent
 COLUMNS = ['frame', 'stamp_ns', 'id', 'score', 'axis_valid', 'cx', 'cy', 'cz', 'ax', 'ay', 'az', 'detect_ms']
 
 
-def run_ours(session, args):
+def run_offline(session, args, method):
+    """tag -> PuckTagAxis, depth -> PuckAxis on the --depth-box boxes; both by the production C++."""
     exe = shutil.which('puck_axis_offline') or str(
         Path('~/craft/install/craft_perception/lib/craft_perception/puck_axis_offline').expanduser())
-    cmd = [exe, str(session), str(session / 'results' / 'ours.csv'), '--box', args.box,
+    box = 'tag' if method == 'tag' else args.depth_box
+    cmd = [exe, str(session), str(session / 'results' / f'{method}.csv'), '--box', box,
            '--tag-scale', str(args.tag_scale), '--family', args.family]
     if args.tags:
         cmd += ['--tags', args.tags]
-    if args.box == 'yolo':
-        cmd += ['--model-dir', str(args.model_dir)]
+    if box == 'yolo':
+        cmd += ['--model-dir', str(args.model_dir), '--classes', str(args.classes)]
+    if box == 'tag' and args.cylinders:
+        cmd += ['--cylinders', args.cylinders]
     subprocess.run(cmd, check=True)
 
 
@@ -57,24 +64,32 @@ def run_centerpose(session, adapter):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('sessions', nargs='+', type=Path)
-    ap.add_argument('--only', choices=['ours', 'centerpose'])
-    ap.add_argument('--box', choices=['apriltag', 'yolo'], default='apriltag')
+    ap.add_argument('--methods', default='tag,depth,centerpose', help='comma list of tag, depth, centerpose')
+    ap.add_argument('--depth-box', choices=['yolo', 'apriltag'], default='yolo', help='boxes the depth method uses')
+    ap.add_argument('--classes', type=int, default=4, help='YOLO class count of --model-dir')
+    ap.add_argument('--cylinders', default='', help='tag ids of cylinder pucks (tag method: end faces only)')
     ap.add_argument('--tags', default='', help='puck tag ids, e.g. 23,24 (empty: every tag)')
     ap.add_argument('--tag-scale', type=float, default=2.0, help='perception.yaml d435.puck_axis.tag_box_scale')
     ap.add_argument('--family', default='tag36h11')
-    ap.add_argument('--model-dir', type=Path, default=HERE.parents[1] / 'src/craft_perception/models/puck_blue')
-    ap.add_argument('--centerpose-repo', type=Path)
+    ap.add_argument('--model-dir', type=Path, default=HERE.parents[1] / 'src/craft_perception/models/pucks_v8n_v2')
+    ap.add_argument('--centerpose-repo', type=Path, help='perception-v2 package dir (default: ~/Downloads/...)')
     ap.add_argument('--centerpose-weights', type=Path)
+    ap.add_argument('--yolo-weights', type=Path, help='puck YOLO .pt for the CenterPose crop')
     args = ap.parse_args()
+    methods = [m for m in args.methods.split(',') if m]
+    if set(methods) - {'tag', 'depth', 'centerpose'}:
+        ap.error('--methods: tag, depth, centerpose')
     adapter = None
-    if args.only != 'ours':
-        adapter = CenterPoseAdapter(args.centerpose_repo, args.centerpose_weights)
+    if 'centerpose' in methods:
+        from centerpose_adapter import CenterPoseAdapter as Adapter
+        adapter = Adapter(args.centerpose_repo, args.centerpose_weights, args.yolo_weights)
     for session in args.sessions:
         session = session.expanduser()
         (session / 'results').mkdir(exist_ok=True)
         print(f'== {session.name}', flush=True)
-        if args.only != 'centerpose':
-            run_ours(session, args)
+        for method in ('tag', 'depth'):
+            if method in methods:
+                run_offline(session, args, method)
         if adapter:
             try:
                 run_centerpose(session, adapter)

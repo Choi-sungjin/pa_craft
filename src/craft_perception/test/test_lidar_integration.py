@@ -57,8 +57,8 @@ def main():
                       '--params-file', str(Path(__file__).resolve().parents[2] / 'craft_bringup/config/rates.yaml'),
                       '-p', f'lidar.input_mode:={args.input_mode}']
             # Keep only the LiDAR task; camera configuration is still validated.
-            for task in ('d435_yolo', 'apriltag', 'knob_depth', 'object_detector',
-                         'obstacle_detector', 'puck_axis', 'knob_lever', 'state_estimator'):
+            for task in ('d435_yolo', 'apriltag', 'object_detector',
+                         'obstacle_detector', 'puck_axis', 'traffic_light', 'puck_survey', 'uppercam_puck', 'state_estimator'):
                 master += ['-p', f'schedule.{task}.enabled:=false']
             commands = [master]
             if args.input_mode == 'merged':
