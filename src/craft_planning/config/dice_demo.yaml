@@ -3,9 +3,9 @@
 # (checkarm / teacharm readings).
 dice_demo:
   # Every run starts and ends here (reassembled 2026-11-06; carriage lined up with clock 12).
-  nominal_raw_deg: [548.3, 84.9, 100.1, 16.8, 90.0, 141.9]  # LM 548.3 = clock 12 (belt re-fit 2026-11-07; was 858.3)
+  nominal_raw_deg: [561.4, 53.9, 178.0, 58.4, 0.0, 73.1]  # = execute.py NOMINAL_RAW_DEG (2026-11-14 user: one nominal for every scenario; was 548.3, 84.9, 100.1, 16.8, 90.0, 141.9)
   # Between the nominal pose and any work, both ways (2026-11-06).
-  via_raw_deg: [548.3, 92.5, 182.9, 104.6, 90.0, 141.9]
+  via_raw_deg: [561.4, 93.3, 177.6, 61.3, -0.4, 73.1]  # = execute.py VIA_RAW_DEG (2026-11-14; was 548.3, 92.5, 182.9, 104.6, 90.0, 141.9, now execute.py CARRY_VIA)
   # Jaws closed on a stored puck 28 mm down from its top (it stands 35 mm out of the slot) at the loading guide.
   # TEACH after the 2026-11-06 reassembly. null: the dry run uses the old loading pose below; the robot run stops.
   clock_grasp_raw_deg: null

@@ -255,6 +255,10 @@ def main():
         a['puck_x_offset'] = float(arg_value('--puck-x'))
     if arg_value('--shelf-height') is not None:   # measured: puck top (camera) - puck height
         a['shelf_height'] = float(arg_value('--shelf-height'))
+    if arg_value('--approach-above') is not None:  # [m] TCP above the grasp for the approach (cam_pick.py: prisms)
+        a['approach_above'] = float(arg_value('--approach-above'))
+    if arg_value('--tool-roll') is not None:      # URDF tool_roll [rad]: jaws turned to a rotated prism's faces (cam_pick.py)
+        a['tool_roll'] = float(arg_value('--tool-roll'))
     if arg_value('--grip-mm') is not None:        # jaws cover this much of the puck from its top [mm]
         a['grasp_coverage'] = float(arg_value('--grip-mm')) / 1000 / a['puck_height']
     ch = Chain(URDF)

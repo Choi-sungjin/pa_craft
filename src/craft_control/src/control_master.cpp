@@ -215,6 +215,9 @@ public:
     {
       throw std::runtime_error("invalid gripper angle limits or open/close targets");
     }
+    gripper_controller_.set_hold_current(
+      declare_parameter("gripper_hold_current_a", 0.0), declare_parameter("gripper_hold_current_band_a", 0.05),
+      declare_parameter("gripper_hold_step_angle", 0.0087), declare_parameter("gripper_hold_period_s", 0.2));
     if (!arm_ik_mapping_confirmed_) {
       RCLCPP_WARN(get_logger(), "arm IK-to-motor mapping is unconfirmed; rotational arm targets will be ignored");
     }
@@ -382,6 +385,12 @@ public:
         } else {lateral_.clear_odom(); odom_at_.reset();}
       });
     settle_s_ = positive_param("settle_time_s");
+    // Acceleration caps of the arm moves (2026-11-14 user: the work steps started and stopped too hard). 0 = off.
+    arm_max_accel_ = declare_parameter("arm_max_accel_rad_s2", 0.0);
+    lm_max_accel_ = declare_parameter("lm_max_accel_m_s2", 0.0);
+    arm_max_speed_ = declare_parameter("arm_max_speed_rad_s", 0.0);
+    lm_max_speed_ = declare_parameter("lm_max_speed_m_s", 0.0);
+    lm_m_per_rad_ = get_parameter("lm_meters_per_rad").as_double();
     stop_tolerance_ = positive_param("stop_position_tolerance_rad");
     wheel_stop_tolerance_ = positive_param("wheel_stop_tolerance_rad_s");
     clock_stop_tolerance_ = positive_param("clock_stop_tolerance_rad");
@@ -421,6 +430,19 @@ public:
     }
     lateral_.set_heading_offset(heading_offset * M_PI / 180.0);
     lateral_.set_gain_schedule(gain_errors_rad, gain_scales);
+    const double slow_speed = declare_parameter<double>("wheel_slow_speed");
+    const double slow_gain = declare_parameter<double>("wheel_slow_tracking_gain");
+    if (!std::isfinite(slow_speed) || slow_speed < 0.0 || !std::isfinite(slow_gain) || slow_gain <= 0.0 || slow_gain > 3.0) {
+      throw std::runtime_error("wheel_slow_speed must be >= 0 and wheel_slow_tracking_gain in (0, 3]");
+    }
+    lateral_.set_slow_tracking_gain(slow_speed, slow_gain);
+    const double dock_straight_speed = declare_parameter<double>("wheel_dock_straight_speed");
+    const double dock_heading_gain = declare_parameter<double>("wheel_dock_heading_gain");
+    if (!std::isfinite(dock_straight_speed) || dock_straight_speed < 0.0 || !std::isfinite(dock_heading_gain) ||
+        dock_heading_gain <= 0.0) {
+      throw std::runtime_error("wheel_dock_straight_speed must be >= 0 and wheel_dock_heading_gain > 0");
+    }
+    lateral_.set_dock_straight(dock_straight_speed, dock_heading_gain);
     timer_ = create_wall_timer(std::chrono::duration<double>(dt_), [this]() {control_loop();});
     lookahead_timer_ = create_wall_timer(std::chrono::milliseconds(50), [this]() {
       if (!have_clock_wheel_feedback_) {return;}
@@ -1017,6 +1039,7 @@ private:
       case TaskCommand::MANIPULATOR:
         set_arm_target(arm); set_lm_target(c.joints.position[0]);
         arm_move_ms_ = static_cast<int>(std::lround(c.duration_s * 1000.0));
+        contact_ratio_ = c.speed;
         contact_.start(c.speed, c.duration_s);  // off unless speed > 0 and a timed move
         // Same arrival tolerance here and on the board (its state stays 1 until every axis is inside it).
         arm_controller_.set_task_tolerance(c.tolerance_rad);
@@ -1166,6 +1189,38 @@ private:
         if (arm_gain_lines_.front() == "IGAIN,BOOT") arm_gains_modified_ = false;
         arm_gain_lines_.erase(arm_gain_lines_.begin());
       }
+      // The firmware ramps every time-based move up and down over kRampFraction (0.25) of its travel time each, so the
+      // peak acceleration is d / (T^2 f (1 - f)). The travel time sent is the longer of the asked one and the one that
+      // keeps every axis inside its cap; the firmware still lengthens it for its speed caps.
+      if (send_arm_move_time_ && arm_feedback_fresh && task_.kind == TaskCommand::MANIPULATOR) {
+        constexpr double kRamp = 0.25 * (1.0 - 0.25);  // keep equal to firmware CraftMotorFirmware.h kRampFraction
+        double need_s = 0.0;
+        if (arm_max_accel_ > 0.0) {
+          for (size_t i = 0; i < arm_motor_commands.size(); ++i) {
+            need_s = std::max(need_s, std::sqrt(std::abs(arm_motor_commands[i] - arm_joints_[i]) / (arm_max_accel_ * kRamp)));
+          }
+        }
+        if (arm_max_speed_ > 0.0) {  // peak speed of the ramp profile = d / (T (1 - f))
+          for (size_t i = 0; i < arm_motor_commands.size(); ++i) {
+            need_s = std::max(need_s, std::abs(arm_motor_commands[i] - arm_joints_[i]) / (arm_max_speed_ * 0.75));
+          }
+        }
+        if (lm_max_speed_ > 0.0 && lm_m_per_rad_ > 0.0) {
+          need_s = std::max(need_s, std::abs(lm_motor_command - lm_angle_) * lm_m_per_rad_ / (lm_max_speed_ * 0.75));
+        }
+        if (lm_max_accel_ > 0.0 && lm_m_per_rad_ > 0.0) {
+          need_s = std::max(need_s, std::sqrt(std::abs(lm_motor_command - lm_angle_) * lm_m_per_rad_ / (lm_max_accel_ * kRamp)));
+        }
+        const int need_ms = static_cast<int>(std::ceil(std::min(need_s, kMaxArmMoveS) * 1000.0));
+        // Only lengthened (2026-11-14: timing every move to the caps both ways made a 3 s via move 0.69 s and motor 6
+        // dropped out). The caps are fixed values safe on a low battery (user: one drop-out in a match is the end).
+        if (need_ms > arm_move_ms_) {
+          RCLCPP_INFO(get_logger(), "arm move %lu: %d ms -> %d ms (acceleration caps)",
+            static_cast<unsigned long>(last_task_id_), arm_move_ms_, need_ms);
+          arm_move_ms_ = need_ms;
+          contact_.start(contact_ratio_, need_ms / 1000.0);  // its windows are shares of the move time
+        }
+      }
       if (send_arm_move_time_ && arm_feedback_fresh && arm_gain_lines_.empty() &&
         (arm_tolerance_cdeg_ < 0 ||
          arm_lm_serial_->write_line("TOL," + std::to_string(arm_tolerance_cdeg_))) &&
@@ -1275,7 +1330,13 @@ private:
         clock_slot_pub_->publish(slot_msg);
       }
     }
-    const bool arm_settled = !arm_enabled_ || (arm_feedback_fresh && arm_tx_ok_ && arm_lm_state_ == 0 &&
+    // A held grasp keeps the board busy (state 1): the jaws press on the puck and never reach contact + squeeze angle
+    // (2026-11-14: at 5 and 6 deg the gripper stalls at ~0.7 A and holds firmly, the close task and every arm move
+    // after it would never end; at 4 deg it arrives, the current falls to 0.03 A and a cylinder slips). With a grasp
+    // reported the board's busy state is accepted; standing still for settle_s and the per-joint targets still decide.
+    // Rolled back (user 2026-11-14): the busy board is not accepted while a grasp is held (as 1d6226a).
+    const bool arm_board_idle = arm_lm_state_ == 0;
+    const bool arm_settled = !arm_enabled_ || (arm_feedback_fresh && arm_tx_ok_ && arm_board_idle &&
       arm_received_at_ - arm_stable_at_ >= settle_s_);
     const bool drive_settled = clock_wheel_feedback_fresh && drive_tx_ok_ &&
       wheel_state_ == 0 && clock_state_ == 0 && drive_received_at_ - clock_stable_at_ >= settle_s_ &&
@@ -1430,6 +1491,8 @@ private:
   std::vector<std::string> arm_gain_lines_;  // IGAIN lines of the next MANIPULATOR task, sent before TOL/TIME
   bool arm_gains_modified_ = true;  // the board may hold gains other than its power-up ones
   int arm_move_ms_ = 0;
+  double arm_max_accel_ = 0.0, lm_max_accel_ = 0.0, lm_m_per_rad_ = 0.0, contact_ratio_ = 0.0,
+    arm_max_speed_ = 0.0, lm_max_speed_ = 0.0;
   using ContactDetector = craft_control::ContactDetector<craft_control::kArmMotors>;
   ContactDetector contact_;  // stop-on-contact of the running MANIPULATOR task (speed > 0)
   bool send_arm_move_time_ = false;  // [V] warn when a board's motors report less (12 V supply)

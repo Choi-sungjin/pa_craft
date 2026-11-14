@@ -459,6 +459,19 @@ std::array<double, 2> LateralController::compute_command(double linear_speed, do
     const double speed = std::clamp(top * std::abs(error) / kTurnSlow, std::min(floor, top), top);
     return wheel_delta(rotate_sign_ * speed);
   }
+  // The dock's last, slowest part (mission_1114_1627 L1: a 2 cm path shift 145 mm before the face, chased at gain 2,
+  // left the robot 11 deg off the face): straight along the face normal, the heading only, no lateral chase.
+  if (task_lookahead_ > 0.0 && dock_straight_speed_ > 0.0 && speed_limit() <= dock_straight_speed_ &&
+      path_.poses.size() >= 2 && !is_target_reached()) {
+    const auto & a = path_.poses[path_.poses.size() - 2].pose.position;
+    const auto & b = path_.poses.back().pose.position;
+    double heading = std::atan2(b.y - a.y, b.x - a.x);
+    if (direction < 0.0) heading += std::acos(-1.0);
+    const auto & q = odom_.pose.pose.orientation;
+    const double yaw = std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+    const double error = std::remainder(heading - yaw, 2.0 * std::acos(-1.0));
+    return wheel_delta(std::clamp(dock_heading_gain_ * error, -rotate_angular_speed_, rotate_angular_speed_));
+  }
   double bearing = 0.0;
   const auto curvature = get_curvature(direction, &bearing);
   if (!curvature) {
@@ -466,7 +479,9 @@ std::array<double, 2> LateralController::compute_command(double linear_speed, do
   }
   // Backwards-facing travel sees the lookahead point behind the body: the bearing off the travel direction counts.
   if (direction < 0.0) bearing = std::remainder(bearing - std::acos(-1.0), 2.0 * std::acos(-1.0));
-  double kappa = gain_scale(bearing) * *curvature;
+  const bool slow = std::isfinite(target_v_hint) && std::abs(target_v_hint) <= slow_speed_;
+  // Slow tasks: wheel_slow_tracking_gain alone, not times the bearing schedule (2.0 stays 2.0, never 2.4).
+  double kappa = (slow ? 1.0 : gain_scale(bearing)) * *curvature;
   if (integral_gain_ > 0.0 && task_lookahead_ <= 0.0 && !camera_distance_mode_) {
     // A new path can start well beside the robot (a pose jump at the stop before it, 9-11 cm, tour_1111_1716): only
     // kOffsetMax of the offset counts, so one such start cannot fill the integral.
@@ -479,7 +494,7 @@ std::array<double, 2> LateralController::compute_command(double linear_speed, do
     // Left of the path -> turn right of the travel direction; backwards-facing travel (v < 0) mirrors the body curvature.
     kappa -= (direction < 0.0 ? -1.0 : 1.0) * integral_;
   }
-  return wheel_delta(tracking_gain_ * linear_speed * kappa);
+  return wheel_delta((slow ? slow_gain_ : tracking_gain_) * linear_speed * kappa);
 }
 
 }  // namespace craft_control

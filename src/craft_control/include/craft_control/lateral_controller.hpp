@@ -72,6 +72,11 @@ public:
   // at any scale (the command is zero there).
   void set_gain_schedule(const std::vector<double> & errors, const std::vector<double> & scales)
   {gain_errors_ = errors; gain_scales_ = scales;}
+  // Task speed |target_v| <= speed (dock, camera, reverse, correction): gain replaces tracking_gain. speed 0 = off.
+  void set_slow_tracking_gain(double speed, double gain) {slow_speed_ = speed; slow_gain_ = gain;}
+  // Box dock (task lookahead) where the planning speed profile is <= speed: no lateral chase, only the heading of the
+  // path's last segment (the face normal), omega = gain * heading error. speed 0 = off.
+  void set_dock_straight(double speed, double gain) {dock_straight_speed_ = speed; dock_heading_gain_ = gain;}
   double gain_scale(double bearing) const;
   // Robot beside the path at my node [m]: + = left of the path direction. nullopt without a path of two points or odom.
   std::optional<double> lateral_offset() const;
@@ -122,6 +127,8 @@ private:
   double goal_rotate_angular_speed_ = 0.0;  // [rad/s] in-place turn at the goal (0 = rotate_angular_speed_)
   double goal_rotate_min_speed_ = 0.0;      // [rad/s] its slowest, near the heading (0 = the general floor)
   double tracking_gain_ = 1.0;
+  double slow_speed_ = 0.0, slow_gain_ = 1.0;
+  double dock_straight_speed_ = 0.0, dock_heading_gain_ = 1.0;
   double wheel_radius_ = 0.0;
   double wheel_separation_ = 0.0;  // effective (skid steer) separation
   std::vector<double> lookahead_speeds_, lookahead_distances_;

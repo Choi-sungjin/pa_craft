@@ -92,6 +92,17 @@ control_master:
     # error RMSE 33 mm, max 77 mm, mostly to the outside after corners (under steer) -> 1.2. 1.0 = plain PP.
     # 1.0 since 2026-11-11 (was 1.2, the same at every bearing): the gain is wheel_tracking_gain_scales below alone.
     wheel_tracking_gain: 1.0
+    # Slow tasks (2026-11-14, not driven yet): task speed <= wheel_slow_speed -> wheel_slow_tracking_gain instead of
+    # wheel_tracking_gain, to cut the box-robot lateral error. Covers dock 0.02, camera 0.02/0.10, reverse 0.10;
+    # box approach 0.20 and cruise 0.26 keep 1.0. Not times wheel_tracking_gain_scales. 0 speed = off.
+    wheel_slow_speed: 0.10           # [m/s]
+    wheel_slow_tracking_gain: 2.0
+    # Box dock, where the planning speed profile is <= wheel_dock_straight_speed (the 0.02 m/s last 100 mm): straight
+    # along the face normal (the dock path's last segment), heading only, omega = wheel_dock_heading_gain * heading
+    # error [rad/s per rad], at most wheel_rotate_angular_speed. No lateral chase (2026-11-14 mission_1114_1627 L1:
+    # a 2 cm path shift at 145 mm, chased at gain 2, ended 11 deg off). Not driven yet. 0 speed = off.
+    wheel_dock_straight_speed: 0.03  # [m/s]
+    wheel_dock_heading_gain: 1.0     # [1/s]
     # Heading offset added to the pose yaw for path tracking (2026-11-11, not driven yet). 14 tour laps over 4.5 h:
     # yaw - travel direction = -3.2 deg median (-2.9 to -3.5 per complete lap), -4.5 driving up the map, -0.7 driving
     # down. +3 centres it; what is left (+-2 deg by place and direction) is the lateral integral's. Not used in a box
@@ -136,7 +147,7 @@ control_master:
     # OpenCR must accept/report unwrapped motor radians (e.g. 12 -> 7 commands -5*pi/6).
     clock_slot_count: 12
     clock_slot_angle: 0.5235987755982988  # [motor rad/slot] 30 degrees
-    clock_zero_angle: 1.316156  # [motor rad] 75.4 degrees, slot 12 at the loading guide (2026-11-11, checkwheel reading with the clock set at 12; was 164.4, 135.2, 45.4, 44.8, 73.9, 166.4)
+    clock_zero_angle: 1.825614  # [motor rad] 104.6 degrees, slot 12 at the loading guide (2026-11-14 user; was 153.4 earlier the same day, 75.4 (11-11), 164.4, 135.2, 45.4, 44.8, 73.9, 166.4)
     # Firmware clock zero_tick stays 0: apply this offset here only.
     # Recheck physical alignment after a motor power cycle/multi-turn reset.
     clock_direction: 1.0  # +1: CCW motor rotation increases slot numbers; -1: reverse
@@ -176,6 +187,15 @@ control_master:
     # (were 71.65, 117.89, 25.60; the taught clock grasp and box place then come out with the tool vertical).
     # tool_roll: aligned (jaws front-back) re-measured at raw 90.9 deg (2026-11-03, sis1 failed on the alignment; was 94.00).
     arm_joint_offsets: [1.171116, 2.315877, 0.535642, 1.586504]  # [motor rad] 67.10, 132.69, 30.69, 90.90 deg
+    # Speed and acceleration caps of every arm / LM move (2026-11-14 user): fixed values meant to be safe on a low
+    # battery, not tuned per voltage (one motor drop-out in a match cannot be recovered). Control lengthens a move
+    # until no axis goes past them (firmware ramps 25 % of the time at each end); a move already slower keeps its
+    # time. The firmware speed caps (arm 68.7 deg/s, LM 28 mm/s) stay above these. 0 = that cap off.
+    # Today's runs at the firmware caps: joints up to ~70 deg/s, ~260 deg/s^2 (bag sq10_1114_1908).
+    arm_max_speed_rad_s: 0.0  # off: rolled back to 1d6226a (user 2026-11-14; was 50 deg/s)
+    arm_max_accel_rad_s2: 0.0  # off: rolled back to 1d6226a (user 2026-11-14; was 60 deg/s^2)
+    lm_max_speed_m_s: 0.0  # off: rolled back to 1d6226a (user 2026-11-14; was 28 mm/s)
+    lm_max_accel_m_s2: 0.0  # off: rolled back to 1d6226a (user 2026-11-14; was 50 mm/s^2)
     arm_angle_tolerance: 0.008726646259971648  # [motor rad] 0.5 degree per joint, matches firmware lm_arm (was 1, before that 2: up to ~9 mm TCP height at the grasp)
 
     # Independent LM controller: target displacement [m] -> motor angle [rad].
@@ -222,4 +242,11 @@ control_master:
     grasp_current_debounce: 0.1  # [s] current must stay above threshold this long
     # After a grasp is detected the gripper holds (contact angle + this) instead of driving on to
     # gripper_close_angle: a stalled jaw at full current trips the DYNAMIXEL overload error.
-    gripper_grasp_squeeze_angle: 0.0349  # [motor rad] 2 degrees
+    gripper_grasp_squeeze_angle: 0.0349  # [motor rad] 2 degrees (rolled back to 1d6226a, user 2026-11-14; was 5 deg + hold current)
+    # Hold by current (2026-11-14 user: 0.2 A, no less). After the grasp control steps the hold angle 0.5 deg toward
+    # close every 0.2 s while the gripper current is under 0.15 A and back while over 0.25 A (never back past the
+    # contact angle - squeeze). 10 deg held at 1.08 A, 5 deg at 0.7 A or slipped at 0.03 A. 0 = off.
+    gripper_hold_current_a: 0.0  # off: rolled back to 1d6226a (user 2026-11-14; was 0.2 A)
+    gripper_hold_current_band_a: 0.05
+    gripper_hold_step_angle: 0.0087  # [motor rad] 0.5 deg
+    gripper_hold_period_s: 0.2

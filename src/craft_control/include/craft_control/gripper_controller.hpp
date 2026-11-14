@@ -27,6 +27,10 @@ public:
   // is not driven at stall current toward close_angle (DYNAMIXEL overload error -> board fault).
   void update_current_feedback(double motor_current_a, double dt, double current_angle);
   bool is_grasped() const;
+  // Hold by current (2026-11-14 user): after the grasp the hold angle is stepped toward close while the current is
+  // under hold_current_a - band, and back toward open while it is over + band, one step per period. 0 = off (the
+  // fixed squeeze angle only).
+  void set_hold_current(double hold_current_a, double band_a, double step_angle, double period_s);
   bool grasp_detection_configured() const;
 
 private:
@@ -41,6 +45,8 @@ private:
   double overcurrent_time_ = 0.0;
   double grasp_squeeze_angle_ = 0.0;
   double grasp_hold_angle_ = 0.0;
+  double grasp_angle_ = 0.0;
+  double hold_current_a_ = 0.0, hold_band_a_ = 0.0, hold_step_ = 0.0, hold_period_ = 0.0, hold_timer_ = 0.0;
   bool grasp_detection_configured_ = false;
   bool has_target_ = false;
   bool closing_ = false;

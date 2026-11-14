@@ -13,6 +13,7 @@ Usage:  source ~/craft/install/setup.bash && python3 ~/craft/demo/puck_pick/exec
 Delete with: rm -rf ~/craft/demo
 """
 import math
+import os
 import sys
 import threading
 import time
@@ -98,8 +99,8 @@ PICK_LIFT_RAW_DEG = [548.2, 104.2, 137.8, 146.3, 0.0, 168.4]  # jog-taught grasp
 # arrive together). Not listed or 0: as fast as the speed caps allow (69 deg/s arm, 41 gripper, 28 mm/s LM; 2026-11-07), the farthest
 # joint decides. A time shorter than the caps allow is stretched to them.
 SLOW_SECONDS = {}  # step label -> time [s], filled from the real start pose in main() for the nominal <-> via moves
-GOTO_DEG_S = 5.2  # into the nominal pose: joint speed [deg/s] (the speed cap is 69), the farthest joint decides
-VIA_DEG_S = 12.0  # moves to a via pose: faster (wrist swings of 100+ deg took 20 s at 5.2), still time-based
+GOTO_DEG_S = 10.0  # (user 2026-11-14 "speed up": was 5.2) into the nominal pose: joint speed [deg/s] (the speed cap is 69), the farthest joint decides
+VIA_DEG_S = 20.0  # (user 2026-11-14 "speed up": was 12) moves to a via pose: faster (wrist swings of 100+ deg took 20 s at 5.2), still time-based
 APPROACH_DEG = 4.0  # nominal <-> via: the last this many degrees of the farthest joint are a separate slow move
 APPROACH_DEG_S = 1.5  # speed of that final approach [deg/s]
 APPROACH_MIN_S = 2.0
@@ -121,7 +122,7 @@ STEP_SECONDS = {
     'put down on the': 2.0,
     # bigbro: down onto the puck in front, 40 mm in 2 s (2026-11-14, user: the jaws went too deep and hit the box).
     # At the caps (0 here) the joints run past the goal before they settle, as the dice put-down did.
-    'bigbro pick: descend': 2.0,
+    'bigbro pick: descend': 2.0,  # per pose of descent_path when it has several: see step_seconds
 }
 # Place on the box: the taught touching pose (857.6, 94.0, 283.1, -59.7, 90; it pressed a little) moved in the URDF
 # model to the box centre (x -12.5 mm, 112.5 mm ahead of the LiDAR face: +19.3 mm ahead, -20.4 mm along the LM) and
@@ -157,11 +158,30 @@ PLACE_RELEASE_ROLL_RAW_DEG = 0.0
 # 239.76, -103.75]. Far 0 then 2 mm up (2026-11-07 run sis_1107_1343: the far put-down was held 2.0 mm over its
 # target before the release (it touched ~1.5 mm earlier than in sis_1107_1237/1246, middle and near as before) and
 # dropped 9.6 mm under it after; was [127.88, 216.12, -92.92]), then 1 mm more (user; was [128.37, 213.68, -94.87]).
+# 2026-11-14 21:4x (user, teacharm jog with a puck in the jaws): the 3x3 place poses on the robot. Taught p13 (1, far
+# left), p14 (4, middle left), p15 (7, near left), p16 (9, near right); the rest filled in (teach.yaml p17 = 6, p18 = 3):
+# a row keeps its taught arm pose, a column its LM; the centre column LM is the mean of the left and right ones.
+# 40 / 75 mm: computed in the URDF model straight over each place pose, the tool at the place angle where the joints
+# allow (far 40: +3.5 deg, far 75: +15, middle 75: +7.5, near 75: +4 deg lean; 40 mm middle / near square).
+# Place (0) raised 15 mm over the taught poses (user 2026-11-14; tool angle kept, model): taught far 112.8, 238.9,
+# -73.5 / middle 96.9, 267.4, -61.5 / near 84.4, 283.8, -59.0.
 DICE_ROWS = {
+    'far': {0: [115.0, 225.23, -84.97], 40: [117.58, 203.59, -100.54], 75: [111.8, 196.69, -101.72]},
+    'middle': {0: [97.45, 257.61, -70.73], 40: [100.38, 237.77, -87.65], 75: [100.36, 215.89, -102.05]},
+    'near': {0: [84.62, 274.57, -68.02], 40: [86.61, 257.32, -83.27], 75: [89.31, 231.59, -102.3]},
+}
+DICE_COLS_LM_RAW_DEG_TAUGHT = {'left': 141.3, 'centre': 593.35, 'right': 1045.4}
+DICE_ROWS_1107_1417 = {
     'far': {0: [128.65, 212.37, -95.9], 40: [119.75, 210.33, -98.83], 75: [110.2, 212.18, -97.54]},
     'middle': {0: [103.7, 263.61, -69.61], 40: [106.61, 234.35, -95.95], 75: [97.07, 227.14, -101.71]},
     'near': {0: [88.22, 282.87, -65.83], 40: [89.83, 256.87, -90.22], 75: [84.13, 239.95, -103.84]},
 }
+DICE_ROWS_0329 = {
+    'far': {0: [130.43, 213.48, -93.01], 40: [122.4, 206.69, -99.83], 75: [113.7, 205.16, -101.06]},
+    'middle': {0: [107.02, 258.68, -71.22], 40: [110.62, 227.68, -98.61], 75: [100.79, 222.06, -103.07]},
+    'near': {0: [88.49, 281.42, -67.01], 40: [90.36, 255.07, -91.49], 75: [84.93, 237.75, -105.24]},
+}
+DICE_COLS_LM_RAW_DEG_0329 = {'left': 142.0, 'centre': 548.3, 'right': 1046.2}
 # Placement error as formulas (2026-11-07 run sis3 6 choi, six pucks, measured on the box; the box is not quite flat
 # and a released puck can shift, ~1 mm). x = toward the LM motor, y = away from the LM, both from where the puck was
 # aimed [mm]; xc = aimed puck centre toward the LM motor from the LiDAR centre [mm]; t = (row ahead - 112.5) / 60
@@ -198,6 +218,12 @@ DICE_FACES = {
 DICE_FACE = next((a if a == 'cal' else int(a) for a in sys.argv[1:] if a in ('1', '2', '3', '4', '5', '6', 'cal')), 6)
 # sis3 cal away|mid|motor: one column of the bend map, far to near (default mid).
 DICE_CAL_COL = next((a for a in sys.argv[1:] if a in DICE_CAL_LM_RAW_DEG), 'mid')
+# Put down from the robot's side out (user 2026-11-14): near row first, then middle, then far; left before right.
+# (Was column by column, far to near, so the held puck never passed over a placed one; at 75 mm the puck bottom
+# clears the placed tops, model.)
+_ROW_ORDER = {'near': 0, 'middle': 1, 'far': 2}
+_COL_ORDER = {'left': 0, 'centre': 1, 'right': 2}
+DICE_FACES = {k: sorted(v, key=lambda p: (_ROW_ORDER[p[0]], _COL_ORDER.get(p[1], 1))) for k, v in DICE_FACES.items()}
 DICE_FACES['cal'] = [('far', DICE_CAL_COL), ('middle', DICE_CAL_COL), ('near', DICE_CAL_COL)]
 # The clock brings the next stored puck to the guide one slot at a time (after each place, the arm over the box).
 # ASSUMED order: slot 12 first, then 1, 2, ... (one slot each, +30 deg); change if the pucks sit the other way round.
@@ -397,6 +423,20 @@ def frames_path(pose, i0, i1):
     return [pose(i) for i in list(range(i0, i1, step))[1:] + [i1]]
 
 
+def descent_path(pose, name=None):
+    """The descent of a plan (frames 20 -> 59, the TCP straight down) as a few poses instead of one joint move.
+    2026-11-14 18:07 (bag squeeze5b): the approach pose leans the tool ~10 deg (the wrist limit binds up there) and one
+    joint move spread that lean over the whole way down: the jaw on the robot side passed 12.8 mm from the puck wall
+    still leaning 6 deg (model; straight: 19.2) and the puck was knocked over before the jaws closed. Poses: where the
+    lean is gone (the wrist leaves its limit; the tips are still over the puck top), half-way from there, the grasp."""
+    f = yaml.safe_load(open(HERE / (name or PLAN_FILE)))['frames']
+    lean = [sum(f[i]['joints'][n] - f[59]['joints'][n] for n in ARM[1:4]) for i in range(60)]  # tool angle vs the grasp's
+    knee = next((i for i in range(20, 59) if abs(lean[i]) < math.radians(0.5)), 59)
+    if knee <= 21 or knee >= 57:  # no lean at the approach (or it lasts all the way down): one move, as before
+        return [pose(59)]
+    return [pose(knee), pose((knee + 59) // 2), pose(59)]
+
+
 def lying_line(heights):
     """Arms (shoulder, elbow, wrist_pitch, tool_roll) with the plan_lying tool angle at each height over its grasp."""
     p = yaml.safe_load(open(HERE / 'plan_lying.yaml'))
@@ -485,7 +525,7 @@ def steps_from_plan(current_slide=None, start=None):
     s = [('move 1: LM to the puck line, arm but the shoulder above the puck, gripper full open',
           TaskCommand.MANIPULATOR, [[approach[0], held] + approach[2:] + [full_open]]),
          ('move 2: shoulder above the puck', TaskCommand.MANIPULATOR, [approach]),
-         ('descend', TaskCommand.MANIPULATOR, [grasp]),
+         ('descend', TaskCommand.MANIPULATOR, descent_path(pose)),
          ('close gripper (grasp by current >= 0.1 A)', TaskCommand.GRIPPER, True),
          ('ascend', TaskCommand.MANIPULATOR, [approach]),
          ('load 1: wrist_pitch to the loading pose', TaskCommand.MANIPULATOR, [fold]),
@@ -556,6 +596,12 @@ def dice_lm(col):
     ch = plan.Chain(plan.URDF)
     # puck centre toward the LM motor from the LiDAR centre = slide - x0 (the arm moves in the plane of the shoulder)
     x0 = ch.origin('slide_joint')[0] + ch.origin('shoulder_joint')[0] - plan.ASSUME['lidar_center_x']
+    if col in DICE_COLS_LM_RAW_DEG_TAUGHT and '--dice-ex' not in sys.argv:  # taught 2026-11-14 (no ex: taught on the robot)
+        slide = teach.raw_to_target([DICE_COLS_LM_RAW_DEG_TAUGHT[col], 0, 0, 0, 0, 0])[0]
+        return slide, f', LM raw {DICE_COLS_LM_RAW_DEG_TAUGHT[col]:g} (taught 11-14)'
+    if col in DICE_COLS_LM_RAW_DEG_0329 and '--dice-0329' in sys.argv:  # 03:29 columns (user 2026-11-14)
+        slide = teach.raw_to_target([DICE_COLS_LM_RAW_DEG_0329[col], 0, 0, 0, 0, 0])[0]
+        return slide, f', LM raw {DICE_COLS_LM_RAW_DEG_0329[col]:g} (11-07 03:29)'
     if col in DICE_CAL_LM_RAW_DEG:
         slide = teach.raw_to_target([DICE_CAL_LM_RAW_DEG[col], 0, 0, 0, 0, 0])[0]
         return slide, f', x {(slide - x0) * 1000:+.1f} mm, no ex'
@@ -568,6 +614,52 @@ def dice_lm(col):
     land = x + a + b * (x - xc0)
     note = f', x {goal:+.1f} mm (LM aim {x:+.1f})'
     return slide, note + (f', LM end: lands {land - goal:+.1f} mm off' if abs(land - goal) > 0.05 else '')
+
+
+DICE_LINE_STEP = 0.015    # [m] vertical line over a pip in pieces this tall (5 mm: 13 stop-and-go moves, too slow, user 2026-11-14)
+DICE_FINAL_DROP = 0.010   # [m] the last part down onto the box: its own timed step with contact detection
+DICE_TILT_MAX_DEG = 30.0
+
+
+def dice_line(lm, row):
+    """2026-11-14 (user: the tool must stay square to the box while it puts a puck down). Poses from the 75 mm pose
+    down the vertical line over the pip to the place pose: the TCP keeps the place pose's x / y and the tool keeps
+    its angle (2.2 deg off vertical) wherever the joints allow (margin 3 deg); higher up it leans the least that fits
+    and straightens on the way down. Model (URDF): near row square from 55 mm, middle from 45, far only the last 5 mm
+    (arm near full reach). Returns (way down: line top .. DICE_FINAL_DROP, the final pose), each [slide, s, e, w, roll]."""
+    ch = plan.Chain(plan.URDF)
+    names = plan.Chain.NAMES
+    q0 = [lm] + teach.raw_to_target([0] + DICE_ROWS[row][0] + [DICE_PLACE_ROLL_RAW_DEG, 0])[1:5]
+    q75 = [lm] + teach.raw_to_target([0] + DICE_ROWS[row][75] + [DICE_PLACE_ROLL_RAW_DEG, 0])[1:5]
+    fk = lambda q: ch.fk(dict(zip(names, [q[0] - LM_BACKLASH] + list(q[1:5]))))
+    p0 = fk(q0)[:3, 3]
+    top = fk(q75)[:3, 3][2] - p0[2]
+    mg = math.radians(3.0)
+    ok = lambda q: all(ch.limits(n)[0] + mg <= v <= ch.limits(n)[1] - mg for n, v in zip(names[1:4], q[1:4]))
+    # the place pose's own tool angle in plan.ik_top_down terms
+    tilt0 = min((t / 10 for t in range(-300, 301)), key=lambda t: min(
+        (max(abs(sol[n] - q0[i + 1]) for i, n in enumerate(names[1:4])) for sol in plan.ik_top_down(ch, p0, t)),
+        default=9.0))
+    prev, out = q0, []
+    for h in [DICE_FINAL_DROP + DICE_LINE_STEP * k for k in range(int(round((top - DICE_FINAL_DROP) / DICE_LINE_STEP)) + 1)]:
+        best = None
+        for d in [x / 2 for x in range(0, int(DICE_TILT_MAX_DEG * 2) + 1)]:
+            for t in ((tilt0 + d, tilt0 - d) if d else (tilt0,)):
+                for sol in plan.ik_top_down(ch, p0 + [0, 0, h], t):
+                    q = [lm] + [sol[n] for n in names[1:4]] + [q0[4]]
+                    if ok(q):
+                        cost = max(abs(a - b) for a, b in zip(q[1:4], prev[1:4]))
+                        if best is None or cost < best[0]:
+                            best = (cost, q)
+            if best is not None:
+                break
+        if best is None:
+            break  # above here the line is out of reach: the 75 mm pose joins it at the highest point
+        out.append(best[1])
+        prev = best[1]
+    if not out:
+        return [q0], q0
+    return out[::-1], q0
 
 
 def dice_steps(current_slide=None, start=None):
@@ -655,6 +747,9 @@ def unload_steps(current_slide=None, start=None):
 BIGBRO_SLOT_LM = (float(sys.argv[sys.argv.index('--slot-lm-mm') + 1]) if '--slot-lm-mm' in sys.argv else -3.0) / 1000
 
 
+BIGBRO_RELEASE_LOWER_MM = 18.0  # 10, then 8 more (user 2026-11-14, twice): release at sis2 grasp + 22 mm
+
+
 def bigbro_steps(current_slide=None, start=None):
     """One bigbro_one per --plan file / --slot pair, in one run (2026-11-14, user: after loading a puck the arm goes
     straight on to the next one, not back to the nominal pose). All plans come from one upper-cam frame taken at the
@@ -693,7 +788,13 @@ def bigbro_one(current_slide=None, start=None, home=True):
     # much lower under the jaws, so the release goes up by the difference (toward the 40 mm over pose, joint blend).
     a = yaml.safe_load(open(HERE / PLAN_FILE)).get('assume', {})
     grip_mm = 1000 * a.get('puck_height', 0.06) * a.get('grasp_coverage', 0.75)
-    f = min(max((45.0 - grip_mm) / 20.0, 0.0), 1.0)
+    # Release height over the sis2 grasp [mm]: 22 for a 20 mm grip (2026-11-14, user, tuned on the robot: 40, then 30,
+    # then 22). A deeper grip holds the puck's bottom that much higher in the jaws, so the release goes that much lower
+    # (prism, 30 mm grip: 12). Between PICK_MID (+20) and the over pose (+40) by f, below PICK_MID extended (f < 0).
+    # 2026-11-14 13:25: the grips are set to the depths the loaded pucks really had (cylinder 34, prism 38), and the
+    # release heights that went in with them are kept as they were: cylinder +22, prism +12.
+    above_mm = 12.0 if grip_mm >= 36.0 else 40.0 - BIGBRO_RELEASE_LOWER_MM
+    f = min(max((above_mm - 20.0) / 20.0, -0.5), 1.0)
     release = [m_ + (o_ - m_) * f for m_, o_ in zip(mid, over)]
     lift = pick[-1][2][-1]  # the ascend pose
     # A puck with a neighbour nearer than the full-open jaws allow: cam_pick.py gives a smaller opening (open_deg).
@@ -726,6 +827,36 @@ def bigbro_one(current_slide=None, start=None, home=True):
     if start is not None and home and '--no-home' not in sys.argv:  # --no-home: stay at the via pose, the next puck starts there
         s.append(('bigbro 9: to the nominal pose', m, start))
     return s
+
+def gripcal_steps(current_slide=None, start=None):
+    """--gripcal (pa22, 2026-11-14): camera axes of the gripper cam in the arm frame, for the bigbro correction. With a
+    puck in front and its plan (--plan plan_cam.yaml): via -> over the puck (40 mm, as bigbro) -> shot -> GRIPCAL_MM
+    sideways (+LM axis) -> shot -> back and GRIPCAL_MM ahead -> shot -> back over the puck -> grip_axes.json -> via
+    -> nominal. The puck is not touched; it must not move during the run."""
+    pick = steps_from_plan(current_slide, start)
+    pick = pick[:[n for n, _, _ in pick].index('move 2: shoulder above the puck') + 1]
+    m = TaskCommand.MANIPULATOR
+    via = via_pose()[:5]
+    approach = pick[-1][2][-1]
+    if abs(math.degrees(yaml.safe_load(open(HERE / PLAN_FILE))['assume'].get('tool_roll', 0.0))) > GRIPFIX_ROLL_DEG:
+        sys.exit('gripcal: this plan turns the tool (a turned prism): use a cylinder, the axes are measured at tool_roll 0')
+    side, ahead = replan(GRIPCAL_MM, 0.0, 'plan_gripcal_side.yaml'), replan(0.0, GRIPCAL_MM, 'plan_gripcal_ahead.yaml')
+    if side is None or ahead is None:
+        sys.exit('gripcal: plan.py has no pose 8 mm beside / ahead of this puck: put the puck nearer the middle')
+    s = [('bigbro 0: to the nominal via pose', m, via)]
+    s += [(f'bigbro pick: {n}', k, a) for n, k, a in pick]
+    s += [('bigbro gripcal: shot over the puck', GRIPCAL, 'c0'),
+          (f'bigbro gripcal: arm {GRIPCAL_MM:g} mm sideways (+LM axis)', m, [side[0]]),
+          ('bigbro gripcal: shot', GRIPCAL, 'c1'),
+          (f'bigbro gripcal: arm back, then {GRIPCAL_MM:g} mm ahead', m, [approach, ahead[0]]),
+          ('bigbro gripcal: shot', GRIPCAL, 'c2'),
+          ('bigbro gripcal: arm back over the puck', m, [approach]),
+          ('bigbro gripcal: camera axes', GRIPCAL, 'solve'),
+          ('bigbro 8: to the nominal via pose', m, via)]
+    if start is not None and '--no-home' not in sys.argv:
+        s.append(('bigbro 9: to the nominal pose', m, start))
+    return s
+
 
 class Runner(Node):
     def __init__(self):
@@ -783,7 +914,12 @@ def describe(kind, arg):
     if kind == TaskCommand.CLOCK:
         return f'slot {arg}'
     if kind == GRIPCHECK:
-        return f'look, stop if > {GRIPCHECK_MM:g} mm off'
+        return (f'look, correct the arm if > {GRIPFIX_MM:g} mm off, stop if > {GRIPFIX_MAX_MM:g}' if GRIP_AXES.exists()
+                else f'look, stop if > {GRIPCHECK_MM:g} mm off')
+    if kind == GRIPZERO:
+        return 'gripper-cam shot -> grip_zero.json'
+    if kind == GRIPCAL:
+        return 'solve and write grip_axes.json' if arg == 'solve' else f'gripper-cam shot {arg}'
     if not isinstance(arg, bool):
         return f'open to {math.degrees(arg):.1f} deg'
     return 'close' if arg else 'open'
@@ -851,7 +987,7 @@ def step_i_gains(name):
 # Ratio 0.7 (was 0.4; sis_1107_1513: at 0.4 the far put-down went 7-10 mm on after the current began to fall, it
 # falls over ~0.2 s). Replayed on 0455/1237/1246/1343/1451/1513: 0.7 x2 no false hit, far hits 0.08-0.16 s sooner
 # (1513: 1.72 -> 1.64 s, 1.66 -> 1.50 s); 0.8 and 0.7 x1 hit good runs.
-STEP_CONTACT = {'put down on the': 0.7}
+STEP_CONTACT = {}  # rolled back to 1d6226a (user 2026-11-14): no contact stop on the dice put down (was {'put down on the': 0.7})
 
 
 def step_contact(name):
@@ -866,6 +1002,10 @@ def step_seconds(name, k=0):
     if v:  # one time per pose of the step (main move, then the slow final approach)
         return v[min(k, len(v) - 1)]
     return next((s for key, s in STEP_SECONDS.items() if key in name), 0.0)
+
+
+DESCEND_PASS_DEG = 1.0  # [deg] arrival at the passing poses (a piece moves a joint only ~4-9 deg: 3 deg would cut it short)
+DESCEND_PIECE_S = 1.0  # [s] each pose of a several-pose 'pick: descend' (3 poses: 3 s for ~55 mm; one pose keeps 2 s)
 
 
 def seconds_text(name):
@@ -900,36 +1040,264 @@ def record_loaded(name, grasped):
 
 
 GRIPCHECK = 'gripcheck'   # pseudo step kind: gripper-cam look at the puck before going down (bigbro)
+HOLD_BEFORE_CLOSE_S = float(sys.argv[sys.argv.index('--hold-before-close') + 1]) if '--hold-before-close' in sys.argv else 0.0
+LOOK_STEPS = ('bigbro pick: move 1', 'bigbro pick: move 2', 'bigbro fix')  # sent with tool_roll 0 (run_steps)
 GRIPCHECK_MM = 10.0       # stop when the puck sits further than this from the lined-up reference (camera x / y)
 LEARN_REF = None         # capture prefix of a check passed without a reference, stored as the reference after a grasp
 GRIP_LOCATE = Path.home() / 'craft' / 'tools' / 'realsense_check' / 'grip_locate.py'
 
 
-def grip_check():
-    """One gripper-cam frame (tools/realsense_check/grip_locate.py) against its lined-up reference.
-    Returns (ok, reason). No reference or no camera: not ok, so nothing goes down blind."""
+# Gripper-cam auto correction (pa22 patch gripcam_autofix_20261114, merged by hand into the 2026-11-14 flow; NOT run on
+# the robot before the merge). --gripcal measures how the image of a still puck shifts per arm mm (grip_axes.json);
+# with that file a puck further than GRIPFIX_MM off the lined-up reference moves the arm (plan.py again for the puck
+# shifted by the error) and the camera looks again, up to GRIPFIX_TRIES times; further than GRIPFIX_MAX_MM stops.
+# Without the file: the 10 mm check as before. Off for a turned tool (prism, |tool_roll| > GRIPFIX_ROLL_DEG): the
+# axes were measured at tool_roll 0 and how the camera turns with the roll is not known.
+GRIP_AXES = Path.home() / 'craft' / 'tools' / 'realsense_check' / 'grip_axes.json'  # written by --gripcal
+GRIPFIX_MM = 3.0
+NO_GRIPFIX = '--no-gripfix' in sys.argv  # the gripper cam only reads and prints: no arm correction and no stop for an offset
+                                          # (2026-11-14, user: the first approach was good, the corrections moved the jaws onto the puck)
+MAX_REACH = 0.150  # [m] reach with the gripper-cam correction (18:45: at 156 mm the shoulder could not lift the arm, 1.1 A, and the jaws pressed the puck top)
+GRIPFIX_MAX_MM = 35.0  # was 20: the first look after --gripzero read 29 mm (camera), the arm 24.5 mm short
+GRIPFIX_TRIES = 3
+GRIPFIX_DZ_MM = 4.0       # camera-to-top distance off the reference by more: the height is corrected first
+GRIP_Z_PER_SIDE = 0.375   # [camera mm per arm mm sideways] (--gripcal frames: 8 mm sideways, camera z +3 mm; ahead 0)
+GRIP_DZ_TO_UP = 1.08      # camera distance -> vertical (the camera looks ~22 deg off vertical, same frames)
+GRIPFIX_ROLL_DEG = 3.0
+GRIPCAL = 'gripcal'       # pseudo step kind of --gripcal: gripper-cam shots around known arm moves
+GRIPCAL_MM = 8.0          # size of the two calibration moves (sideways along the LM axis, then ahead)
+
+
+GRIP_TURN_SIGN = +1.0       # tool_roll [URDF] = sign * (tag turn in the picture - zero). From --gripcal: picture x = -base x,
+                            # picture y = +base y, a mirror, so picture turn = -yaw, and tool_roll = -yaw (FK). One check
+                            # on the robot: upper cam yaw -0.9 deg read +0.6 in the picture. NOT yet seen on a turned prism.
+GRIP_TURN_ZERO_DEG = 0.0
+GRIP_TURN_MIN_DEG = 6.0     # smaller differences are left alone (the gripper-cam yaw is within ~4 deg of the upper cam's)
+
+
+def held_bad(name, shot, steps, i):
+    """'' when the closed jaws hold the puck as a well-held one (grip_locate.py --held on the closed-jaw frame), else the
+    reason. Turned tools are not checked: the reference is a square-held puck and a turned one looks wider."""
     import re
     import subprocess
-    r = subprocess.run(['/usr/bin/python3', str(GRIP_LOCATE), '--capture'], capture_output=True, text=True, timeout=60)
+    if not HELD_CHECK:
+        return ''
+    q = next((steps[j][2][-1] for j in range(i, len(steps)) if 'pick: ascend' in steps[j][0]), None)
+    if q is not None and abs(math.degrees(q[4])) > 10.0:
+        print('   held check skipped: the jaws are turned (no reference for that yet)')
+        return ''
+    p = GRIP_LOCATE.parent / 'out' / shot.replace('saved ', '')
+    r = subprocess.run(['/usr/bin/python3', str(GRIP_LOCATE), '--held', str(p), '--shape', 'prism' if is_prism(name) else 'cylinder'],
+                       capture_output=True, text=True, timeout=60)
+    line = next((l for l in r.stdout.splitlines() if 'HELD' in l), 'HELD UNKNOWN no answer')
+    print('   ' + line.split(': ', 1)[-1])
+    return 'held wrong (' + line.split('HELD BAD ', 1)[1] + ')' if 'HELD BAD' in line else ''
+
+
+HELD_CHECK = '--no-held-check' not in sys.argv
+
+
+def is_prism(name):
+    """True when the step's puck is a prism (cam_pick.py's plan_cam_pucks.json)."""
+    import json
+    try:
+        return 'prism' in next(p for p in json.load(open(HERE / 'plan_cam_pucks.json')) if p['plan'] == step_plan(name))['class']
+    except (OSError, StopIteration, ValueError):
+        return False
+
+
+def step_plan(name):
+    """The plan file of the puck a step belongs to (' [puck k]' in its label, else the only one)."""
+    import re
+    m = re.search(r'\[puck (\d+)\]', name)
+    return PLAN_FILES[int(m.group(1)) - 1] if m else PLAN_FILES[0]
+
+
+def grip_measure():
+    """One gripper-cam frame (tools/realsense_check/grip_locate.py, the puck under the jaws). Returns (cam xyz [mm] or
+    None, offset from the lined-up reference (dx, dy) [mm] or None, the printed line, the capture prefix or None)."""
+    import re
+    import subprocess
+    r = subprocess.run(['/usr/bin/python3', str(GRIP_LOCATE), '--capture', '--under-jaws'], capture_output=True, text=True, timeout=60)
     text = r.stdout + r.stderr
-    m = re.search(r'dx ([+-]\d+) dy ([+-]\d+) dz ([+-]\d+) mm', text)
     line = next((l for l in text.splitlines() if 'camera x' in l or 'no puck' in l), text.strip()[-200:])
-    print('   ' + line)
+    num = r'([+-]?\d+(?:\.\d+)?)'
+    c = re.search(rf'camera x {num} y {num} z {num} mm', text)
+    m = re.search(rf'dx {num} dy {num} dz {num} mm', text)
+    seen = re.search(r'^(\S+): \w+ [\d.]+ px', text, re.M)
+    cam = None if not c else [float(c.group(i)) for i in (1, 2, 3)]
+    off = None if not m else [float(m.group(1)), float(m.group(2))]
+    grip_check.dz = None if not m else float(m.group(3))
+    t = re.search(rf'tag x {num} y {num} z {num}', text)
+    grip_measure.tag = None if not t else [float(t.group(i)) for i in (1, 2, 3)]
+    tt = re.search(rf'arm yaw {num} deg', text)
+    grip_measure.turn = float(tt.group(1)) if tt else None  # the top's yaw in the arm frame (not the picture angle)
+    return cam, off, line, seen.group(1) if seen else None
+
+
+def grip_axes(name=''):
+    """2x2 matrix M of --gripcal: gripper-cam shift of a still puck (dx, dy) [mm] per arm move (sideways +LM axis,
+    ahead) [mm]. None: not calibrated. Holds at any tool_roll: the camera sits before the roll joint (2026-11-14:
+    the tool rolled 45 deg, the picture stayed and the jaws turned in it)."""
+    import json
+    if not GRIP_AXES.exists():
+        return None
+    return np.array(json.load(open(GRIP_AXES))['cam_per_arm'], dtype=float)
+
+
+def grip_check(name=''):
+    """Gripper-cam look at the puck against its lined-up reference. Returns (ok, reason, off): off = (dx, dy) [mm] in
+    the camera frame, None when nothing was compared. With grip_axes.json the limit is GRIPFIX_MM (run_steps corrects
+    the arm), without it GRIPCHECK_MM."""
     global LEARN_REF
     LEARN_REF = None
-    seen = re.search(r'^(\S+): \w+ [\d.]+ px', text, re.M)
-    if seen and not m:
+    cam, off, line, prefix = grip_measure()
+    print('   ' + line)
+    zero = GRIP_LOCATE.parent / 'grip_zero.json'  # per shape since 12:15; a shape without one reads 'no reference' below
+    prev = getattr(grip_check, 'prev', None)
+    if (zero.exists() and cam is not None and off is None and grip_measure.tag is None and prev is not None
+            and prev[0] == step_plan(name) and 'again after the correction' in name):
+        # After a correction the turned jaw can hide a corner of the top tag (2026-11-14: a prism at -41 deg, the tag
+        # in plain view but not decoded, its tape gives no depth). The puck has not moved, only the camera: the tag
+        # moved in the picture as the box centre did. Estimated from the last look at this puck.
+        import json
+        zs = json.load(open(zero))
+        sh = 'prism' if is_prism(name) else 'cylinder'
+        if sh in zs and zs[sh].get('point') == 'tag':
+            est = np.array(prev[2]) + (np.array(cam) - np.array(prev[1]))
+            d3 = est - np.array(zs[sh]['mm'])
+            if abs(d3[2]) <= 30.0:
+                off = [float(d3[0]), float(d3[1])]
+                grip_check.dz = float(d3[2])
+                print(f'   top tag hidden: estimated from the last look (box centre moved {cam[0] - prev[1][0]:+.1f} / '
+                      f'{cam[1] - prev[1][1]:+.1f} mm) -> vs jaw centre dx {off[0]:+.1f} dy {off[1]:+.1f} mm')
+    for _ in range(3):  # the jaws' centre is known but this frame's top tag was not read: look again
+        if not (zero.exists() and cam is not None and off is None):
+            break
+        cam, off, line, prefix = grip_measure()
+        print('   ' + line)
+    if cam is not None and grip_measure.tag is not None:
+        grip_check.prev = (step_plan(name), list(cam), list(grip_measure.tag))
+    if cam is None:
+        return False, 'gripper cam: no puck', None
+    if off is None and zero.exists():
+        return False, 'gripper cam: the top tag was not read in 4 frames (hidden by a jaw? glare?): not going down blind', None
+    if off is None:
         # The puck is seen but there is no reference at this height (new grip depth, first run). Not a stop
         # (2026-11-14, user: no hand calibration, handle it inside the run): go down on the upper-cam plan, and when the
         # gripper then reports a grasp this frame becomes the reference for its shape (run_steps).
-        LEARN_REF = seen.group(1)
-        return True, 'gripper cam sees the puck; no reference at this height yet, this frame becomes it if the grasp holds'
-    if not m:
-        return False, 'gripper cam: no puck'
-    dx, dy = int(m.group(1)), int(m.group(2))
-    if max(abs(dx), abs(dy)) > GRIPCHECK_MM:
-        return False, f'gripper cam: puck {dx:+d} / {dy:+d} mm off the lined-up spot (limit {GRIPCHECK_MM:g})'
-    return True, f'gripper cam: puck {dx:+d} / {dy:+d} mm off, within {GRIPCHECK_MM:g}'
+        LEARN_REF = prefix
+        return True, 'gripper cam sees the puck; no reference at this height yet, this frame becomes it if the grasp holds', None
+    lim = GRIPFIX_MM if grip_axes(name) is not None else GRIPCHECK_MM
+    dx, dy = off
+    # Height: the camera-to-top distance against the reference's. The camera also comes nearer as the arm goes
+    # sideways (GRIP_Z_PER_SIDE), so the part the arm's own offset explains is taken out. The upper cam reads the shelf
+    # 6-17 mm low (2026-11-14: dz -5..-16 mm on every prism look), so the approach stood lower than at the reference and
+    # the x / y read there were skewed by the slant view (13:08: an 11.6 mm 'offset' moved the arm 14.6 mm sideways).
+    grip_check.dz_h = 0.0
+    M = grip_axes(name)
+    if grip_check.dz is not None and M is not None:
+        d_side = -np.linalg.solve(M, np.array(off))[0]
+        grip_check.dz_h = grip_check.dz + GRIP_Z_PER_SIDE * d_side
+        if abs(grip_check.dz_h) > GRIPFIX_DZ_MM:
+            return False, f'gripper cam: the puck top is {-grip_check.dz_h * GRIP_DZ_TO_UP:+.1f} mm off the planned height (camera {grip_check.dz:+.1f} mm)', off
+    if max(abs(dx), abs(dy)) > lim:
+        return False, f'gripper cam: puck {dx:+.1f} / {dy:+.1f} mm off the lined-up spot (limit {lim:g})', off
+    return True, f'gripper cam: puck {dx:+.1f} / {dy:+.1f} mm off, within {lim:g}', off
+
+
+def replan(d_side_mm, d_ahead_mm, out='plan_cam_corr.yaml', plan_file=None, roll=None, d_shelf_mm=0.0):
+    """plan.py again for the puck of plan_file (default PLAN_FILE) moved by (sideways along the LM axis, ahead) [mm];
+    same shelf height, grip depth and tool_roll. Returns (approach, grasp) arm targets like plan_pose, or None when
+    plan.py finds no pose."""
+    import subprocess
+    a = yaml.safe_load(open(HERE / (plan_file or PLAN_FILE)))['assume']
+    # The correction must not carry the arm past the reach the motors hold (cam_pick.py MAX_AHEAD; 2026-11-14 12:17:
+    # a +18.9 mm correction took a puck at the limit to ~158 mm and the jaws knocked it over on the way down).
+    reach = a['puck_ahead'] + d_ahead_mm / 1000
+    if reach > MAX_REACH:
+        print(f'   the corrected puck is {reach * 1000:.0f} mm ahead of the LiDAR face (> {MAX_REACH * 1000:.0f}): no correction; park closer')
+        return None
+    r = subprocess.run([sys.executable, str(HERE / 'plan.py'), '--puck-ahead', f"{a['puck_ahead'] + d_ahead_mm / 1000:.4f}",
+                        '--puck-x', f"{a['puck_x_offset'] + d_side_mm / 1000:.4f}", '--shelf-height', f"{a['shelf_height'] + d_shelf_mm / 1000:.4f}",
+                        '--grip-mm', f"{a['grasp_coverage'] * a['puck_height'] * 1000:.1f}",
+                        '--tool-roll', f"{a.get('tool_roll', 0.0) if roll is None else roll:.4f}",
+                        '--approach-above', f"{a.get('approach_above', 0.04):.3f}", '--out', out],
+                       capture_output=True, text=True)
+    f = yaml.safe_load(open(HERE / out)).get('frames') if r.returncode == 0 and (HERE / out).exists() else None
+    if not f:
+        print('   plan.py found no pose for the corrected puck:\n   ' + '\n   '.join((r.stdout + r.stderr).strip().splitlines()[-3:]))
+        return None
+    pose = plan_pose(out)
+    return pose(0), descent_path(pose, out)  # approach, the way down (its last pose = the grasp)
+
+
+GRIPZERO = 'gripzero'     # pseudo step kind of --gripzero
+
+
+def gripzero_step(what):
+    """--gripzero: one gripper-cam frame stored as the jaws' centre (grip_locate.py --set-zero)."""
+    import subprocess
+    if what == 'look':  # a plain colour frame of the closed jaws on the puck, to look at afterwards
+        p = GRIP_LOCATE.parent / 'out' / time.strftime('gripclose_%H%M%S')
+        r = subprocess.run([str(GRIP_LOCATE.parent / 'build' / 'rs_snap'), str(p), '1280', '720', '261622073363'], capture_output=True, text=True, timeout=60)
+        return r.returncode == 0, f'saved {p.name}'
+    r = subprocess.run(['/usr/bin/python3', str(GRIP_LOCATE), '--capture', '--under-jaws', '--set-zero'], capture_output=True, text=True, timeout=60)
+    line = next((l for l in (r.stdout + r.stderr).splitlines() if 'zero' in l), (r.stdout + r.stderr).strip()[-200:])
+    return 'zero stored' in line, line
+
+
+def gripzero_steps(current_slide=None, start=None):
+    """--gripzero (2026-11-14): where a puck sits in the gripper-cam picture when it is in the middle of the jaws,
+    found without a hand: over the puck (as bigbro) -> down -> close (the jaws push the puck to their middle, front-back)
+    -> open -> up to the approach pose -> a shot: its top tag's centre is the jaws' centre for every later check and
+    correction (grip_zero.json). Replaces the references learned from a grasp, which kept the error of that grasp
+    (cylinders came in off the middle and were knocked away). Sideways the jaws do not centre the puck: that direction
+    stays as the upper cam put it. Use a standing puck with a top tag, not turned (a prism within a few degrees)."""
+    pick = steps_from_plan(current_slide, start)
+    names = [n for n, _, _ in pick]
+    pick = pick[:names.index('ascend') + 1]
+    m = TaskCommand.MANIPULATOR
+    via = via_pose()[:5]
+    i = [n for n, _, _ in pick].index('ascend')
+    pick.insert(i, ('open gripper (the puck stays where the jaws centred it)', TaskCommand.GRIPPER, False))
+    pick.insert(i, ('gripzero: shot of the closed jaws', GRIPZERO, 'look'))
+    s = [('bigbro 0: to the nominal via pose', m, via)]
+    s += [(f'bigbro pick: {n}', k, a) for n, k, a in pick]
+    s += [('bigbro gripzero: shot of the centred puck', GRIPZERO, 'shot'),
+          ('bigbro 8: to the nominal via pose', m, via)]
+    if start is not None:
+        s.append(('bigbro 9: to the nominal pose', m, start))
+    return s
+
+
+_gripcal = {}
+
+
+def gripcal_step(what):
+    """--gripcal: store one shot ('c0', 'c1', 'c2') or solve and write grip_axes.json ('solve')."""
+    import json
+    if what != 'solve':
+        cam, _, line, _ = grip_measure()
+        print('   ' + line)
+        if cam is None:
+            return False, 'gripper cam: no puck'
+        _gripcal[what] = np.array(cam[:2])
+        return True, f'shot {what}: camera x {cam[0]:+.1f} y {cam[1]:+.1f} mm'
+    c0, c1, c2 = (_gripcal.get(k) for k in ('c0', 'c1', 'c2'))
+    if c0 is None or c1 is None or c2 is None:
+        return False, 'a shot is missing'
+    M = np.column_stack([(c1 - c0) / GRIPCAL_MM, (c2 - c0) / GRIPCAL_MM])
+    n1, n2 = np.linalg.norm(M[:, 0]), np.linalg.norm(M[:, 1])
+    cosang = float(M[:, 0] @ M[:, 1] / max(n1 * n2, 1e-9))
+    print(f'   camera shift per arm mm: sideways {np.round(M[:, 0], 3)} (|{n1:.2f}|), ahead {np.round(M[:, 1], 3)} (|{n2:.2f}|),'
+          f' angle between them {math.degrees(math.acos(max(-1, min(1, cosang)))):.0f} deg')
+    # A still puck seen from a camera that moves 8 mm must shift about 8 mm, and the two directions are about square.
+    if not (0.6 < n1 < 1.4 and 0.6 < n2 < 1.4 and abs(cosang) < 0.35):
+        return False, 'the shifts do not look like 8 mm moves at right angles: nothing written (puck moved? wrong puck detected?)'
+    json.dump({'cam_per_arm': M.tolist(), 'move_mm': GRIPCAL_MM, 'stamp': time.strftime('%Y-%m-%d %H:%M'),
+               'plan': str(PLAN_FILE)}, open(GRIP_AXES, 'w'), indent=1)
+    return True, f'written: {GRIP_AXES}'
 
 
 def run_steps(node, steps):
@@ -937,7 +1305,9 @@ def run_steps(node, steps):
     them from the start); False if the user quit or a step did not succeed."""
     auto = AUTO
     grasped_at_close = None
-    for name, kind, arg in steps:
+    fixed, tries, shelf_fix = np.zeros(2), 0, 0.0  # this puck's arm correction so far (sideways, ahead, up) [mm], corrections done
+    roll_fix = None  # this puck's tool_roll after a gripper-cam turn correction [rad]
+    for i, (name, kind, arg) in enumerate(steps):  # GRIPCHECK may insert steps after itself
         if auto:
             print(f'>> {name}')
         else:
@@ -945,20 +1315,118 @@ def run_steps(node, steps):
             if answer == 'q':
                 return False
             auto = answer == 'bro'
-        if kind == GRIPCHECK:
-            ok, reason = grip_check()
+        if name.startswith('bigbro pick: close') and HOLD_BEFORE_CLOSE_S > 0:
+            # --hold-before-close N: the jaws stay open at the grasp pose N s (a photo from the side: is the tool upright?)
+            print(f'   holding {HOLD_BEFORE_CLOSE_S:g} s at the grasp pose with the jaws open (take the photo now)')
+            gripzero_step('look')
+            time.sleep(HOLD_BEFORE_CLOSE_S)
+        if kind in (GRIPCAL, GRIPZERO):
+            ok, reason = gripcal_step(arg) if kind == GRIPCAL else gripzero_step(arg)
             print(f'   -> {"SUCCEEDED" if ok else "FAILED"} {reason}')
             if not ok:
                 print('step did not succeed')
                 return False
             continue
+        if kind == GRIPCHECK:
+            if 'again after the correction' not in name:  # the first look at a puck: its corrections start at zero
+                fixed, tries, shelf_fix = np.zeros(2), 0, 0.0
+            if 'again after the correction' not in name:
+                roll_fix = None
+            ok, reason, off = grip_check(name)
+            if NO_GRIPFIX and reason != 'gripper cam: no puck':
+                if is_prism(name) and grip_measure.turn is None and 'again after the correction' not in name:
+                    for k in range(2):  # a prism's top tag was not read: shoot again (the jaws stay at roll 0 without it)
+                        line = grip_measure()[2]
+                        print(f'   top tag not read, shot {k + 2}: {line}')
+                        if grip_measure.turn is not None:
+                            break
+                    if grip_measure.turn is None:
+                        reason += '; PRISM YAW NOT READ in 3 shots, the jaws are not turned'
+                ok, reason = True, 'NOT CORRECTED (--no-gripfix): ' + reason  # a prism's jaw turn below still runs
+            M = grip_axes(name)
+            # A prism: the jaws turn to its faces as the gripper cam sees them from 20 cm (2026-11-14: the upper cam
+            # reads the top tag's turn only now and then). The camera does not turn with the tool, so the tag's turn
+            # in the picture is the tool_roll that lines the jaws up (GRIP_TURN_SIGN, GRIP_TURN_ZERO_DEG).
+            turn_fix = None
+            if is_prism(name) and grip_measure.turn is not None:
+                want = -math.radians(grip_measure.turn)  # tool_roll = -yaw (FK; as cam_pick.py)
+                have = roll_fix if roll_fix is not None else yaml.safe_load(open(HERE / step_plan(name)))['assume'].get('tool_roll', 0.0)
+                d_roll = (want - have + math.pi / 4) % (math.pi / 2) - math.pi / 4
+                if abs(d_roll) > math.radians(GRIP_TURN_MIN_DEG):
+                    turn_fix = have + d_roll
+            need_move = not NO_GRIPFIX and not ok and off is not None and M is not None and max(abs(off[0]), abs(off[1])) <= GRIPFIX_MAX_MM
+            if (need_move or (turn_fix is not None and (ok or need_move))) and tries < GRIPFIX_TRIES:
+                # The puck is off the lined-up spot by `off` in the camera. A still puck shifts by M @ (arm move), so
+                # the arm move that brings it back is -inv(M) @ off. The pick is planned again for the puck there.
+                d = -np.linalg.solve(M, np.array(off)) if need_move else np.zeros(2)
+                d_up = 0.0
+                if need_move and abs(getattr(grip_check, 'dz_h', 0.0)) > GRIPFIX_DZ_MM:
+                    # height first; the x / y are looked at again from the reference height
+                    d_up, d = -grip_check.dz_h * GRIP_DZ_TO_UP, np.zeros(2)
+                    shelf_fix += d_up
+                if turn_fix is not None:
+                    roll_fix = turn_fix
+                    reason += f'; prism yaw {grip_measure.turn:+.1f} deg (arm frame) -> tool_roll {math.degrees(roll_fix):+.1f} deg'
+                poses = replan(*(fixed + d), plan_file=step_plan(name), roll=roll_fix, d_shelf_mm=shelf_fix)
+                if poses is None:
+                    print(f'   -> FAILED {reason}; no pose for the correction')
+                    print('step did not succeed')
+                    return False
+                if poses is not None:
+                    fixed, tries = fixed + d, tries + 1
+                    approach2, grasp2 = poses
+                    if shelf_fix:
+                        # The box is fixed: the height correction only puts the camera where its reference was taken
+                        # (x / y read right there); the grasp keeps the fixed shelf's depth (13:26: raised 7 mm, the
+                        # prism was held 7 mm shallow and the held check stopped it).
+                        g0 = replan(*(fixed), plan_file=step_plan(name), roll=roll_fix, out='plan_cam_corr0.yaml')
+                        if g0 is not None:
+                            grasp2 = g0[1]
+                    tag = name[name.index(' [puck'):] if ' [puck' in name else ''
+                    for j in range(i + 1, len(steps)):  # this puck's descend and ascend only
+                        n, k2, _ = steps[j]
+                        if 'pick: descend' in n:
+                            steps[j] = (n, k2, grasp2)
+                        elif 'pick: ascend' in n:
+                            steps[j] = (n, k2, [approach2]); break
+                    steps.insert(i + 1, (f'bigbro fix {tries}: over the puck, arm {d[0]:+.1f} mm sideways {d[1]:+.1f} mm ahead {d_up:+.1f} mm up'
+                                         f' (total {fixed[0]:+.1f} / {fixed[1]:+.1f}){tag}', TaskCommand.MANIPULATOR, [approach2]))
+                    steps.insert(i + 2, (f'bigbro check: gripper cam again after the correction{tag}', GRIPCHECK, None))
+                    print(f'   -> CORRECTING {reason}')
+                    continue
+            print(f'   -> {"SUCCEEDED" if ok else "FAILED"} {reason}')
+            if not ok:
+                print('step did not succeed')
+                return False
+            if name.startswith('bigbro check'):
+                # The jaws turn to the puck now, over it (the descend pose holds the same roll).
+                asc = next((j for j in range(i + 1, len(steps)) if 'pick: ascend' in steps[j][0]), None)
+                if asc is not None:
+                    q = steps[asc][2][-1]
+                    if abs(q[4]) > math.radians(1.0):
+                        tag = name[name.index(' [puck'):] if ' [puck' in name else ''
+                        steps.insert(i + 1, (f'bigbro pick: turn the jaws to the puck, tool_roll {math.degrees(q[4]):+.1f} deg{tag}',
+                                             TaskCommand.MANIPULATOR, [q]))
+            continue
+        if kind == TaskCommand.MANIPULATOR and name.startswith(LOOK_STEPS):
+            # Looked at with the jaws square to the camera: turned they hide the top tag and the detector loses the
+            # puck (2026-11-14, prism at 43 deg). The roll turns about the tool axis, so the position is the same;
+            # the jaws turn to the puck after the last look (TURN step below).
+            arg = [list(q[:4]) + [0.0] + list(q[5:]) for q in arg]
         for k, target in enumerate(arg if kind == TaskCommand.MANIPULATOR else [arg]):
             gains = None
             if kind == TaskCommand.MANIPULATOR:
                 gains = step_i_gains(name)
                 if gains != I_GAINS_BASE:
                     print(f'   I gains {"/".join(map(str, gains))} (STEP_I_GAINS)')
-            status, reason = node.wait(node.send(kind, target, step_seconds(name, k), step_tolerance(name), gains,
+            secs, tol = step_seconds(name, k), step_tolerance(name)
+            if kind == TaskCommand.MANIPULATOR and 'the vertical line' in name and k < len(arg) - 1:
+                tol = math.radians(VIA_TOLERANCE_DEG)  # dice: passing poses on the line, no waiting for 0.5 deg
+            if kind == TaskCommand.MANIPULATOR and 'pick: descend' in name and len(arg) > 1:
+                secs = DESCEND_PIECE_S
+                if k < len(arg) - 1:  # passing poses on the way down: no waiting for 0.5 deg; the grasp keeps it
+                    tol = math.radians(DESCEND_PASS_DEG)
+            status, reason = node.wait(node.send(kind, target, secs, tol, gains,
                                                  step_contact(name) if kind == TaskCommand.MANIPULATOR else 0.0))
             if status != 'SUCCEEDED':
                 break
@@ -980,9 +1448,27 @@ def run_steps(node, steps):
             record_loaded(name, grasped_at_close)
         if kind == TaskCommand.GRIPPER and arg is True:
             grasped_at_close = node.grasped
+            if name.startswith('bigbro pick: close'):
+                # A colour frame of the closed jaws, kept for looking at afterwards (2026-11-14: pucks were not held and
+                # nothing showed why), and no trip to the clock with empty jaws: without a grasp the run stops here.
+                ok_shot, shot = gripzero_step('look')
+                print(f'   gripper cam: {shot}')
+                bad = held_bad(name, shot, steps, i)
+                if bad:
+                    # Held wrong (sideways along the jaws, too shallow, knocked over): it would not go into the slot.
+                    # Let go over the box and stop; basic, then the next run looks again.
+                    print(f'   -> {bad}: letting it go and stopping before the clock')
+                    node.wait(node.send(TaskCommand.GRIPPER, False))
+                    asc = next((steps[j][2][-1] for j in range(i + 1, len(steps)) if 'pick: ascend' in steps[j][0]), None)
+                    if asc is not None:
+                        node.wait(node.send(TaskCommand.MANIPULATOR, asc, 0.0, 0.0, I_GAINS_BASE, 0.0))
+                    return False
+                if not node.grasped:
+                    print('   -> the gripper reports no grasp: not carrying on to the clock (basic brings the arm back)')
+                    return False
             if LEARN_REF and node.grasped:
                 import subprocess
-                r = subprocess.run(['/usr/bin/python3', str(GRIP_LOCATE), '--set-ref', LEARN_REF], capture_output=True, text=True)
+                r = subprocess.run(['/usr/bin/python3', str(GRIP_LOCATE), '--under-jaws', '--set-ref', LEARN_REF], capture_output=True, text=True)
                 print('   gripper cam: ' + (r.stdout.strip().splitlines() or ['reference not stored'])[-1])
     return True
 
@@ -1025,8 +1511,10 @@ def main():
     lying = '--lying' in sys.argv
     dice = '--dice' in sys.argv
     bigbro = '--bigbro' in sys.argv
-    unload = '--unload' in sys.argv or dice or bigbro  # these set their own way out and stop at their own end
-    make_steps = (bigbro_steps if bigbro else dice_steps if dice else unload_steps if unload
+    gripcal = '--gripcal' in sys.argv
+    gripaxis = '--gripzero' in sys.argv
+    unload = '--unload' in sys.argv or dice or bigbro or gripcal or gripaxis  # these set their own way out and stop at their own end
+    make_steps = (gripzero_steps if gripaxis else gripcal_steps if gripcal else bigbro_steps if bigbro else dice_steps if dice else unload_steps if unload
                   else lying_steps_from_plan if lying else steps_from_plan)
     goto = sys.argv[sys.argv.index('--goto') + 1] if '--goto' in sys.argv else None
     if goto is not None:
@@ -1074,8 +1562,12 @@ def main():
         # the puck left the LM 10.6 mm off and basic refused): any LM inside the calibrated range checked above is
         # accepted there. A work flow still has to start at the nominal pose.
         lm_tol = LM_START_TOL if goto is None or '--lm-tol-mm' in sys.argv else 1.0
+        # The same for the arm joints: over a puck the wrist_pitch is 160 deg and the tool_roll 90 deg from the nominal
+        # pose (2026-11-14: basic refused after a stopped gripaxis). With every joint inside its limits the way back
+        # (out_to_via: shoulder, then elbow / LM / roll, then wrist) is the reverse of the way out.
+        joint_tol = math.radians(90.0) if goto is None or outside else math.radians(400.0)
         off = [f'{n} {(now[n] - t) * 1000:+.1f} mm' if n == 'slide_joint' else f'{n} {math.degrees(now[n] - t):+.1f} deg'
-               for n, t in zip(ARM, start) if abs(now[n] - t) > (lm_tol if n == 'slide_joint' else math.radians(90.0))]
+               for n, t in zip(ARM, start) if abs(now[n] - t) > (lm_tol if n == 'slide_joint' else joint_tol)]
         if off:
             print(f'!! too far from the nominal pose ({", ".join(off)}): move it closer by hand; aborting'); return 1
         steps = make_steps(via_pose()[0], start)
@@ -1169,4 +1661,6 @@ def main():
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    code = main()
+    sys.stdout.flush(); sys.stderr.flush()
+    os._exit(code or 0)  # not sys.exit: the spin thread aborted the interpreter on the way out ("terminate called", core dumped)
