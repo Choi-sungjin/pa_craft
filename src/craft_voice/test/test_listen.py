@@ -306,3 +306,26 @@ def test_the_word_reaction_is_spoken_as_its_recording(tmp_path):
     narrator.word('없는단어')                                # no recording: nothing (a warning)
     run(narrator)
     assert texts == [('ack', '젯슨')] and len(narrator.player.played) == 1
+
+
+def test_quiet_speech_is_made_louder_before_speech_to_text():
+    from array import array
+    from craft_voice.listen import amplify, peak
+    quiet = array('h', [300, -369, 120, 0] * 100).tobytes()
+    loud, gain = amplify(quiet, 0.8, 10.0)
+    assert gain == 10.0 and peak(loud) == 3690              # capped at the most gain
+    loud, gain = amplify(quiet, 0.05, 10.0)
+    assert 4.4 < gain < 4.5 and peak(loud) <= 0.05 * 32767 + 1
+    big = array('h', [30000, -32000] * 10).tobytes()
+    assert amplify(big, 0.8, 10.0) == (big, 1.0)            # never made quieter
+    assert amplify(quiet, 0.0, 10.0) == (quiet, 1.0)        # off
+
+
+def test_heard_audio_is_saved_for_diagnosis(tmp_path):
+    from craft_voice.listen import Listener
+    listener = Listener(microphone=None, transcribe=lambda wav: '크래프트 뭐해', on_wake=lambda q: None,
+                        save_dir=str(tmp_path), save_keep=2)
+    for _ in range(3):
+        listener.process(b'\x10\x00' * 8000, 0.0)
+    files = sorted(p.name for p in tmp_path.iterdir())
+    assert len(files) == 2 and all(n.endswith('_크래프트_뭐해.wav') for n in files)

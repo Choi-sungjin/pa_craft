@@ -171,13 +171,15 @@ class OpenAIBackend:
             request['speed'] = self.tts_speed
         return request
 
-    def stream_speech(self, text: str, chunk_size: int = 4096):
+    def stream_speech(self, text: str, chunk_size: int = 4096, heard: dict | None = None):
         """Yield raw PCM (16-bit mono, self.sample_rate) as the speech endpoint produces it.
 
         The first chunk comes well before the whole sentence is synthesized (measured: median 0.80 s vs 1.44 s).
+        heard: the Realtime model fills in {'transcript': ...} (what it actually said); the speech
+        endpoint reads text as written and leaves it untouched.
         """
         if self.realtime is not None:
-            yield from self.realtime.stream(text)
+            yield from self.realtime.stream(text, heard=heard)
             return
         speech = self.client.audio.speech.with_streaming_response
         with speech.create(**self._speech_request(text), extra_headers=self.request_headers or None) as response:

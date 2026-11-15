@@ -254,18 +254,24 @@ class RealtimeSpeech:
         return ('너는 로봇의 목소리야. 지금 네가 할 말은 정해져 있어. 아래 대사를 한 글자도 바꾸지 말고 그대로 한 번만 말해. '
                 f'대사 앞뒤에 다른 말을 붙이지 마. {self.instructions}'.strip() + f'\n대사: {text}')
 
-    def stream(self, text: str, timeout_s: float | None = None):
-        """Yield raw PCM (16-bit mono, 24 kHz) while the model speaks `text`."""
+    def stream(self, text: str, timeout_s: float | None = None, heard: dict | None = None):
+        """Yield raw PCM (16-bit mono, 24 kHz) while the model speaks `text`.
+
+        heard: filled with {'transcript': what the model says it spoke} for this very call (the shared
+        last_transcript may be overwritten by another sentence meanwhile).
+        """
         text = re.sub(r'\s+', ' ', text).strip()
         if not text:
             raise RealtimeError('nothing to say')
         limit = self.timeout_s if timeout_s is None else timeout_s
         self.last_transcript = ''
+        if heard is not None:
+            heard['transcript'] = ''
         for attempt in (0, 1):
             ws, reused = self._take(limit)
             got_audio = False
             try:
-                for piece in self._speak(ws, text, limit):
+                for piece in self._speak(ws, text, limit, heard):
                     got_audio = True
                     yield piece
                 return
@@ -276,7 +282,7 @@ class RealtimeSpeech:
             finally:
                 ws.close()
 
-    def _speak(self, ws, text: str, limit: float):
+    def _speak(self, ws, text: str, limit: float, heard: dict | None = None):
         instructions = self._line_instructions(text)
         deadline = time.monotonic() + max(limit, 1.0) + 30.0  # the whole sentence; each wait is `limit`
         try:
@@ -316,6 +322,8 @@ class RealtimeSpeech:
                     yield piece
             elif kind in ('response.output_audio_transcript.done', 'response.audio_transcript.done'):
                 self.last_transcript = event.get('transcript') or ''
+                if heard is not None:
+                    heard['transcript'] = self.last_transcript
             elif kind == 'response.done':
                 status = (event.get('response') or {}).get('status')
                 if status != 'completed' or not got_audio:
@@ -325,10 +333,13 @@ class RealtimeSpeech:
     def synthesize(self, text: str, urgent: bool = False) -> bytes:
         """Whole sentence -> WAV bytes. One more try if the model said something else than the sentence."""
         limit = self.urgent_timeout_s if urgent else self.timeout_s
+        said = ''
         for attempt in (0, 1):
-            pcm = b''.join(self.stream(text, limit))
-            if same_sentence(self.last_transcript, text) or not self.last_transcript:
+            heard = {}
+            pcm = b''.join(self.stream(text, limit, heard))
+            said = heard.get('transcript', '')
+            if same_sentence(said, text) or not said:
                 return pcm_to_wav(pcm, self.sample_rate)
             if urgent or attempt:
                 break
-        raise RealtimeError(f'the speech model did not read the sentence (said: {self.last_transcript[:60]!r})')
+        raise RealtimeError(f'the speech model did not read the sentence (said: {said[:60]!r})')

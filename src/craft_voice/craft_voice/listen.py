@@ -123,6 +123,26 @@ def rms(frame: bytes) -> float:
     return math.sqrt(sum(s * s for s in samples) / len(samples))
 
 
+def peak(frame: bytes) -> int:
+    samples = array('h', frame[:len(frame) - len(frame) % 2])
+    return max((abs(s) for s in samples), default=0)
+
+
+def amplify(pcm: bytes, target_peak: float, max_gain: float) -> tuple[bytes, float]:
+    """작게 들린 말소리를 키운다: 가장 큰 진폭이 target_peak(최대 대비 비율)가 되게, 최대 max_gain 배.
+    (키운 소리, 실제 배율). 이미 큰 소리는 줄이지 않는다(배율 1)."""
+    top = peak(pcm)
+    if target_peak <= 0 or top <= 0:
+        return pcm, 1.0
+    gain = min(max_gain, target_peak * 32767 / top)
+    if gain <= 1.0:
+        return pcm, 1.0
+    samples = array('h', pcm[:len(pcm) - len(pcm) % 2])
+    for i, s in enumerate(samples):
+        samples[i] = max(-32768, min(32767, int(s * gain)))
+    return samples.tobytes(), gain
+
+
 def webrtc_vad(aggressiveness: int = 2):
     """is_speech(frame) from the webrtcvad package, or None if it is not installed."""
     try:
@@ -246,8 +266,15 @@ class Listener:
     def __init__(self, microphone, transcribe, on_wake, on_followup=None, names=('크래프트',), segmenter=None,
                  is_speaking=lambda: False, tail_s: float = 0.6, follow_up_s: float = 6.0,
                  max_stt_per_min: int = 20, tolerance: int = 2, logger=None, clock=time.monotonic,
-                 retry_s: float = 5.0, ready=lambda: True, words=None, on_word=None, word_tolerance: int = 0):
+                 retry_s: float = 5.0, ready=lambda: True, words=None, on_word=None, word_tolerance: int = 0,
+                 stt_peak: float = 0.0, stt_max_gain: float = 10.0, log_heard: bool = False, save_dir: str = '',
+                 save_keep: int = 60):
         self.microphone = microphone
+        self.save_dir, self.save_keep = save_dir, save_keep   # 진단용: 받아쓰기에 보낸 소리를 wav 로 남김('' = 끔)
+        # 받아쓰기 전에 말소리 구간을 키운다(블루투스 마이크는 작고 잡음이 많다: 2026-11-13 잡음 RMS ~240,
+        # 최대 진폭 ~370 이라 빈 받아쓰기가 많았다). 0 = 끔.
+        self.stt_peak, self.stt_max_gain = stt_peak, stt_max_gain
+        self.log_heard = log_heard      # 이름이 아닌 말·빈 결과도 보통 단계로 기록(진단용)
         # 반응 단어(이름 말고): {"젯슨": ("젯슨", "제슨", ...)} -> on_word("젯슨"). 짧은 말이라 오차 없이 맞을 때만
         # (오차 1이면 "레슨", "잭슨"도 걸렸다, 2026-11-13). 변형은 별칭으로 받는다.
         self.words = {key: tuple(aliases) for key, aliases in (words or {}).items() if aliases}
@@ -268,7 +295,7 @@ class Listener:
         self.clock = clock
         self.retry_s = retry_s
         self.stats = {'segments': 0, 'transcribed': 0, 'wakes': 0, 'followups': 0, 'ignored': 0,
-                      'stt_errors': 0, 'over_budget': 0, 'mic_restarts': 0, 'words': 0}
+                      'stt_errors': 0, 'over_budget': 0, 'mic_restarts': 0, 'words': 0, 'empty': 0}
         self.enabled = True
         self._segments: queue.Queue = queue.Queue(maxsize=2)
         self._stt_times: deque = deque()
@@ -361,25 +388,52 @@ class Listener:
                 return
             self.process(*item)
 
+    def _save(self, pcm: bytes, text: str):
+        """진단용: 받아쓰기에 보낸 소리를 '시각_결과.wav' 로 남기고 오래된 것은 지운다."""
+        if not self.save_dir:
+            return
+        import os
+        try:
+            os.makedirs(self.save_dir, exist_ok=True)
+            label = re.sub(r'[^0-9A-Za-z가-힣]+', '_', text)[:30].strip('_') or 'empty'
+            name = time.strftime('%H%M%S') + f'_{int(time.time() * 1000) % 1000:03d}_{label}.wav'
+            with open(os.path.join(self.save_dir, name), 'wb') as f:
+                f.write(pcm_to_wav(pcm, RATE))
+            files = sorted(n for n in os.listdir(self.save_dir) if n.endswith('.wav'))
+            for old in files[:-self.save_keep]:
+                os.remove(os.path.join(self.save_dir, old))
+        except OSError as error:
+            self.log.warning(f'could not save heard audio: {error}')
+
     def process(self, segment: bytes, heard_at: float):
         """One utterance: transcribe it and act on it (tests call this directly)."""
         started = time.monotonic()
+        level = f'rms {rms(segment):.0f} peak {peak(segment)}'
+        loud, gain = amplify(segment, self.stt_peak, self.stt_max_gain)
+        if gain > 1.0:
+            level += f' x{gain:.1f}'
         try:
-            text = (self.transcribe(pcm_to_wav(segment, RATE)) or '').strip()
+            text = (self.transcribe(pcm_to_wav(loud, RATE)) or '').strip()
         except Exception as error:
             self.stats['stt_errors'] += 1
             self.log.error(f'speech-to-text failed: {type(error).__name__}: {error}')
             return
         self.stats['transcribed'] += 1
         took = time.monotonic() - started
+        self._save(loud, text)
         if not text:
+            self.stats['empty'] += 1
+            (self.log.info if self.log_heard else self.log.debug)(
+                f'heard nothing ({len(segment) / (RATE * 2):.1f} s, {level})')
             return
         called, question = find_wake(text, self.names, self.tolerance)
         now = self.clock()
         seconds = len(segment) / (RATE * 2)
-        if not called and self.on_word is not None:
+        if self.on_word is not None:
             for key, aliases in self.words.items():  # "젯슨" -> its recording, not a conversation
-                if find_wake(text, aliases, self.word_tolerance)[0]:
+                matched, rest = find_wake(question if called else text, aliases, self.word_tolerance)
+                # "크래프트, 젯슨"도 같은 호출. "크래프트, 젯슨이 뭐야?"는 실제 질문으로 남긴다.
+                if matched and (not called or not rest):
                     self.stats['words'] += 1
                     self.log.info(f'heard {key!r} ({seconds:.1f} s of speech, stt {time.monotonic() - started:.2f} s): '
                                   f'{text!r}')
@@ -388,7 +442,7 @@ class Listener:
         if called:
             self.stats['wakes'] += 1
             self._conversation_until = now + 30.0
-            self.log.info(f'heard my name ({seconds:.1f} s of speech, stt {took:.2f} s): {text!r}')
+            self.log.info(f'heard my name ({seconds:.1f} s of speech, {level}, stt {took:.2f} s): {text!r}')
             self.on_wake(question)
         elif self.on_followup is not None and heard_at <= self._follow_until:
             self.stats['followups'] += 1
@@ -397,4 +451,5 @@ class Listener:
             self.on_followup(text)
         else:
             self.stats['ignored'] += 1
-            self.log.debug(f'not for me: {text!r}')  # other people's talk is not logged at the normal level
+            # other people's talk is not logged at the normal level (unless log_heard, for diagnosis)
+            (self.log.info if self.log_heard else self.log.debug)(f'not for me ({level}): {text!r}')

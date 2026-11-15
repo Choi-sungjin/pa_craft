@@ -206,9 +206,13 @@ def test_copula_digits():
 
 def test_what_is_asked_about_the_state_and_what_is_not():
     from craft_voice.robot_state import is_status_question
-    for text in ('뭐 하는 상태야?', '지금 뭐 해?', '지금 뭐하는 상태야', '무슨 상태야', '상태 알려 줘', '뭐하고 있어?'):
+    for text in ('뭐 하는 상태야?', '지금 뭐 해?', '지금 뭐하는 상태야', '무슨 상태야', '상태 알려 줘', '뭐하고 있어?',
+                 '지금 뭐하고 있나요?', '뭐 하는 중이니?', '너 지금 뭐 하세요?', '지금 뭐하고 있는 거야?',
+                 '어떤 상태인가요?', '현재 상태 알려주세요'):
         assert is_status_question(text), text
-    for text in ('왜 멈췄어?', '왜 그 상태야?', '어디 가?', '오늘 점심 뭐 먹을까?', '', '얼마나 기다려야 돼?'):
+    for text in ('왜 멈췄어?', '왜 그 상태야?', '어디 가?', '오늘 점심 뭐 먹을까?', '', '얼마나 기다려야 돼?',
+                 '센서는 뭐 하는 거야?', '상태 머신이 뭐 하는 거야?', '얼음은 무슨 상태야?',
+                 '지금 뭐 해? 그리고 바퀴는 어떻게 회전해?', '뭐하고 있는지 추측해 봐'):
         assert not is_status_question(text), text
 
 

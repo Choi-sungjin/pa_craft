@@ -30,11 +30,14 @@ VARIANTS = {
         'situation.clear': ['길이 뚫렸어! 다시 출발!', '이제 지나갈 수 있어, 계속 갈게!'],
         'situation.no_route': ['지나갈 길이 안 보여. 조금 기다려 볼게.', '아주 훌륭하군요.'],
         'notice.long_blocked': ['아직도 막혀 있어. 길 좀 터 줄래?', '아? 예? 안 되겠는데요, 막혔어요.', '계속 기다리는 중이야. 비켜 주면 바로 갈게!'],
-        'notice.many_replans': ['또 길을 다시 찾고 있어. 오늘 길이 복잡하네.', '내 팔자야.'],
+        'notice.many_replans': ['경로를 다시 찾는 일이 반복되고 있어.', '내 팔자야.'],
         'notice.long_execute': ['이번 건 시간이 좀 걸리네!', '이야, 야근이다!'],
         'ack': ['잠깐만, 확인해 볼게!', '무슨 일이죠?', '음, 어디 보자!'],
         'notice.grasped': ['좋아, 꽉 잡았어!'],
-        'notice.box_found': ['상자 발견!'],
+        'notice.box_found': ['상자 발견!', '아? 예? 여기 뭐 있는데요.'],
+        # Wheels stopped: a hold (not right after the box) and a path search while standing.
+        'notice.wheel_stop_hold': ['무슨 일이죠?'],
+        'notice.wheel_stop_replan': ['내 팔자야.'],
         # Departure without the state machine (wheels start after standing still): the SCV lines of a start, the
         # same words as above so their kept speech (original recordings) is played.
         'notice.depart': ['갑니다!', '시키면 해야죠.', '예, 알았다고요.', '라져!'],

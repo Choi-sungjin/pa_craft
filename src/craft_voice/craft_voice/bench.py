@@ -51,10 +51,15 @@ class TimedPlayer:
         self.started = []
         self.event = threading.Event()
 
-    def play(self, wav, cancelled=None):
+    def play(self, wav, cancelled=None, start_guard=None):
         self.started.append((time.monotonic(), wav_seconds(wav)))
         self.event.set()
-        return self.inner.play(wav, cancelled) if self.inner else True
+        if self.inner:
+            return self.inner.play(wav, cancelled, start_guard=start_guard)
+        if start_guard:
+            with start_guard():
+                return not (cancelled and cancelled())
+        return not (cancelled and cancelled())
 
     def stop(self):
         if self.inner:
@@ -70,11 +75,16 @@ class TimedStreamPlayer:
         self.event = threading.Event()
         self.bytes = 0
 
-    def open(self, rate, cancelled=None):
+    def open(self, rate, cancelled=None, start_guard=None):
         self.started.append((time.monotonic(), 0.0))
         self.event.set()
         self.bytes = 0
-        return self.inner.open(rate, cancelled) if self.inner else True
+        if self.inner:
+            return self.inner.open(rate, cancelled, start_guard=start_guard)
+        if start_guard:
+            with start_guard():
+                return not (cancelled and cancelled())
+        return not (cancelled and cancelled())
 
     def write(self, chunk):
         self.bytes += len(chunk)

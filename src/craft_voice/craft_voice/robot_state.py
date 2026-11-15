@@ -16,6 +16,8 @@ A Fault event waits up to fault_reason_wait_s for the reason so it can say why.
 from __future__ import annotations
 
 import math
+import random
+import re
 from collections import Counter, deque
 from dataclasses import dataclass, field
 from . import variety as _variety
@@ -29,6 +31,8 @@ STATE_KO = {
     'Run.PrepareTask': '다음 작업 준비',
     'Run.Compute': '경로·팔 자세 계산',
     'Run.Execute': '작업 실행',
+    'Run.Execute.Blocked': '작업 실행 중 길이 막혀 기다림',
+    'Run.Execute.Replan': '작업 실행 중 막힌 길을 돌아갈 경로 계산',
     'Run.Complete': '작업 하나 완료',
     'Run.Stopping': '정지 중',
     'Fault': '고장으로 정지',
@@ -40,6 +44,8 @@ STEP_KO = {'base_goal': '목표 지점 이동', 'tcp_goal': '팔 목표 자세 �
 # Substrings of planning fault reasons (state_machine.cpp, planning_master.cpp) ->
 # (short Korean for the GPT facts, spoken situation: what happened and what the robot is doing now).
 REASON_KO = (
+    ('control unavailable: board/serial fault', '제어보드 또는 통신 오류 보고',
+     '제어보드나 통신 쪽 오류가 보고됐어요. 확인이 필요해요.'),
     ('initialization timeout', '초기화 시간 초과', '준비가 끝나지 않아서 아직 출발하지 못하고 있어요.'),
     ('task preparation timeout', '작업 준비 시간 초과', '작업 준비가 늦어져서 멈춰 있어요.'),
     ('compute timeout', '계산 시간 초과', '다음 동작을 정하지 못해서 멈춰 있어요.'),
@@ -81,6 +87,7 @@ REASON_KO = (
 
 # The same situations in the short, friendly persona (style 'cute'), by REASON_KO needle.
 FAULT_CUTE = {
+    'control unavailable: board/serial fault': '제어보드나 통신 쪽 오류가 보고됐어. 확인이 필요해.',
     'initialization timeout': '준비가 안 끝나서 아직 못 출발했어.',
     'task preparation timeout': '작업 준비가 늦어져서 멈췄어.',
     'compute timeout': '다음 동작을 못 정해서 멈췄어.',
@@ -189,11 +196,22 @@ PHRASES = {
         'notice.barcode_ascending': '바코드를 읽었어요. 오름차순이에요.',
         'notice.barcode_descending': '바코드를 읽었어요. 내림차순이에요.',
         'notice.barcode_unknown': '바코드를 읽었는데 등록되지 않은 코드예요.',
-        'notice.box_found': '상자를 찾았어요.',
+        'notice.box_found': '라이다에서 상자 면의 양끝을 연속으로 관측했어요.',
         'notice.traffic_start': '신호등이 깜빡이기 시작했어요. 횟수를 셀게요.',
         'notice.traffic_recount': '신호등 횟수가 맞지 않아서 처음부터 다시 셀게요.',
         'notice.traffic_done': '신호등을 다 셌어요. 빨강 {red}번, 노랑 {yellow}번, 초록 {green}번이에요.',
         'notice.depart': '출발할게요.',
+        'notice.puck_axis': '벡터 계산 완료.',
+        'notice.clock_unload': '머리 위 선반에서 수화물을 꺼낼 때는 조심해 주십시오.',
+        'notice.heartbeat_lost': '심장박동이 멎었습니다.',
+        'notice.firmware_done': '업그레이드 완료.',
+        'notice.gripcam_measured': '벡터 계산 완료.',
+        'notice.gripcam_none': '그리퍼 카메라에 퍽이 안 보여요.',
+        'notice.puck_loaded': '회전판에 실었어요.',
+        'notice.puck_loaded.slot': '회전판 {slot}번 칸에 실었어요.',
+        'notice.pick_failed': '퍽을 집지 못했어요.',
+        'notice.battery_low': '{board} 배터리가 부족해요. 지금 {volts}볼트예요. 곧 충전해 주세요.',
+        'notice.battery_critical': '{board} 배터리가 거의 바닥이에요! {volts}볼트예요. 지금 충전해 주세요.',
         'obstacle': '{dir} {d}미터쯤에 장애물이 있어요.',
         'obstacle.near': '바로 {dir}에 장애물이 있어요.',
     },
@@ -242,7 +260,7 @@ PHRASES = {
         'notice.long_compute': '계산이 좀 오래 걸리네, 조금만 기다려 줘!',
         'notice.long_blocked': '길이 계속 막혀 있어. 좀 비켜 줄래?',
         'notice.long_execute': '이번 작업은 꽤 오래 걸리네!',
-        'notice.many_replans': '길을 자꾸 다시 찾고 있어. 주변이 복잡한가 봐.',
+        'notice.many_replans': '길을 여러 번 다시 찾고 있어.',
         'notice.state_lost': '어? 상태 신호가 끊겼어.',
         'notice.state_back': '상태 신호 다시 들어온다!',
         'notice.idle': '한참 동안 할 일이 없었어.',
@@ -250,11 +268,22 @@ PHRASES = {
         'notice.barcode_ascending': '좋아, 바코드 읽었어! 오름차순이야.',
         'notice.barcode_descending': '좋아, 바코드 읽었어! 내림차순이야.',
         'notice.barcode_unknown': '바코드를 읽긴 했는데 모르는 코드야.',
-        'notice.box_found': '상자 찾았다!',
+        'notice.box_found': '라이다에서 상자 면의 양끝을 연속으로 관측했어.',
         'notice.traffic_start': '신호등 깜빡인다! 몇 번인지 세어 볼게.',
         'notice.traffic_recount': '어? 횟수가 안 맞아. 처음부터 다시 셀게!',
         'notice.traffic_done': '신호등 다 셌어! 빨강 {red}번, 노랑 {yellow}번, 초록 {green}번이야.',
         'notice.depart': '출발!',
+        'notice.puck_axis': '벡터 계산 완료.',
+        'notice.clock_unload': '머리 위 선반에서 수화물을 꺼낼 때는 조심해 주십시오.',
+        'notice.heartbeat_lost': '심장박동이 멎었습니다.',
+        'notice.firmware_done': '업그레이드 완료.',
+        'notice.gripcam_measured': '벡터 계산 완료.',
+        'notice.gripcam_none': '어? 퍽이 안 보여.',
+        'notice.puck_loaded': '회전판에 실었어!',
+        'notice.puck_loaded.slot': '회전판 {slot}번 칸에 실었어!',
+        'notice.pick_failed': '앗, 퍽 집기 실패했어.',
+        'notice.battery_low': '{board} 배터리가 부족해! 지금 {volts}볼트야. 곧 충전해 줘.',
+        'notice.battery_critical': '{board} 배터리 거의 바닥이야! {volts}볼트야. 지금 바로 충전해 줘!',
         'obstacle': '{dir} {d}미터쯤에 뭐가 있어.',
         'obstacle.near': '바로 {dir}에 뭐가 있어.',
     },
@@ -294,16 +323,41 @@ DIAG_KO = (
     ('puck_grasp_confirmed', '퍽 잡은 것 확인됨'),
 )
 
-_STATUS_ASK = ('뭐해', '뭐하', '뭘하', '무얼하', '무엇을하', '무슨상태', '어떤상태', '상태야', '상태니', '상태어때',
-               '상태알려', '상태말해', '상태보고', '지금상태', '현재상태', '무슨일하')
+_STATUS_ASK = re.compile(
+    r'(?:너|넌|너는|네가|크래프트|크래프트야|로봇|로봇아)?(?:지금|현재)?(?:'
+    r'(?:뭐|뭘|무얼|무엇을|무슨일을?)(?:해|하니|하냐|하나요|하세요|하십니까'
+    r'|하고있(?:어|니|냐|나요|습니까|는거야|는건가요)|하고계(?:셔|세요|시니|십니까)'
+    r'|하는(?:중(?:이야|이니|인가요|이세요|입니까)|거야|상태(?:야|니|인가요)))'
+    r'|(?:무슨|어떤)상태(?:야|니|이니|인가요|인지알려(?:줘|줄래|주세요))?'
+    r'|상태(?:야|니|어때|알려(?:줘|줄래|주세요)|말해(?:줘|줄래|주세요)|보고(?:해|해줘))?'
+    r')(?:요)?')
 
 
 def is_status_question(text: str) -> bool:
     """"뭐 하는 상태야?", "지금 뭐 해?": answered straight from the state machine, not by GPT.
     "왜 ..." is a reasoning question and goes to GPT."""
     squeezed = ''.join(ch for ch in text if ch.isalnum())
-    return bool(squeezed) and '왜' not in squeezed and any(word in squeezed for word in _STATUS_ASK)
-ACTIVE_PHASES = ('Run.PrepareTask', 'Run.Compute', 'Run.Execute')  # one step, start to finish
+    # 일부 단어만 겹치는 일반 질문/복합 질문은 GPT로 보낸다. 예: "센서는 뭐 하는 거야?"
+    return bool(_STATUS_ASK.fullmatch(squeezed))
+EXECUTION_SUBSTATES = ('Run.Execute.Blocked', 'Run.Execute.Replan')
+ACTIVE_PHASES = ('Run.PrepareTask', 'Run.Compute', 'Run.Execute') + EXECUTION_SUBSTATES
+
+
+def planning_phase(label: str) -> str:
+    """planning_master's detailed execute label -> the phase the voice reasons about.
+
+    Since 2026-11-13 /planning/state names what Run.Execute does ('.Box.<phase>', '.Leave') and how it waits
+    ('.Blocked', '.Replan', '.DockBlocked', '.NoRoute'), e.g. Run.Execute.Box.Stage, Run.Execute.Box.CameraDock,
+    Run.Execute.Leave.Replan. A box step's phases are one drive: Run.Execute; the waits stay what they were.
+    """
+    if not label.startswith('Run.Execute.'):
+        return label
+    tail = label.rsplit('.', 1)[-1]
+    if tail in ('Blocked', 'DockBlocked'):
+        return 'Run.Execute.Blocked'
+    if tail in ('Replan', 'NoRoute'):
+        return 'Run.Execute.Replan'
+    return 'Run.Execute'
 
 
 def parse_list(text: str) -> list[str]:
@@ -409,6 +463,18 @@ class StateEvent:
         return self.label == 'Fault'
 
 
+# StarCraft: Remastered Korean SCV lines, said when trapped (the recordings in the same order: reactions 'trapped').
+TRAPPED_LINES = ('난 폐쇄 공포증이 있다니까 여기서 나가야 된다구.', '여기 쥐똥만한 공간에 갇혀서 아주 꼼짝도 못하겠군.')
+TRAPPED_CLEAR_S = 3.0
+# StarCraft: Remastered Korean siege tank lines, said instead of the departure line when the drive to one of
+# APPROACH_LINE_BOXES starts (/planning/approach_box, then Run.Execute): random order, each once, then again.
+# Five lines for the five drives S2..S6 of a mission (S1, L1..L3 keep the usual departure line).
+# The recordings in the same order: reactions 'approach_line'.
+TANK_LINES = ('갑니다.', '목표 위치는?', '목표 설정.', '이동.', '전진 앞으로!')
+APPROACH_LINE_BOXES = ('S2', 'S3', 'S4', 'S5', 'S6')
+APPROACH_WAIT_S = 120.0   # the drive must start this soon after the approach command
+
+
 @dataclass(frozen=True)
 class Notice:
     """Something the robot noticed by itself (no state change): a state that lasts unusually long, ..."""
@@ -448,6 +514,9 @@ class StateTracker:
     # Noticing (0 = never): a state that lasts this long is worth a remark of its own.
     notice_compute_s: float = 8.0
     notice_blocked_s: float = 20.0
+    # Trapped: blocked / replanning / no route, back and forth with replanning in it, this long without driving
+    # clear for TRAPPED_CLEAR_S -> one of TRAPPED_LINES (SCV recordings, reactions 'trapped=a.wav|b.wav').
+    notice_trapped_s: float = 30.0
     notice_execute_s: float = 180.0
     notice_replans: int = 3
     notice_idle_s: float = 1800.0
@@ -457,13 +526,17 @@ class StateTracker:
     variety: bool = False                       # further wordings in turn, and drive facts (variety.py)
     pose_stale_s: float = 1.0
     grasp_topic: str = '/control/gripper_grasped'   # a flag topic whose rise is said ("잡았다!")
+    battery_low_v: float = 11.0       # motor battery resting below this: "배터리가 부족해" (0 = never)
+    battery_critical_v: float = 10.7  # below this: "거의 바닥이야", repeated every 3 minutes
 
     def __post_init__(self):
         self.label: str | None = None
+        self.planning_detail = ''   # /planning/state as published; self.label is its planning_phase()
         self.label_since = -math.inf
         self.label_at = -math.inf
         self.diag: dict[str, str] = {}
         self.diag_message = ''
+        self.diag_phase = ''
         self.diag_level = 0
         self.diag_at = -math.inf
         self.step_started_at = -math.inf  # current step began: diagnostics older than this name the previous step
@@ -488,6 +561,13 @@ class StateTracker:
         self.step_counts: Counter = Counter()    # the same, for the current step only
         self.last_done: dict | None = None       # the step that just completed: {'step', 'queued', 'at'}
         self._noticed: set = set()               # notices already given in this episode
+        self._stuck_since = -math.inf            # a stretch of blocked / replan / no_route (short clears inside)
+        self._stuck_clear_since = -math.inf
+        self._stuck_replanned = False
+        self._approach: tuple[str, float] | None = None   # (box, at): a commanded approach not yet driven
+        self._approach_said: tuple[str, float] = ('', -math.inf)
+        self._tank_bag: list[int] = []                     # TANK_LINES not said yet in this round
+        self._tank_choice = 0
         self._had_planning = False
         self._lost = False
         self._idle_since = -math.inf
@@ -499,7 +579,8 @@ class StateTracker:
         self.leg: dict | None = None             # the drive that just ended: {'count', 'seconds', 'blocked', 'replanned'}
         self._turn: Counter = Counter()          # which wording of a sentence is next
         self._said: dict = {}                    # event -> the sentence chosen for it (asked for more than once)
-        self.signals = Signals(stale_s=self.stale_s, keep_s=self.event_keep_s)
+        self.signals = Signals(stale_s=self.stale_s, keep_s=self.event_keep_s,
+                               supply_low_v=self.battery_low_v, supply_critical_v=self.battery_critical_v)
         self._remarks: deque = deque(maxlen=4)   # (key, at) of signals.py remarks waiting to be said
 
     # ---- sentences ----------------------------------------------------------------------
@@ -537,6 +618,8 @@ class StateTracker:
         label = label.strip()
         if not label:
             return None
+        self.planning_detail = label  # as published (Run.Execute.Box.CameraDock), for the facts
+        label = planning_phase(label)
         self.label_at = now
         if label == self.label:
             return None
@@ -580,6 +663,22 @@ class StateTracker:
         self.generation += 1
         if label != 'Fault':
             self._pending_fault = None
+        if label == 'Run.Execute' and previous in EXECUTION_SUBSTATES:
+            return None  # the same task resumed its path search; this is not a new departure
+        if label == 'Run.Execute' and self._approach is not None:
+            box, at = self._approach
+            self._approach = None
+            if now - at <= APPROACH_WAIT_S:
+                if not self._tank_bag:
+                    self._tank_bag = random.sample(range(len(TANK_LINES)), len(TANK_LINES))
+                self._tank_choice = self._tank_bag.pop()
+                self._approach_said = (box, now)
+                self._remark('approach_line', now, f'{box} 상자로 출발')
+                return None  # the siege tank line is this departure's announcement
+        if label == 'Run.Execute' and self.planning_detail != 'Run.Execute':
+            # A box step or backing out of one (Run.Execute.Box.Stage, Run.Execute.Leave): the mission flow already
+            # says it ("S2 쪽으로 접근하는 단계야.", "S2에서 빠져나오는 단계야."), a start line would repeat it.
+            return None
         if label not in self.announce:
             return None
         event = StateEvent(label, previous, now, self.step_name(), '', self.generation)
@@ -605,6 +704,8 @@ class StateTracker:
             return None
         self.diag = dict(values)
         self.diag_message = message
+        # "Run.Execute.Box.Stage.Blocked: ..." names the state as published: the phase compares with self.label
+        self.diag_phase = planning_phase(message.partition(':')[0].strip())
         self.diag_level = int(level)
         self.diag_at = now
         if message.startswith('Fault:'):
@@ -616,9 +717,14 @@ class StateTracker:
         return self._update_situation(now)
 
     def _update_situation(self, now: float) -> StateEvent | None:
-        key, text = waiting_situation(self.diag.get('waiting_for', '')) if self.step_known() else ('', '')
         if self.label == 'Fault':
-            key, text = '', ''  # the fault sentence says it; a leftover waiting value is not a situation
+            # A fault ends waiting; it does not mean the path reopened. Keep the pending fault's
+            # generation intact while its diagnostic reason arrives.
+            if self.situation:
+                self.situation, self.situation_text, self.situation_since = '', '', now
+                self._noticed.discard('long_blocked')
+            return None
+        key, text = waiting_situation(self.diag.get('waiting_for', '')) if self.step_known() else ('', '')
         if key == self.situation:
             return None
         previous, self.situation, self.situation_text, self.situation_since = self.situation, key, text, now
@@ -661,14 +767,27 @@ class StateTracker:
                 self._lost = False
                 return Notice('state_back', '끊겼던 작업 상태 신호가 다시 들어옴', self.generation)
         elif self._had_planning and not self._lost and self.notice_lost_s > 0 and \
-                now - self.label_at >= max(self.notice_lost_s, self.stale_s):
+                now - self.label_at >= max(self.notice_lost_s, self.stale_s) and not self.signals.heartbeat_lost:
             self._lost = True
             self.remember(now, '작업 상태 신호가 끊김')
             return Notice('state_lost', f'작업 상태 신호가 {now - self.label_at:.0f}초째 안 들어옴 '
                           '(플래닝 프로그램이 꺼졌을 수 있음)', self.generation)
+        self._remark(self.signals.heartbeat_check(now), now, '플래닝 하트비트(/planning/hold)가 끊김')
+        if self.signals.heartbeat_lost and not fresh and self._had_planning:
+            self._lost = True  # the heartbeat line said it: no "상태 신호가 끊겼어" too ("다시 들어온다" stays)
         while self._remarks:  # a signal just seen (a grasp, the barcode, the light, the box): said while it is news
             key, at = self._remarks.popleft()
             if now - at <= 5.0 and (key in STATE_FREE_REMARKS or (fresh and self.label.startswith('Run.'))):
+                if key == 'approach_line':
+                    return Notice(key, TANK_LINES[self._tank_choice], self.generation,
+                                  values=(('choice', self._tank_choice),))
+                if key.startswith('battery_'):  # battery_low_wheel -> notice.battery_low with the board's name
+                    values = tuple(self.signals.supply_values(key).items())
+                    return Notice(key, self.phrase('notice.' + key.rsplit('_', 1)[0], **dict(values)),
+                                  self.generation, values=values)
+                if key.startswith('gripcam_') or key == 'puck_loaded':
+                    phrase, words = self.signals.event_words(key)
+                    return Notice(key, self.phrase(phrase, **words), self.generation, values=tuple(words.items()))
                 values = tuple(self.signals.traffic_values().items()) if key == 'traffic_done' else ()
                 return Notice(key, self.phrase('notice.' + key, **dict(values)), self.generation, values=values)
         departed, self.wheel_stop.departed = self.wheel_stop.departed, False
@@ -694,8 +813,8 @@ class StateTracker:
             return Notice(key, facts, self.generation)
 
         situation = self.current_situation(now)
-        result = None
-        if self.label == 'Run.Compute':
+        result = self._trapped(situation, now)
+        if result is None and self.label == 'Run.Compute':
             result = once('long_compute', self.notice_compute_s, held, f'계산이 {held:.0f}초째 이어짐(평소보다 김)')
         if result is None and situation in ('blocked', 'replan', 'no_route'):
             lasted = now - self.situation_since
@@ -709,6 +828,27 @@ class StateTracker:
             self._idle_noticed_at = now  # again every notice_idle_s while nothing happens
             return Notice('idle', f'{(now - self._idle_since) / 60:.0f}분째 할 일 없이 대기 중', self.generation)
         return result
+
+    def _trapped(self, situation: str, now: float) -> Notice | None:
+        """Fresh planning only. 'trapped' once per stretch of being stuck (see notice_trapped_s)."""
+        if situation in ('blocked', 'replan', 'no_route') and self.label.startswith('Run.'):
+            if self._stuck_since == -math.inf:
+                self._stuck_since, self._stuck_replanned = now, False
+                self._noticed.discard('trapped')
+            self._stuck_clear_since = -math.inf
+            self._stuck_replanned = self._stuck_replanned or situation in ('replan', 'no_route')
+        elif self._stuck_since > -math.inf and not (self.label == 'Run.Compute' and not situation):
+            if self._stuck_clear_since == -math.inf:
+                self._stuck_clear_since = now
+            elif now - self._stuck_clear_since >= TRAPPED_CLEAR_S or not self.label.startswith('Run.'):
+                self._stuck_since = -math.inf
+        if self.notice_trapped_s <= 0 or self._stuck_since == -math.inf or not self._stuck_replanned or \
+                now - self._stuck_since < self.notice_trapped_s or 'trapped' in self._noticed:
+            return None
+        self._noticed.add('trapped')
+        self.remember(now, f'장애물에 갇혀 {now - self._stuck_since:.0f}초째 경로를 다시 찾는 중')
+        choice = random.randrange(len(TRAPPED_LINES))
+        return Notice('trapped', TRAPPED_LINES[choice], self.generation, values=(('choice', choice),))
 
     def update_control(self, ready: bool, fault: bool, held: bool, stopped: bool, reason: str, now: float):
         self.control = ControlSnapshot(bool(ready), bool(fault), bool(held), bool(stopped), reason, now)
@@ -730,13 +870,51 @@ class StateTracker:
     def update_task_command(self, task_id: int, operation: int, kind: int, duration_s: float, clock_slot: int,
                             close: bool, now: float):
         self.remember(now, self.signals.task_command(task_id, operation, kind, duration_s, clock_slot, close, now))
+        self._remark(self.signals.clock_unload(operation, kind, close, now), now, '회전판에 보관한 퍽을 팔로 꺼냄')
+
+    def update_approach(self, box: str, now: float):
+        """/planning/approach_box: the box the next drive goes to. The same box again soon (a retry) is no new trip."""
+        box = box.strip()
+        if box not in APPROACH_LINE_BOXES:
+            self._approach = None
+        elif not (box == self._approach_said[0] and now - self._approach_said[1] < 60.0):
+            self._approach = (box, now)
+
+    def update_heartbeat(self, now: float):
+        self.signals.heartbeat(now)
+
+    def update_motor_supply(self, board: str, line: str, now: float):
+        """/control/wheel_clock_diag ('wheel'), /control/arm_diag ('arm'): one firmware diagnostic line."""
+        key = self.signals.motor_supply(board, line, now)
+        if key:
+            v = self.signals.supply_values(key)
+            self._remark(key, now, f"{v['board']} 배터리 부족 ({v['volts']} V)")
+
+    def update_event(self, text: str, now: float):
+        key = self.signals.event(text, now)
+        values = self.signals.event_values.get(key, {})
+        memory = {'firmware_done': '펌웨어 업로드가 끝남',
+                  'gripcam_measured': '그리퍼 카메라로 퍽을 잼' + (f" (윗면 높이 {values['top']:.0f} mm" if 'top' in values else '')
+                  + (f", 각도 {values['yaw']:+.1f}도)" if 'yaw' in values else (')' if 'top' in values else '')),
+                  'gripcam_none': '그리퍼 카메라에 퍽이 안 보임',
+                  'puck_loaded': '퍽을 회전판 칸에 넣음' + (f" ({values['slot']:.0f}번 칸)" if 'slot' in values else ''),
+                  'pick_failed': '퍽 집기에 실패함'}.get(key, '')
+        self._remark(key, now, memory)  # the numbers go to the memory (facts) only: said is the recording alone (user 11-15)
 
     def update_barcode(self, text: str, now: float, quiet: bool = False):
+        if (self.signals.barcode[0] if self.signals.barcode else '') != text.strip():
+            self._remarks = deque(((k, at) for k, at in self._remarks if not k.startswith('barcode_')), maxlen=4)
         self._remark(self.signals.read_barcode(text, now, quiet), now, f'바코드를 읽음: {text.strip()}')
 
     def update_traffic_light(self, red: int, yellow: int, green: int, blinks: int, complete: bool, valid: bool,
-                             discarded: int, now: float, quiet: bool = False):
-        key = self.signals.traffic_light(red, yellow, green, blinks, complete, valid, discarded, now, quiet)
+                             discarded: int, now: float, quiet: bool = False, sequence=None):
+        previous = self.signals.traffic
+        key = self.signals.traffic_light(red, yellow, green, blinks, complete, valid, discarded, now, quiet, sequence)
+        current = self.signals.traffic
+        if previous and any(previous.get(k) != current.get(k) for k in
+                            ('red', 'yellow', 'green', 'blinks', 'complete', 'valid', 'discarded', 'sequence', 'error')):
+            self._remarks = deque(((k, at) for k, at in self._remarks if not k.startswith('traffic_')
+                                   or self.signals.traffic_notice_current(k)), maxlen=4)
         memory = {'traffic_start': '신호등이 깜빡이기 시작함',
                   'traffic_recount': '신호등 횟수가 맞지 않아 다시 셈',
                   'traffic_done': f'신호등 12번을 다 셈: 빨강 {red}, 노랑 {yellow}, 초록 {green}'}.get(key, '')
@@ -750,9 +928,11 @@ class StateTracker:
             self.signals.obstacles(points, now, self.pose[:3])
 
     def update_box(self, valid: bool, source: str, reason: str, gap_m: float, lateral_m: float, yaw_rad: float,
-                   now: float):
-        self._remark(self.signals.box_observation(valid, source, reason, gap_m, lateral_m, yaw_rad, now), now,
-                     '상자를 관측함')
+                   now: float, **quality):
+        key = self.signals.box_observation(valid, source, reason, gap_m, lateral_m, yaw_rad, now, **quality)
+        if not self.signals.box['valid']:
+            self._remarks = deque(((k, at) for k, at in self._remarks if k != 'box_found'), maxlen=4)
+        self._remark(key, now, '라이다에서 상자 면의 양끝을 연속으로 관측함(접근 완료는 아님)')
 
     def obstacle_sentence(self, now: float) -> str:
         """'앞쪽 1미터쯤에 뭐가 있어.' for the nearest LiDAR obstacle; '' when none is known."""
@@ -777,6 +957,7 @@ class StateTracker:
         """pucks: [(standing, distance from the camera in m)]; None where perception has no depth/axis."""
         items = [(None if st is None else bool(st), None if d is None else float(d)) for st, d in pucks]
         self.pucks = (sorted(items, key=lambda p: math.inf if p[1] is None else p[1]), now)
+        self._remark(self.signals.puck_axis(any(d is not None for _, d in items), now), now, '퍽 중심축 벡터를 계산함')
 
     def update_tags(self, ids, now: float):
         self.tags = (sorted({int(i) for i in ids}), now)
@@ -931,6 +1112,28 @@ class StateTracker:
                 text += ' ' + left
         return text
 
+    def status_monologue(self, now: float) -> str:
+        """혼잣말 (user 11-15): reads every state it has and says it as "내 상태는? ..." (no GPT, no stock lines).
+        What it does (planning), the control boards, each motor battery, only what was received and is fresh."""
+        from .signals import SUPPLY_BOARDS
+        cute = self.style == 'cute'
+        parts = []
+        c = self.control
+        if now - c.at <= max(self.stale_s, 3.0):
+            if c.fault:
+                parts.append('제어는 고장 상태' + ('야' if cute else '예요'))
+            elif c.held or c.stopped:
+                parts.append('바퀴랑 팔은 멈춘 채로 잡고 있어' if cute else '바퀴와 팔은 멈춘 채로 잡고 있어요')
+            elif c.ready:
+                parts.append('제어 준비 완료')
+        else:
+            parts.append('제어 신호는 아직 없어' if cute else '제어 신호는 아직 없어요')
+        for board, sup in self.signals.supply.items():
+            if sup['rest'] is not None and now - sup['at'] <= max(self.stale_s, 5.0):
+                parts.append(f"{SUPPLY_BOARDS[board]} 배터리 {sup['rest']:.1f}볼트")
+        head = '내 상태는? ' if cute else '제 상태를 말씀드릴게요. '
+        return head + self.doing(now) + (' ' + ', '.join(parts) + '.' if parts else '')
+
     def current_template(self, now: float) -> str:
         """What I am doing, plus what my sensors see (no GPT)."""
         seen = self.seen_sentence(now)
@@ -1014,6 +1217,8 @@ class StateTracker:
         else:
             lines.append(f'- 상태머신: {self.label} ({STATE_KO.get(self.label, "알 수 없는 상태")}), '
                          f'{max(0.0, now - self.label_since):.0f}초째')
+            if self.planning_detail and self.planning_detail != self.label:
+                lines.append(f'- 세부 상태(/planning/state 원문): {self.planning_detail}')
             if self.label == 'Fault' and self.fault_reason:
                 lines.append(f'- 고장 원인: {self.fault_reason} ({reason_ko(self.fault_reason)})')
         if now - self.diag_at <= self.stale_s:

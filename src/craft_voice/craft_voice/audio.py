@@ -14,6 +14,7 @@ import subprocess
 import tempfile
 import threading
 import wave
+from contextlib import nullcontext
 
 
 def split_command(text: str, windows: bool | None = None) -> list[str]:
@@ -91,7 +92,7 @@ class CommandPlayer:
         with self._lock:
             return self._process is not None and self._process.poll() is None
 
-    def play(self, wav: bytes, cancelled=None) -> bool:
+    def play(self, wav: bytes, cancelled=None, start_guard=None) -> bool:
         """Blocks until playback ends. False if it was stopped (or cancelled() before it began)."""
         handle, path = tempfile.mkstemp(prefix='craft_voice_', suffix='.wav')
         try:
@@ -100,7 +101,7 @@ class CommandPlayer:
             argv = [path if arg == '{file}' else arg for arg in self.command]
             if '{file}' not in self.command:
                 argv.append(path)
-            with self._lock:
+            with start_guard() if start_guard else nullcontext(), self._lock:
                 # Checked under the same lock stop() takes: a stop() that came before this point
                 # found no process, so the caller's cancel flag is what tells us not to start.
                 if cancelled is not None and cancelled():
@@ -180,9 +181,9 @@ class StreamPlayer:
         with self._lock:
             return self._process is not None and self._process.poll() is None
 
-    def open(self, rate: int, cancelled=None) -> bool:
+    def open(self, rate: int, cancelled=None, start_guard=None) -> bool:
         argv = [arg.replace('{rate}', str(int(rate))) for arg in self.command]
-        with self._lock:
+        with start_guard() if start_guard else nullcontext(), self._lock:
             if cancelled is not None and cancelled():
                 return False
             self._stopped = self._timed_out = False
@@ -292,7 +293,7 @@ class WinsoundPlayer:
         with self._lock:
             return self._stop is not None
 
-    def play(self, wav: bytes, cancelled=None) -> bool:
+    def play(self, wav: bytes, cancelled=None, start_guard=None) -> bool:
         wav = normalize_wav(wav)
         seconds = wav_seconds(wav)
         handle, path = tempfile.mkstemp(prefix='craft_voice_', suffix='.wav')
@@ -300,7 +301,7 @@ class WinsoundPlayer:
             out.write(wav)
         ws = self._winsound
         try:
-            with self._lock:
+            with start_guard() if start_guard else nullcontext(), self._lock:
                 if cancelled is not None and cancelled():
                     return False
                 stop = self._stop = threading.Event()
@@ -332,6 +333,9 @@ def read_clip(path: str, max_bytes: int = 8_000_000) -> bytes:
     with wave.open(io.BytesIO(data)) as wav:  # raises wave.Error for anything that is not PCM WAV
         if wav.getnframes() <= 0:
             raise ValueError(f'{path}: empty recording')
+        expected = wav.getnframes() * wav.getnchannels() * wav.getsampwidth()
+        if len(wav.readframes(wav.getnframes())) != expected:
+            raise ValueError(f'{path}: truncated recording')
     return data
 
 
@@ -355,20 +359,38 @@ class SpeechCache:
         return os.path.join(self.directory, digest + '.wav')
 
     def get(self, text: str) -> bytes | None:
+        return self.lookup(text)[0]
+
+    def lookup(self, text: str) -> tuple[bytes | None, str]:
+        """(WAV, where it came from: 'protected' | 'cache' | '' when missing)."""
         path = self.path(text)
+        # User-selected originals live outside the disposable synthesis cache.
+        # Their exact existing text/signature mapping is kept even when the 500-file cache rotates.
+        original = os.path.join(self.directory, 'protected', os.path.basename(path))
+        where = 'cache'
+        if os.path.isfile(original):
+            path, where = original, 'protected'
         try:
             with open(path, 'rb') as handle:
                 data = handle.read()
             wav_seconds(data)  # a truncated file is not played
             os.utime(path)     # most recently used last: pruning removes the oldest
-            return data
+            return data, where
         except (OSError, wave.Error, EOFError, ZeroDivisionError):
-            return None
+            return None, ''
+
+    def contains(self, text: str) -> bool:
+        """Kept already (no read, no LRU touch): used to decide whether to open a speech connection early."""
+        path = self.path(text)
+        return os.path.isfile(path) or os.path.isfile(
+            os.path.join(self.directory, 'protected', os.path.basename(path)))
 
     def put(self, text: str, wav: bytes):
         if not wav:
             return
         path = self.path(text)
+        if os.path.isfile(os.path.join(self.directory, 'protected', os.path.basename(path))):
+            return
         with self._lock:
             handle, temporary = tempfile.mkstemp(dir=self.directory, suffix='.tmp')
             try:

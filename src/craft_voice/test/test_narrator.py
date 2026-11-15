@@ -41,6 +41,9 @@ class Backend:
         return b'RIFF' + text.encode()
 
 
+from contextlib import nullcontext
+
+
 class Player:
     """Same contract as CommandPlayer: stop() only ends a playback that is running."""
 
@@ -49,18 +52,28 @@ class Player:
         self.started = threading.Event()
         self._lock = threading.Lock()
         self._running = None
+        self._completed = False
 
-    def play(self, wav, cancelled=None):
-        with self._lock:
+    def play(self, wav, cancelled=None, start_guard=None):
+        with start_guard() if start_guard else nullcontext(), self._lock:
             if cancelled is not None and cancelled():
                 return False
             running = self._running = threading.Event()
+            self._completed = False
         self.played.append(wav)
         self.started.set()
         stopped = running.wait(5.0) if self.block else False
         with self._lock:
             self._running = None
-        return not stopped
+            completed = self._completed
+        return completed or not stopped
+
+    def finish_current(self):
+        """Simulate the device naturally draining all audio, without a stop call."""
+        with self._lock:
+            self._completed = True
+            if self._running is not None:
+                self._running.set()
 
     def stop(self):
         with self._lock:
@@ -358,7 +371,7 @@ def test_tts_fallback_chain():
     assert texts and narrator.player.played == [] and narrator.stats['tts_errors'] == 1
 
 
-def test_threads_fault_interrupts_playback():
+def test_threads_fault_waits_for_playback_completion():
     """Real worker threads: a long scene sentence is playing when the robot faults."""
     clock = Clock()
     player = Player(block=True)
@@ -369,8 +382,11 @@ def test_threads_fault_interrupts_playback():
         narrator.planning_state('Fault')
         clock.now += 2.0
         narrator.tick()
-        assert player.wait_playing(2)                         # scene was cut, fault is playing
-        player.stop()                                         # let the fault sentence finish
+        assert len(player.played) == 1 and player.stops == 0
+        assert narrator._current.playback_started and not narrator._current.cancelled
+        player.finish_current()
+        assert player.wait_playing(2)
+        player.finish_current()
         assert [kind for kind, _ in texts] == ['scene', 'fault']
         assert narrator.backend.urgent == [False, True]       # fault speech: short timeout, no retry
     finally:
@@ -712,7 +728,7 @@ def test_threads_state_change_does_not_wait_for_a_slow_narration():
         narrator.close()
 
 
-def test_threads_state_change_cuts_a_playing_narration():
+def test_threads_state_change_queues_after_a_playing_narration():
     clock = Clock()
     player = Player(block=True)
     narrator, texts = make(Backend('목표로 가고 있어요.'), player=player, clock=clock, start=True,
@@ -720,7 +736,7 @@ def test_threads_state_change_cuts_a_playing_narration():
     try:
         narrator.planning_state('Run.Execute')
         assert player.wait_playing(1)
-        player.stop()
+        player.finish_current()
         deadline = time.monotonic() + 3.0
         while narrator.status()['speaking'] and time.monotonic() < deadline:
             time.sleep(0.01)                                  # let the speak thread finish the first sentence
@@ -728,9 +744,12 @@ def test_threads_state_change_cuts_a_playing_narration():
         narrator.planning_state('Run.Execute')
         narrator.tick()                                       # narration plays
         assert player.wait_playing(2)
-        narrator.planning_state('Run.Stopping')               # what I am doing changed: cut it
+        narrator.planning_state('Run.Stopping')
+        assert len(player.played) == 2 and player.stops == 0
+        assert narrator._current.playback_started and not narrator._current.cancelled
+        player.finish_current()
         assert player.wait_playing(3)
-        player.stop()
+        player.finish_current()
         assert [kind for kind, _ in texts] == ['state', 'scene', 'state']
     finally:
         narrator.close()
@@ -925,11 +944,12 @@ class FakeStreamPlayer:
         self.opened, self.data, self.finished, self.stops, self.block = [], [], 0, 0, block
         self._stop = threading.Event()
 
-    def open(self, rate, cancelled=None):
-        if cancelled is not None and cancelled():
-            return False
-        self._stop.clear()
-        self.opened.append(rate)
+    def open(self, rate, cancelled=None, start_guard=None):
+        with start_guard() if start_guard else nullcontext():
+            if cancelled is not None and cancelled():
+                return False
+            self._stop.clear()
+            self.opened.append(rate)
         return True
 
     def write(self, chunk):
@@ -993,10 +1013,10 @@ def test_state_change_before_first_audio_drops_the_sentence():
     assert texts == [] and stream.opened == []
 
 
-def test_fault_cuts_a_streaming_sentence_and_is_not_streamed():
+def test_fault_waits_for_all_stream_chunks_and_is_not_streamed():
     clock = Clock()
-    backend = StreamingBackend(chunks=(b'a',) * 50, chunk_delay=0.05)
-    stream = FakeStreamPlayer(block=True)
+    backend = StreamingBackend(chunks=(b'a',) * 50, chunk_delay=0.01)
+    stream = FakeStreamPlayer()
     texts = []
     narrator = Narrator(NarratorConfig(state_mode='template'), StateTracker(), backend=backend, player=Player(),
                         stream_player=stream, on_text=lambda kind, text: texts.append((kind, text)),
@@ -1012,7 +1032,7 @@ def test_fault_cuts_a_streaming_sentence_and_is_not_streamed():
         deadline = time.monotonic() + 3
         while not narrator.player.played and time.monotonic() < deadline:
             time.sleep(0.01)
-        assert stream.stops >= 1 and len(stream.data) < 50          # cut off mid-sentence
+        assert stream.stops == 0 and len(stream.data) == 50 and stream.finished == 1
         assert [kind for kind, _ in texts] == ['state', 'fault']
         assert narrator.player.played and narrator.player.played[-1].startswith(b'RIFF')  # fault: whole WAV
         assert backend.urgent and backend.urgent[-1] is True

@@ -122,17 +122,21 @@ def test_a_blocked_robot_says_where_the_obstacle_is_when_asked():
 
 def test_a_box_seen_after_none_is_said_once():
     tracker = running(StateTracker(style='cute'))
+    quality = dict(request_id=1, face_centre_observed=True, extrapolated=False, age_s=0,
+                   gap_uncertainty_m=0.01, face_centre_uncertainty_m=0.01)
+    tracker.signals.box_request(1, 'lidar', 100.0, box_side=.205)
     tracker.update_box(False, 'lidar', 'no face', math.nan, math.nan, math.nan, 100.0)
     assert keys(tracker, 100.1) == [] and '- 상자 관측(lidar): 실패, 이유: no face' in tracker.context_text(100.2)
-    tracker.update_box(True, 'lidar', '', 0.42, -0.03, math.radians(2), 101.0)
-    tracker.update_box(True, 'lidar', '', 0.41, -0.03, math.radians(2), 101.2)
+    tracker.update_box(True, 'lidar', 'lidar face fit, both face ends seen (width 235.0 mm)', 0.42, -0.03, math.radians(2), 101.0, **quality)
+    tracker.update_box(True, 'lidar', 'lidar face fit, both face ends seen (width 235.0 mm)', 0.42, -0.03, math.radians(2), 101.1, **quality)
+    tracker.update_box(True, 'lidar', 'lidar face fit, both face ends seen (width 235.0 mm)', 0.41, -0.03, math.radians(2), 101.2, **quality)
     assert keys(tracker, 101.3) == ['box_found']
-    assert '- 상자 관측(lidar): 앞 간격 0.41 m, 좌우 어긋남 -0.03 m, 기울기 +2도' in tracker.context_text(101.4)
+    assert '- 상자 면 양끝 연속 관측(lidar): 앞 간격 0.41 m, 좌우 어긋남 -0.03 m, 기울기 +2도' in tracker.context_text(101.4)
     tracker.update_box(False, 'lidar', 'lost', 0.0, 0.0, 0.0, 105.0)
-    tracker.update_box(True, 'lidar', '', 0.40, 0.0, 0.0, 106.0)          # found again right away: not again
+    tracker.update_box(True, 'lidar', 'lidar face fit, both face ends seen (width 235.0 mm)', 0.40, 0.0, 0.0, 106.0)          # found again right away: not again
     assert keys(tracker, 106.1) == []
-    tracker.update_box(True, 'uppercam', '', 0.30, 0.0, 0.0, 200.0)       # none for a long while: news again
-    assert keys(tracker, 200.1) == ['box_found']
+    tracker.update_box(True, 'uppercam', '', 0.30, 0.0, 0.0, 200.0)       # unsupported evidence cannot assert found
+    assert keys(tracker, 200.1) == []
 
 
 def test_remarks_are_spoken_in_fixed_words_even_with_gpt():
@@ -156,7 +160,7 @@ def test_remarks_are_spoken_in_fixed_words_even_with_gpt():
     narrator.box(True, 'lidar', '', 0.5, 0.0, 0.0)
     narrator.obstacles([(0.5, 0.0)], in_map=False)
     facts = narrator.tracker.context_text(narrator.clock.now)
-    for part in ('task 3 실패, 이유: invalid path update', '2.0초 대기 (task 4)', '상자 관측(lidar): 앞 간격 0.50 m',
+    for part in ('task 3 실패, 이유: invalid path update', '2.0초 대기 (task 4)', '상자 확인 미완료(lidar)',
                  '가장 가까운 라이다 장애물: 앞쪽 0.5 m'):
         assert part in facts, part
 

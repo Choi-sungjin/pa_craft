@@ -34,6 +34,9 @@ for line in open(sys.argv[1], encoding='utf-8'):
 PYEOF
 }
 
+# prepare_fixed: true in the parameter file: the node fills the cache in the background after it is up (it no
+# longer waits here for hundreds of sentences).
+if [ "$(value prepare_fixed)" = "true" ]; then CRAFT_VOICE_PREPARE="${CRAFT_VOICE_PREPARE:-0}"; fi
 if [ "${CRAFT_VOICE_PREPARE:-1}" = "1" ]; then
   # Fixed sentences (state changes, blocked path, faults, "응!") are synthesized once and kept, so they
   # play at once and also without the network. Already kept sentences are skipped; a failure is not fatal.

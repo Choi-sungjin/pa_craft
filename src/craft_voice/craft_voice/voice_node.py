@@ -15,6 +15,8 @@ sub: /planning/state (std_msgs/String, transient local), /planning/diagnostics,
      /voice/command (String: describe | status | wake | mute | unmute | stop | listen | deaf)
      microphone (listen:=true): "크래프트" -> says what it is doing; "크래프트, <question>" -> answers
 pub: /voice/utterance (String "kind: text", every sentence before it is spoken),
+     /voice/utterance_source (String "kind: text ‹말: GPT 대답 · 소리: 실시간 합성 · 첫 소리 0.84s›": the same
+     sentence with where its words came from - recording, fixed sentence, GPT situation/answer - and its sound),
      /voice/heard (String: what was asked by voice), /voice/speaking (Bool),
      /voice/diagnostics (DiagnosticArray, 1 Hz)
 Needs OPENAI_API_KEY in the environment; without it state changes are spoken
@@ -42,7 +44,8 @@ from .gpt import DEFAULT_STT_MODEL, DEFAULT_TTS_MODEL, DEFAULT_TTS_VOICE
 from .mission import MISSION_CONTEXT, STEP_NAMES
 from .narrator import Narrator, NarratorConfig
 from .robot_state import StateTracker, parse_list, parse_mapping
-from .wiring import DEFAULT_CACHE_DIR, DEFAULT_MIC_COMMAND, load_lines, load_reactions, make_cache, make_listener
+from .wiring import (DEFAULT_CACHE_DIR, DEFAULT_MIC_COMMAND, load_lines, load_reactions, make_cache, make_listener,
+                     prepare_in_background)
 
 SHM_CAMERAS = {  # camera -> (shm name, has depth, frame_meta topic)
     'd435': ('/craft_vision', True, '/vision/d435/frame_meta'),
@@ -61,6 +64,7 @@ PARAMETERS = {
     'image_max_side': 512,
     'jpeg_quality': 80,
     'planning_state_topic': '/planning/state',
+    'mission_state_topic': '/mission/state',
     'planning_diagnostics_topic': '/planning/diagnostics',
     'control_status_topic': '/control/status',
     'context_topics': '/perception/localization/state,/planning/box_phase,/planning/box_status',
@@ -76,6 +80,7 @@ PARAMETERS = {
     'traffic_light_topic': '/perception/vision/uppercam/traffic_light',
     'obstacles_topic': '/perception/lidar/obstacle',        # geometry_msgs/PoseArray: the nearest obstacle
     'box_topic': '/perception/box/observation',             # craft_interfaces/BoxObservation: "상자 찾았다!"
+    'box_request_topic': '/planning/box_observation_request',
     'announce_states': 'Ready,Run.Execute,Run.Complete,Run.Stopping,Fault',
     'step_names': STEP_NAMES,
     'mission_context': MISSION_CONTEXT,
@@ -87,6 +92,18 @@ PARAMETERS = {
     'odom_topic': '/perception/state/odom',
     'objects_topic': '/perception/vision/d435/detections',
     'pucks_topic': '/perception/vision/d435/puck_observations',
+    'heartbeat_topic': '/planning/hold',       # std_msgs/Bool at 20 Hz from planning: stops -> "심장박동이 멎었습니다"
+    'event_topic': '/voice/event',             # std_msgs/String: a remark by name (firmware_done)
+    'approach_box_topic': '/planning/approach_box',  # std_msgs/String from mission_master: S2..S6 -> tank line
+    # std_msgs/String firmware diagnostic lines from control_master (about 1 Hz): the motor battery, per board
+    'wheel_diag_topic': '/control/wheel_clock_diag',
+    'arm_diag_topic': '/control/arm_diag',
+    # the arm in the mission (mission_master -> puck_picker.py -> demo/puck_pick/execute.py --planning, 11-16)
+    'pick_request_topic': '/mission/pick_request',
+    'pick_result_topic': '/mission/pick_result',
+    'pick_log_dir': '~/craft_mission_logs/picks',   # puck_picker log_dir: pick_<token>.log, read for gripper-cam lines
+    'battery_low_v': 11.0,       # resting supply below this: "바퀴 모터 배터리가 부족해" (0 = never)
+    'battery_critical_v': 10.7,  # below this: "거의 바닥이야", again every 3 minutes
     'tags_topic': '/perception/vision/d435/apriltag',
     'min_interval_s': 5.0,
     'max_gpt_calls_per_min': 12,
@@ -132,6 +149,9 @@ PARAMETERS = {
     'chatter_quiet_s': 60.0,
     'reactions': '',                        # recordings: "replan=/p/a.wav,step_done=/p/b.wav,run_done=/p/c.wav,idle=..."
     'speech_cache_dir': DEFAULT_CACHE_DIR,  # fixed sentences are synthesized once and kept ('' = off)
+    'speech_cache_max': 500,          # files kept (oldest used go first); the robot keeps every fixed sentence
+    'prepare_fixed': False,           # at start, synthesize the fixed sentences the cache lacks (background, own connection)
+    'keep_warm': False,               # keep a speech connection open, so a new sentence starts ~0.5 s sooner
     # ---- microphone: called by name ----
     'listen': False,
     'mic_command': DEFAULT_MIC_COMMAND,
@@ -151,6 +171,12 @@ PARAMETERS = {
     'max_stt_per_min': 20,
     'vad_min_rms': 150.0,
     'vad_loud_ratio': 2.5,
+    'stt_peak': 0.0,                        # 받아쓰기 전 말소리를 이 최대 진폭 비율까지 키움(0 = 끔)
+    'stt_max_gain': 10.0,                   # 그때 최대 배율
+    'listen_log_heard': False,              # 이름이 아닌 말·빈 받아쓰기도 기록(진단용)
+    'listen_save_dir': '',                  # 받아쓰기에 보낸 소리를 wav 로 남길 폴더(진단용, 최근 60개)
+    'startup_clip': '',                     # API 세 경로 확인 후 한 번 재생할 원본 WAV
+    'loop_closure_topic': '',               # slam_toolbox/LoopClosureEvent 완료 신호만 읽는다.
 }
 
 
@@ -169,7 +195,8 @@ class VoiceNode(Node):
                                step_names=parse_mapping(p['step_names']), style=p['style'],
                                lines=load_lines(p['phrases_file'], log),
                                announce_situations=tuple(parse_list(p['announce_situations'])),
-                               variety=p['variety'])
+                               variety=p['variety'], battery_low_v=p['battery_low_v'],
+                               battery_critical_v=p['battery_critical_v'])
         config = NarratorConfig(
             language=p['language'], persona=p['persona'], camera_description=p['camera_description'],
             mission_context=p['mission_context'],
@@ -184,22 +211,25 @@ class VoiceNode(Node):
             wake_mode=p['wake_mode'], wake_ack=p['wake_ack'], gpt_voice_deadline_s=p['gpt_voice_deadline_s'],
             notice=p['notice'], reactions=load_reactions(p['reactions'], log),
             chatter_period_s=p['chatter_period_s'], chatter_jitter=p['chatter_jitter'],
-            chatter_quiet_s=p['chatter_quiet_s'])
+            chatter_quiet_s=p['chatter_quiet_s'], keep_warm=p['keep_warm'])
         if p['state_mode'] not in ('gpt', 'template'):
             raise ValueError("state_mode must be 'gpt' or 'template'")
 
         backend = None
         from .gpt import openai_auth_available
+
+        def make_backend():
+            from .gpt import OpenAIBackend
+            return OpenAIBackend(
+                model=p['model'], tts_model=p['tts_model'], voice=p['tts_voice'],
+                tts_instructions=p['tts_instructions'], image_detail=p['image_detail'],
+                max_output_tokens=p['max_output_tokens'], reasoning_effort=p['reasoning_effort'],
+                tts_speed=p['tts_speed'], sample_rate=p['tts_sample_rate'],
+                timeout_s=p['request_timeout_s'], urgent_timeout_s=p['fault_tts_timeout_s'],
+                base_url=p['api_base_url'], stt_model=p['stt_model'])
         if openai_auth_available():
             try:
-                from .gpt import OpenAIBackend
-                backend = OpenAIBackend(
-                    model=p['model'], tts_model=p['tts_model'], voice=p['tts_voice'],
-                    tts_instructions=p['tts_instructions'], image_detail=p['image_detail'],
-                    max_output_tokens=p['max_output_tokens'], reasoning_effort=p['reasoning_effort'],
-                    tts_speed=p['tts_speed'], sample_rate=p['tts_sample_rate'],
-                    timeout_s=p['request_timeout_s'], urgent_timeout_s=p['fault_tts_timeout_s'],
-                    base_url=p['api_base_url'], stt_model=p['stt_model'])
+                backend = make_backend()
             except Exception as error:  # e.g. openai package missing
                 log.error(f'OpenAI backend unavailable ({type(error).__name__}: {error}); templates only')
         else:
@@ -208,6 +238,7 @@ class VoiceNode(Node):
         player = split_command(p['player_command'])
 
         self._utterance_pub = self.create_publisher(String, '/voice/utterance', 10)
+        self._source_pub = self.create_publisher(String, '/voice/utterance_source', 10)
         self._heard_pub = self.create_publisher(String, '/voice/heard', 10)
         self._speaking_pub = self.create_publisher(Bool, '/voice/speaking', QoSProfile(
             depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
@@ -227,8 +258,14 @@ class VoiceNode(Node):
             frame_provider=self._frames.pick if config.use_image and self._frames else None,
             fallback_tts=CommandTts(fallback) if fallback else None,
             on_text=self._publish_text, on_speaking=self._publish_speaking, logger=log,
-            speech_cache=make_cache(backend, p['speech_cache_dir']),
+            on_source=self._publish_source, speech_cache=make_cache(backend, p['speech_cache_dir'], p['speech_cache_max']),
             quick_answer=self._menu(p))
+        cache = self.narrator.speech_cache
+        if p['prepare_fixed'] and backend is not None and cache is not None:
+            from .prepare import fixed_sentences
+            sentences = fixed_sentences(p['style'], load_lines(p['phrases_file'], log),
+                                        parse_mapping(p['step_names']), p['variety'])
+            prepare_in_background(make_backend, cache, sentences, log, lambda: self.narrator._closed)
         self.listener = None
         if p['listen']:
             self.listener = make_listener(
@@ -237,7 +274,9 @@ class VoiceNode(Node):
                 tail_s=p['listen_tail_s'], max_stt_per_min=p['max_stt_per_min'], tolerance=p['wake_tolerance'],
                 min_rms=p['vad_min_rms'], loud_ratio=p['vad_loud_ratio'],
                 on_heard=lambda question: self._heard_pub.publish(String(data=question)),
-                words=self._word_reactions(p['word_reactions'], log))
+                words=self._word_reactions(p['word_reactions'], log),
+                stt_peak=p['stt_peak'], stt_max_gain=p['stt_max_gain'], log_heard=p['listen_log_heard'],
+                save_dir=p['listen_save_dir'])
             if self.listener is not None:
                 self.listener.start()
 
@@ -264,9 +303,25 @@ class VoiceNode(Node):
         if p['variety'] or p['obstacles_topic']:
             self._subscribe_goal(p)   # the obstacles are in the map frame: the robot's pose places them
         self._subscribe_signals(p, latched)
+        self._subscribe_loop_closure(p)
         self.create_subscription(String, '/voice/ask', lambda m: self.narrator.ask(m.data), 10)
         self.create_subscription(String, '/voice/say', lambda m: self.narrator.say(m.data), 10)
         self.create_subscription(String, '/voice/command', self._on_command, 10)
+        if p['heartbeat_topic']:
+            self.create_subscription(Bool, p['heartbeat_topic'], lambda m: self.narrator.heartbeat(), 10)
+        if p['pick_request_topic']:
+            self.create_subscription(String, p['pick_request_topic'],
+                                     lambda m: self.narrator.pick_request(m.data, p['pick_log_dir']), 10)
+        if p['pick_result_topic']:
+            self.create_subscription(String, p['pick_result_topic'], lambda m: self.narrator.pick_result(m.data), 10)
+        for board in ('wheel', 'arm'):
+            if p[f'{board}_diag_topic']:
+                self.create_subscription(String, p[f'{board}_diag_topic'],
+                                         lambda m, b=board: self.narrator.motor_supply(b, m.data), 10)
+        if p['approach_box_topic']:
+            self.create_subscription(String, p['approach_box_topic'], lambda m: self.narrator.approach_box(m.data), 10)
+        if p['event_topic']:
+            self.create_subscription(String, p['event_topic'], lambda m: self.narrator.event(m.data), 10)
         self.create_timer(0.1, self.narrator.tick)
         self.create_timer(1.0, self._publish_diagnostics)
         log.info(f"voice ready: camera={p['camera']} gpt={'on' if backend else 'off'} model={p['model']} "
@@ -278,6 +333,14 @@ class VoiceNode(Node):
         if self._clock_unset:
             log.warning('the system clock is not set yet (no clock battery): fixed sentences are spoken, '
                         'the microphone and GPT wait until it is set')
+        self._startup = None
+        if p['startup_clip']:
+            from .startup import StartupAnnouncement, check_voice_api
+            self._startup = StartupAnnouncement(
+                lambda: check_voice_api(backend),
+                lambda done: self.narrator.startup_recording(p['startup_clip'], done),
+                lambda: backend is not None and not clock_unset(), log)
+            self._startup.start()
 
     def _menu(self, p):
         if not p['menu_file'].strip():
@@ -324,25 +387,37 @@ class VoiceNode(Node):
                                      if o.axis_valid else (None, None) for o in m.observations])
             self.create_subscription(PuckObservationArray, p['pucks_topic'], on_pucks, qos_profile_sensor_data)
 
+    def _subscribe_loop_closure(self, p):
+        if not p['loop_closure_topic']:
+            return
+        try:
+            from slam_toolbox.msg import LoopClosureEvent
+            check_for_type_support(LoopClosureEvent)
+        except (ImportError, UnsupportedTypeSupport):
+            self.get_logger().warning('slam_toolbox type support unavailable: loop closure voice is disabled')
+            return
+        from .loop_closure import LoopClosureGate
+        gate = LoopClosureGate()
+
+        def on_loop(msg):
+            stamp = msg.stamp.sec * 1_000_000_000 + msg.stamp.nanosec
+            if gate.accept(stamp, self.get_clock().now().nanoseconds, time.monotonic()):
+                self.narrator.loop_closed()
+        self.create_subscription(LoopClosureEvent, p['loop_closure_topic'], on_loop, qos_profile_sensor_data)
+
     def _word_reactions(self, spec: str, log) -> dict:
-        """'젯슨|제슨|jetson=~/a.wav;단어2=~/b.wav' -> {'젯슨': ('젯슨', '제슨', 'jetson')}, 녹음은 reactions 의
-        'word.젯슨' 으로. 읽을 수 없는 녹음의 단어는 빼고 경고한다."""
-        words = {}
-        for entry in (spec or '').split(';'):
-            names, _, path = entry.partition('=')
-            aliases = tuple(a.strip() for a in names.split('|') if a.strip())
-            if not aliases or not path.strip():
-                continue
-            loaded = load_reactions(f'word.{aliases[0]}={path.strip()}', log)
-            if loaded:
-                self.narrator.config.reactions.update(loaded)
-                words[aliases[0]] = aliases
-                log.info(f'word {aliases[0]!r} ({", ".join(aliases)}) -> {path.strip()}')
+        """호출 단어별 원본 녹음 후보를 등록한다. 상태·동작 반응은 그대로 둔다."""
+        from .wiring import load_word_reactions
+        words, pools = load_word_reactions(spec, log)
+        self.narrator.config.word_clips.update(pools)
         return words
 
     def _subscribe_signals(self, p, latched):
         """Control's task, planning's command, the barcode, the LiDAR obstacles, the box observation."""
         log = self.get_logger()
+        if p.get('mission_state_topic'):
+            self.create_subscription(String, p['mission_state_topic'],
+                                     lambda m: self.narrator.mission_state(m.data), latched)
         try:
             from craft_interfaces.msg import BoxObservation, TaskCommand, TaskResult
             for kind in (BoxObservation, TaskCommand, TaskResult):
@@ -363,12 +438,38 @@ class VoiceNode(Node):
                 self.create_subscription(TaskCommand, p['task_command_topic'], lambda m: self.narrator.task_command(
                     m.task_id, m.operation, m.kind, m.duration_s, m.clock_slot, m.close), 10)
             if p['box_topic']:
-                self.create_subscription(BoxObservation, p['box_topic'], lambda m: self.narrator.box(
-                    m.valid, m.source, m.reason, m.gap_m, m.lateral_m, m.yaw_rad), 10)
+                def on_box(m):
+                    age = (self.get_clock().now().nanoseconds - stamp_ns(m.header.stamp)) / 1e9
+                    self.narrator.box(m.valid, m.source, m.reason, m.gap_m, m.lateral_m, m.yaw_rad,
+                        request_id=m.request_id, age_s=age,
+                        face_centre_observed=getattr(m, 'face_centre_observed', False),
+                        extrapolated=getattr(m, 'extrapolated', True),
+                        gap_uncertainty_m=getattr(m, 'gap_uncertainty_m', math.inf),
+                        face_centre_uncertainty_m=getattr(m, 'face_centre_uncertainty_m', math.inf))
+                self.create_subscription(BoxObservation, p['box_topic'], on_box, 10)
+            if p.get('box_request_topic'):
+                try:
+                    from craft_interfaces.msg import BoxObservationRequest
+                    check_for_type_support(BoxObservationRequest)
+                except (ImportError, UnsupportedTypeSupport):
+                    log.warning('box request type unavailable: box confirmation announcements disabled')
+                else:
+                    self.create_subscription(BoxObservationRequest, p['box_request_topic'],
+                        lambda m: self.narrator.box_request(
+                            m.request_id, m.source, m.box_id, getattr(m, 'box_side', math.nan)), 10)
         if p['barcode_topic']:
-            started = time.monotonic()  # a barcode read before the voice started is known, not announced
-            self.create_subscription(String, p['barcode_topic'], lambda m: self.narrator.barcode(
-                m.data, quiet=time.monotonic() - started < 3.0), latched)
+            started_ns = time.time_ns()  # DDS publication time uses the same Jetson system clock.
+            received_barcode = False
+
+            def on_barcode(m, info):
+                nonlocal received_barcode
+                published_ns = info.get('source_timestamp', 0)
+                # Retained results are known, not new announcements. If the middleware has no
+                # timestamp, only its first snapshot is quiet; later changes must not be muted.
+                quiet = published_ns < started_ns if published_ns > 0 else not received_barcode
+                received_barcode = True
+                self.narrator.barcode(m.data, quiet=quiet)
+            self.create_subscription(String, p['barcode_topic'], on_barcode, latched)
         if p['traffic_light_topic']:
             try:
                 from craft_perception.msg import TrafficLight
@@ -376,10 +477,19 @@ class VoiceNode(Node):
             except (ImportError, UnsupportedTypeSupport):
                 log.warning('craft_perception TrafficLight unavailable: the traffic light is left out')
             else:
-                light_started = time.monotonic()  # a count finished before the voice started is known, not said
-                self.create_subscription(TrafficLight, p['traffic_light_topic'], lambda m: self.narrator.traffic_light(
-                    m.red, m.yellow, m.green, len(m.sequence), m.complete, m.valid, m.discarded_cycles,
-                    quiet=time.monotonic() - light_started < 3.0), latched)
+                light_started_ns = self.get_clock().now().nanoseconds  # compare observation and ROS clock times
+                latest_stamp = [0]
+
+                def on_traffic(m):
+                    stamp = stamp_ns(m.header.stamp)
+                    age = (self.get_clock().now().nanoseconds - stamp) / 1e9
+                    if stamp <= 0 or age < -1.0 or stamp < latest_stamp[0]:
+                        return
+                    latest_stamp[0] = stamp
+                    self.narrator.traffic_light(
+                        m.red, m.yellow, m.green, len(m.sequence), m.complete, m.valid, m.discarded_cycles,
+                        quiet=stamp < light_started_ns, sequence=tuple(m.sequence), age_s=max(0.0, age))
+                self.create_subscription(TrafficLight, p['traffic_light_topic'], on_traffic, latched)
         if p['obstacles_topic']:
             try:
                 from geometry_msgs.msg import PoseArray
@@ -475,6 +585,9 @@ class VoiceNode(Node):
     def _publish_text(self, kind: str, text: str):
         self._utterance_pub.publish(String(data=f'{kind}: {text}'))
 
+    def _publish_source(self, kind: str, text: str, note: str):
+        self._source_pub.publish(String(data=f'{kind}: {text} ‹{note}›'))
+
     def _publish_speaking(self, speaking: bool):
         self._speaking_pub.publish(Bool(data=speaking))
 
@@ -484,6 +597,9 @@ class VoiceNode(Node):
             self.get_logger().info('the system clock is set: listening and GPT are on')
         stats = self.narrator.status()
         stats['clock_set'] = not self._clock_unset
+        if self._startup is not None:
+            stats['startup_api_ready'] = self._startup.api_ready
+            stats['startup_played'] = self._startup.played
         status = DiagnosticStatus(name='voice/narrator', hardware_id='voice_node',
                                   message='muted' if stats['muted'] else 'ok')
         status.level = DiagnosticStatus.OK
@@ -501,6 +617,8 @@ class VoiceNode(Node):
         self._diagnostics_pub.publish(msg)
 
     def destroy_node(self):
+        if getattr(self, '_startup', None) is not None:
+            self._startup.close()
         if self.listener is not None:
             self.listener.close()
         self.narrator.close()

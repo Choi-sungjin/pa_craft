@@ -46,6 +46,31 @@ def wav_file(path, seconds=0.2):
 
 
 # ---- situations: things that happen without a label change -------------------------------------------------
+def test_reported_board_fault_is_not_hidden_by_initialization_timeout():
+    reason = 'Idle: initialization timeout: control unavailable: board/serial fault'
+    for style in ('cute', 'polite'):
+        tracker = StateTracker(style=style)
+        tracker.update_planning('Idle', 0.0)
+        tracker.update_planning('Fault', 1.0)
+        tracker.update_diagnostics('planning/state_machine', 2, 'Fault: ' + reason, {}, 1.1)
+        words = tracker.template(tracker.poll(1.7))
+        assert '보드' in words and '통신' in words and '보고' in words
+        assert tracker.doing(1.7) == words
+
+
+def test_unspecified_initialization_fault_keeps_existing_words():
+    assert fault_situation('Idle: initialization timeout', 'cute') == '준비가 안 끝나서 아직 못 출발했어.'
+    assert fault_situation('Idle: initialization timeout', 'polite') == \
+        '준비가 끝나지 않아서 아직 출발하지 못하고 있어요.'
+
+
+def test_other_control_faults_do_not_invent_a_board_fault():
+    for reason in ('something odd', 'control unavailable: pending readiness',
+                   'Idle: initialization timeout: pending readiness'):
+        for style in ('cute', 'polite'):
+            assert '보드' not in fault_situation(reason, style)
+
+
 def test_waiting_values_map_to_situations():
     assert waiting_situation(BLOCKED)[0] == 'blocked' and waiting_situation(REPLAN)[0] == 'replan'
     assert waiting_situation('box: perceiving')[0] == 'box_perceive'
@@ -478,3 +503,16 @@ def test_a_question_about_the_state_is_answered_by_the_state_machine_at_once():
     assert texts[-1] == ('status', '지금은 상태 신호가 안 들어와. 주행 프로그램이 꺼진 것 같아.')
     narrator.wake('왜 멈췄어?')                                          # a reasoning question still goes to GPT
     assert narrator.speak_once() is True and texts[-1] == ('ack', '어디 보자!')
+
+
+def test_general_and_mixed_voice_questions_reach_the_backend():
+    for question in ('센서는 뭐 하는 거야?', '상태 머신이 뭐 하는 거야?',
+                     '얼음은 무슨 상태야?', '지금 뭐 해? 그리고 바퀴는 어떻게 회전해?'):
+        backend = Backend(reply='질문의 조건을 보고 답했어.')
+        narrator, texts = make(backend=backend, state_mode='template')
+        narrator.wake(question)
+        while narrator.think_once() or narrator.speak_once():
+            pass
+        assert len(backend.calls) == 1
+        assert question in backend.calls[0][1]
+        assert texts[-1] == ('ask', '질문의 조건을 보고 답했어.')

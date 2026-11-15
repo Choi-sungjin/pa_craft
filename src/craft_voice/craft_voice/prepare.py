@@ -46,6 +46,15 @@ def fixed_sentences(style: str, lines: dict, step_names: dict, variety: bool = F
             name = step_names.get(step_id, STEP_KO.get(step_id, ''))
             if name and '{step}' in going:
                 sentences.update(f'{going.format(step=name)} {drive.left_line(style, d)}' for d in range(drive.MAX_M + 1))
+    # Sentences with a number, every value that can come (each one a sentence of its own, so it is kept and plays
+    # at once): the carousel slot, the battery voltage per board.
+    from .signals import SUPPLY_BOARDS
+    for key, name, values in (('notice.puck_loaded.slot', 'slot', range(1, 13)),):
+        sentences.update(text.format(**{name: v}) for text in tracker.phrases(key) if text for v in values)
+    for key, volts in (('notice.battery_low', range(100, 115)), ('notice.battery_critical', range(80, 110))):
+        for text in tracker.phrases(key):
+            sentences.update(text.format(board=board, volts=f'{v / 10:.1f}') for board in SUPPLY_BOARDS.values()
+                             for v in volts if text)
     for needle, _, polite in REASON_KO:
         sentences.add(lines.get('fault.' + needle) or (FAULT_CUTE.get(needle, polite) if style == 'cute' else polite))
     # "what I am doing" answers pair a cannot-answer with a doing sentence only at run time: not prepared
@@ -60,6 +69,7 @@ def main(argv=None) -> int:
     p.add_argument('--variety', action='store_true', help='also the further wordings and the drive sentences')
     p.add_argument('--step-names', default='')
     p.add_argument('--cache-dir', default=DEFAULT_CACHE_DIR)
+    p.add_argument('--cache-max', type=int, default=2000, help='files the cache keeps (voice_node speech_cache_max)')
     p.add_argument('--tts-model', default=DEFAULT_TTS_MODEL)
     p.add_argument('--voice', default=DEFAULT_TTS_VOICE)
     p.add_argument('--tts-instructions', default='밝고 또렷한 한국어 안내 로봇 목소리로, 조금 빠르게 말해.')
@@ -83,7 +93,7 @@ def main(argv=None) -> int:
         return 2
     backend = OpenAIBackend(model='unused', tts_model=args.tts_model, voice=args.voice,
                             tts_instructions=args.tts_instructions, base_url=args.base_url, timeout_s=30.0)
-    cache = make_cache(backend, args.cache_dir)
+    cache = make_cache(backend, args.cache_dir, args.cache_max)
     made = kept = failed = 0
     for index, text in enumerate(sentences, 1):
         if not args.force and cache.get(text) is not None:

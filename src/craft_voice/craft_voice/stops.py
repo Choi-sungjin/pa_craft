@@ -20,13 +20,15 @@ STOP_LINES = {
     'control': '제어기 응답을 기다리는 중이야.',
     'sensors': '새 위치 정보를 기다리느라 멈춰 있어.',
     'compute': '다음 동작을 계산하며 기다리고 있어.',
-    'hold': '일시정지 신호가 들어와서 기다리고 있어.',
+    'hold': '잠깐 멈추라는 지시가 와서 기다리는 중이야.',
+    'hold_box': '상자에 천천히 접근할거야.',
     'control_fault': '제어기에서 오류 신호가 와서 멈춰 있어.',
     'done': '작업이 끝나서 다음 지시를 기다리고 있어.',
     'waiting': '다음 지시를 기다리는 중이야.',
 }
 
 
+BOX_HOLD_S = 10.0      # a hold this soon after a valid box observation is the box approach ('hold_box')
 DEPART_STILL_S = 3.0   # a start counts as a departure after standing still this long
 DEPART_GAP_S = 10.0    # and at most one departure remark in this time
 
@@ -97,9 +99,9 @@ def stop_reason(tracker, now):
         if c.fault:
             return 'control_fault'
         if c.held:
-            return 'hold'
+            return 'hold_box' if 0 <= now-tracker.signals.box_valid_at <= BOX_HOLD_S else 'hold'
     if (0 <= now-tracker.diag_at <= tracker.stale_s and
-            tracker.diag_message.partition(':')[0] == tracker.label):
+            getattr(tracker, 'diag_phase', tracker.diag_message.partition(':')[0]) == tracker.label):
         situation = tracker.current_situation(now)
         if situation in STOP_LINES:
             return situation

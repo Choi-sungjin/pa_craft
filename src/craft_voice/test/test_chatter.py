@@ -51,7 +51,7 @@ def test_it_talks_to_itself_only_when_idle():
     narrator.clock.now += 150.0
     narrator.tick()
     run(narrator)
-    assert texts and texts[-1][0] == 'thought' and texts[-1][1] in LINES['cute']['any']
+    assert texts and texts[-1][0] == 'thought' and texts[-1][1].startswith('내 상태는? ')   # 혼잣말 = 상태 읽기
 
 
 def test_no_chatter_while_working_or_moving():
@@ -65,7 +65,7 @@ def test_no_chatter_while_working_or_moving():
         narrator.planning_state('Run.Execute')
         narrator.tick()
     run(narrator)
-    assert not [t for t in texts if t[1] in all_lines('cute')]
+    assert not [t for t in texts if t[1] in all_lines('cute') or t[1].startswith('내 상태는?')]
     narrator2, texts2 = idle_narrator()
     narrator2.tick()
     for _ in range(30):                                # driving without planning for 300 s
@@ -83,3 +83,33 @@ def test_off_by_default():
     narrator.tick()
     run(narrator)
     assert texts == []
+
+
+def test_midnight_to_five_includes_original_overtime_line():
+    overtime = '이야, 야근이다!'
+    assert time_slot(0.0) == time_slot(4.999) == 'night'
+    assert time_slot(5.0) == 'morning'
+    for hour in (0.0, 2.5, 4.999):
+        c = Chatter(300, style='cute', seed=7, hour=lambda: hour)
+        pool = set(LINES['cute']['any']) | set(LINES['cute']['night'])
+        said = [c.next_line(i * 300) for i in range(len(pool))]
+        assert said.count(overtime) == 1
+    for hour in (5.0, 12.0, 15.0):
+        c = Chatter(300, style='cute', seed=7, hour=lambda: hour)
+        assert overtime not in [c.next_line(i * 300) for i in range(40)]
+
+
+def test_the_monologue_reads_every_state_it_has():
+    from craft_voice.robot_state import StateTracker
+    t = StateTracker(style='cute')
+    assert t.status_monologue(100.0) == '내 상태는? 아직 상태 신호를 못 받았어. 주행 프로그램이 꺼져 있는 것 같아. 제어 신호는 아직 없어.'
+    line = 'D,0,0,0,11.4,11.4,11.4,11.4,11.4,11.4,-1,30,30,30,30,30,-1,0.0,0.0,0.0,0.0,0.0'
+    for i in range(45):
+        t.update_motor_supply('wheel', line, 60.0 + i)
+        t.update_motor_supply('arm', line.replace('11.4', '10.9'), 60.0 + i)
+    t.update_planning('Ready', 104.4)
+    t.update_control(True, False, False, False, '', 104.4)
+    assert t.status_monologue(104.5) == ('내 상태는? 준비 끝! 출발 신호 기다리는 중이야. 제어 준비 완료, '
+                                         '바퀴 모터 배터리 11.4볼트, 팔 모터 배터리 10.9볼트.')
+    t.update_control(False, True, False, False, 'arm board', 104.6)
+    assert '제어는 고장 상태야' in t.status_monologue(104.7)

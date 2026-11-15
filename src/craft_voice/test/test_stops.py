@@ -64,6 +64,23 @@ def test_fresh_control_hold_and_stale_reason_says_the_state():
     assert t.wheel_stop_label(2).startswith('wheel_stop_executing:')   # the step is not known any more
 
 
+def test_hold_right_after_the_box_is_seen_says_the_approach():
+    t=StateTracker(style='cute');moving(t)
+    t.signals.box_request(1, 'lidar', 0, box_side=.205)
+    for at in (.2, .3, .4):
+        t.signals.box_observation(True,'lidar','lidar face fit, both face ends seen (width 235.0 mm)',0.3,0.0,0.0,at,
+            request_id=1, face_centre_observed=True, extrapolated=False, age_s=0,
+            gap_uncertainty_m=.01, face_centre_uncertainty_m=.01)
+    for i in range(5,21):n=feed(t,i*.1,control=True)
+    assert n.key=='wheel_stop_hold_box' and n.facts=='상자에 천천히 접근할거야.'
+    t.signals.box_observation(False,'lidar','lost',0.0,0.0,0.0,2.1)
+    assert 'hold_box' not in t.wheel_stop_label(2.1)
+    t=StateTracker(style='cute');moving(t)
+    t.signals.box_observation(True,'lidar','',0.3,0.0,0.0,-20)       # seen long ago: a plain hold
+    for i in range(5,21):n=feed(t,i*.1,control=True)
+    assert n.key=='wheel_stop_hold'
+
+
 def test_reason_never_uses_gpt_and_queued_notice_dropped_on_resume():
     t=StateTracker(style='cute');moving(t)
     for i in range(5,21):n=feed(t,i*.1)
@@ -132,7 +149,7 @@ def test_reason_changed_while_queued_is_replaced():
         r.speak_once()  # discard the old reason
         assert not backend.spoken
         r.tick();r.speak_once()
-        assert backend.spoken==['일시정지 신호가 들어와서 기다리고 있어.']
+        assert backend.spoken==['잠깐 멈추라는 지시가 와서 기다리는 중이야.']
         assert not backend.calls
         r.tick();assert not r._utterances
     finally:r.close()
@@ -181,3 +198,18 @@ def test_no_departure_line_while_the_state_machine_announces():
         t += 0.05
     noticed = tracker.notice(t)
     assert noticed is None or noticed.key != 'depart'
+
+
+@pytest.mark.parametrize('state,waiting,key', [
+    ('Run.Execute.Box.Stage', '', 'driving'),
+    ('Run.Execute.Box.Stage.Blocked', 'path blocked; waiting before replanning', 'blocked'),
+    ('Run.Execute.Leave.Replan', 'path still blocked; replanning', 'replan'),
+])
+def test_detailed_execute_labels_keep_the_stop_reason(state, waiting, key):
+    """/planning/state and its diagnostics name the box phase since 2026-11-13: the reason must not become 'still'."""
+    t = StateTracker(style='cute')
+    for i in range(5):
+        feed(t, i * .1, .1, state='Run.Execute.Box.Stage')
+    for i in range(5, 20):
+        assert feed(t, i * .1, waiting=waiting, state=state) is None
+    assert feed(t, 2, waiting=waiting, state=state).key == 'wheel_stop_' + key
