@@ -27,6 +27,7 @@ import random
 import re
 import threading
 import time
+import datetime as dt
 from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -38,6 +39,8 @@ from .realtime import same_sentence
 from .robot_state import STATE_KO, Notice, StateEvent, StateTracker, is_status_question
 from .signals import REMARKS
 from .traffic import answer as traffic_answer
+from . import talk
+from .clock import clock_unset
 from .flow import MissionProgress
 
 # speaking order; 'ack' (the "응!" when called by name) is older than its answer, so it goes first
@@ -80,6 +83,7 @@ class NarratorConfig:
     wake_ack: bool = True                 # a short "응!" at once, while the answer is being made
     keep_warm: bool = False               # keep a speech connection ready all the time (a new sentence starts sooner)
     gpt_voice_deadline_s: float = 5.0     # an answer to the name uses fixed words if GPT has not answered by then
+    quiet_default_s: float = 600.0        # "조용히 해" without a duration: this long
     conversation_s: float = 90.0          # earlier questions and answers stay in the prompt this long
     # ---- things of its own ----
     notice: bool = False                  # remarks on what it notices (a long compute, a blocked path, lost state)
@@ -214,6 +218,8 @@ class Narrator:
         self.log = logger or logging.getLogger('craft_voice')
         self.clock = clock
         self.muted = False
+        self._quiet_until: float | None = None   # "10분 동안 조용히 해": unmuted by itself then
+        self.wall_clock = dt.datetime.now      # the time of day ("몇 시야?")
         self._startup_cancelled = False
         self.stats = {'gpt_calls': 0, 'gpt_errors': 0, 'tts_errors': 0, 'spoken': 0, 'dropped': 0,
                       'image_input': 0, 'image_latest': 0, 'tts_mismatch': 0}
@@ -430,8 +436,45 @@ class Narrator:
 
     def ask(self, question: str):
         question = question.strip()
+        if question and self._voice_command(question):
+            return
         if question and not self._answer_quickly(question):
             self._submit(Job('ask', self.clock(), text=question))
+
+    def _voice_command(self, question: str) -> bool:
+        """Requests the voice carries out or honestly refuses (talk.py), never through GPT. True: handled."""
+        found = talk.voice_command(question, self.config.quiet_default_s)
+        if found is None:
+            return False
+        kind, arg = found
+        cute = self.tracker.style == 'cute'
+        now = self.clock()
+        self.log.info(f'voice command {kind} {arg if arg is not None else ""}: {question!r}')
+        with self._lock:
+            if self._closed:
+                return True
+            if kind == 'speak':
+                was_muted = self.muted
+                self.muted, self._quiet_until = False, None
+                if was_muted:
+                    self._enqueue(Utterance('ask', talk.command_reply(kind, arg, cute), now, self.tracker.generation,
+                                            fixed=True, question=question, origin='quick', label='voice_command'))
+                    return True
+                return False   # not quiet: "말해도 돼?" is an ordinary question
+            if self.muted:
+                return True    # quiet: only "말해도 돼" is answered
+            if kind == 'hush':
+                self.command('stop')
+                return True
+            if kind == 'quiet':
+                self.command('mute')               # quiet at once; only this answer still goes out
+                self._quiet_until = now + float(arg)
+                self._enqueue(Utterance('ask', talk.command_reply(kind, arg, cute), now, self.tracker.generation,
+                                        fixed=True, question=question, origin='quick', label='voice_command'))
+                return True
+            self._enqueue(Utterance('ask', talk.command_reply(kind, arg, cute), now, self.tracker.generation,
+                                    fixed=True, question=question, origin='quick', label='voice_command'))
+        return True
 
     def _answer_quickly(self, question: str, follow: bool = False) -> bool:
         """Said from a file (the menu) instead of asking GPT. False: not that kind of question."""
@@ -444,6 +487,22 @@ class Narrator:
                     self._quick_at = now
                     self._enqueue(Utterance('ask', text, now, self.tracker.generation,
                                             fixed=True, question=question, label='traffic_answer', origin='quick'))
+                return True
+            cute = self.tracker.style == 'cute'
+            text = talk.fact_answer(question, self.wall_clock(), cute, clock_ok=not clock_unset())
+            label = 'fact_answer'
+            if text is None and talk.is_battery_question(question):
+                from .signals import SUPPLY_BOARDS
+                supplies = {SUPPLY_BOARDS.get(board, board): (sup['rest'], sup['at'])
+                            for board, sup in signals.supply.items()}
+                text = talk.battery_answer(supplies, now, cute, self.tracker.battery_low_v,
+                                           self.tracker.battery_critical_v, max(self.tracker.stale_s, 5.0))
+                label = 'battery_answer'
+            if text is not None:
+                if not self._closed and not self.muted:
+                    self._quick_at = now
+                    self._enqueue(Utterance('ask', text, now, self.tracker.generation, fixed=label == 'fact_answer'
+                                            and '시' not in text, question=question, label=label, origin='quick'))
                 return True
         if self.quick_answer is None:
             return False
@@ -481,6 +540,8 @@ class Narrator:
     def wake(self, question: str = ''):
         """Called by name (the microphone heard "크래프트 ..."). '' = the name alone: say what I am doing."""
         question = question.strip()
+        if question and self._voice_command(question):
+            return
         if question and self._answer_quickly(question):
             return
         now = self.clock()
@@ -605,6 +666,11 @@ class Narrator:
                 warm()  # returns at once while the open connection is fresh; reopens it in the background
         with self._lock:
             now = self.clock()
+            if self.muted and self._quiet_until is not None and now >= self._quiet_until:
+                self._quiet_until = None
+                self.muted = False
+                self._enqueue(Utterance('ack', talk.command_reply('speak', None, self.tracker.style == 'cute'),
+                                        now, self.tracker.generation, fixed=True, label='quiet_over'))
             event = self.tracker.poll(now)
             if event:
                 self._on_event(event)
@@ -775,7 +841,7 @@ class Narrator:
 
     def _enqueue(self, utterance: Utterance):
         with self._lock:
-            if self._closed or (self.muted and utterance.kind != 'fault'):
+            if self._closed or (self.muted and utterance.kind != 'fault' and utterance.label != 'voice_command'):
                 return
             # NPC의 젯슨 소개만 녹음으로 교체. 호출 대사와 사람이 요청한 설명은 별도 경로다.
             text = re.sub(r'\s+', '', utterance.text).lower()
@@ -1036,14 +1102,20 @@ class Narrator:
                            '[기억]에 방금 있었던 눈에 띄는 일이 있으면 짧게 덧붙여도 돼.')
             else:
                 request += (' 한 문장으로 답해. 실제 로봇 동작의 왜·언제·얼마나를 물으면 [기억]의 순서와 시간, [로봇 상태]를 근거로 '
-                            '추론해서 답하고, 추론한 것은 "~인 것 같아"처럼 말해. 로봇을 움직이거나 멈추라는 부탁이면 '
-                            '나는 상태만 알려 줄 수 있다고 답해.')
+                            '추론해서 답하고, 추론한 것은 "~인 것 같아"처럼 말해. 다만 앞으로 걸릴 시간, 남은 개수, '
+                            '거리처럼 [기억]과 [로봇 상태]에 없는 수치는 추측해서 말하지 말고 모른다고 해. '
+                            '로봇을 움직이거나 멈추라는 부탁이면 나는 상태만 알려 줄 수 있다고 답해. '
+                            '말하는 방식(조용히 하기, 소리 크기)을 바꾸겠다고 약속하지 마. 그런 부탁은 따로 처리돼.')
             if job.followup:
                 request += (' 이 말은 내 이름 없이, 내가 방금 대답한 뒤에 들린 말이야. 나에게 한 말이 아니거나 '
                             f'무슨 뜻인지 알 수 없으면 다른 말 없이 {SKIP} 라고만 답해.')
         with self._lock:
             now = self.clock()
             context = self.tracker.context_text(now)
+            if not clock_unset():
+                wall = self.wall_clock()
+                context += (f"\n- 지금 시각: {wall.year}년 {wall.month}월 {wall.day}일 "
+                            f"{talk.WEEKDAYS[wall.weekday()]}요일 {wall.hour}시 {wall.minute}분 (서울)")
             mission = self.mission.facts(now)
             if mission:
                 context += '\n' + mission

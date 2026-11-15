@@ -13,6 +13,7 @@ voice_node:
     narrate_period_s: 0.0         # no periodic narration: it speaks when something changes or when called
     style: cute
     menu_file: ~/craft-voice/config/menu.yaml   # "크래프트, 오늘 점심 메뉴 뭐야?" (replace the file every week)
+    weather_place: 구로구         # "크래프트, 오늘 날씨 뭐야?": 서울 구로구 예보 (weather_latitude/longitude 기본값)
     variety: true                 # further wordings in turn; drives said with distance, count, time
     persona: 귀엽고 발랄한 로봇 친구처럼 짧은 반말 한 문장으로 말해. 이름은 크래프트야. 미션 소개는 하지 마.
     max_chars: 60

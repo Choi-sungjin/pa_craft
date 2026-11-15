@@ -137,6 +137,9 @@ PARAMETERS = {
     'variety': False,                       # further wordings in turn, drives said with distance / count / time
     'menu_file': '',                        # cafeteria menu (config/menu.yaml): "오늘 점심 메뉴 뭐야?" ('' = off)
     'menu_items': 4,                        # dishes named in an answer
+    'weather_place': '',                    # place said in weather answers ("오늘 날씨 뭐야?"), e.g. 구로구 ('' = off)
+    'weather_latitude': 37.4954,            # where the forecast is for (서울 구로구)
+    'weather_longitude': 126.8874,
     'goal_topic': '/planning/target_base_pose',   # geometry_msgs/PoseStamped, map frame ('' = not read)
     'pose_topic': '/planning/odom',               # nav_msgs/Odometry, map frame ('' = not read)
     'phrases_file': '',                     # JSON {key: sentence} replacing single fixed sentences
@@ -259,7 +262,7 @@ class VoiceNode(Node):
             fallback_tts=CommandTts(fallback) if fallback else None,
             on_text=self._publish_text, on_speaking=self._publish_speaking, logger=log,
             on_source=self._publish_source, speech_cache=make_cache(backend, p['speech_cache_dir'], p['speech_cache_max']),
-            quick_answer=self._menu(p))
+            quick_answer=self._quick_answers(p))
         cache = self.narrator.speech_cache
         if p['prepare_fixed'] and backend is not None and cache is not None:
             from .prepare import fixed_sentences
@@ -349,6 +352,20 @@ class VoiceNode(Node):
         menu = Menu(p['menu_file'], style=p['style'], items=p['menu_items'], logger=self.get_logger())
         self.get_logger().info(f"menu: {len(menu.days())} days from {menu.path}")
         return menu.answer
+
+    def _quick_answers(self, p):
+        from .weather import chain
+        return chain(self._menu(p), self._weather(p))
+
+    def _weather(self, p):
+        if not p['weather_place'].strip():
+            return None
+        from .weather import Weather
+        weather = Weather(p['weather_place'].strip(), p['weather_latitude'], p['weather_longitude'],
+                          style=p['style'], logger=self.get_logger())
+        weather.warm()
+        self.get_logger().info(f"weather: {weather.place} ({weather.latitude}, {weather.longitude})")
+        return weather.answer
 
     # ---- what perception sees ---------------------------------------------------------------
     def _subscribe_perception(self, p):
