@@ -40,8 +40,12 @@ STATE_FREE_REMARKS = ('barcode_ascending', 'barcode_descending', 'barcode_unknow
 # puck pick (demo/puck_pick/execute.py): "gripcam_measured top=61 yaw=-22.9" after the gripper cam read the puck,
 # "gripcam_none" when it saw none (the numbers are kept in the memory, not said), "puck_loaded slot=7" after the release in a carousel slot. key=value words are
 # values for the sentence (numbers; anything else is ignored).
-EVENT_REMARKS = ('firmware_done', 'gripcam_measured', 'gripcam_none', 'puck_loaded', 'pick_failed')
-EVENT_GAP_S = {'firmware_done': 10.0, 'gripcam_measured': 3.0, 'gripcam_none': 3.0, 'puck_loaded': 3.0, 'pick_failed': 3.0}
+# "power_off_arm" / "power_off_wheel": the firmware upload found that board's motors at 0 V (motor power switched off;
+# _craft_check prints "motor supply: lowest 0.0 V"), the same remark as a 0 V diagnostic line below.
+EVENT_REMARKS = ('firmware_done', 'gripcam_measured', 'gripcam_none', 'puck_loaded', 'pick_failed',
+                 'power_off_wheel', 'power_off_arm')
+EVENT_GAP_S = {'firmware_done': 10.0, 'gripcam_measured': 3.0, 'gripcam_none': 3.0, 'puck_loaded': 3.0, 'pick_failed': 3.0,
+               'power_off_wheel': 10.0, 'power_off_arm': 10.0}
 # A puck axis found again only after this long without one is news ("벡터 계산 완료"); not again within PUCK_AXIS_GAP_S.
 PUCK_AXIS_ABSENT_S = 5.0
 PUCK_AXIS_GAP_S = 60.0
@@ -62,7 +66,13 @@ SUPPLY_MIN_SPAN_S = 40.0      # this much of the window received before judging 
 SUPPLY_RECOVER_V = 0.3        # charged / replaced: back above low_v + this, said again when it drops later
 SUPPLY_REPEAT_S = {'battery_low': 600.0, 'battery_critical': 180.0}
 SUPPLY_REMARKS = tuple(f'{level}_{board}' for level in SUPPLY_REPEAT_S for board in SUPPLY_BOARDS)
-STATE_FREE_REMARKS = STATE_FREE_REMARKS + SUPPLY_REMARKS
+# Motor power off: every motor of a board reads 0 V (the firmware writes 0 for a motor that does not answer; with the
+# motor power switched off none answers). Said after POWER_OFF_LINES such lines in a row (one line right after the
+# board starts can still hold motors not read yet), again every POWER_OFF_REPEAT_S while it stays off.
+POWER_OFF_LINES = 2
+POWER_OFF_REPEAT_S = 300.0
+POWER_REMARKS = tuple(f'power_off_{board}' for board in SUPPLY_BOARDS)
+STATE_FREE_REMARKS = STATE_FREE_REMARKS + SUPPLY_REMARKS + POWER_REMARKS
 REMARKS = ('grasped', 'box_found', 'depart') + STATE_FREE_REMARKS
 
 
@@ -77,6 +87,17 @@ def parse_supply(line: str) -> tuple[float, float] | None:
     if line.strip()[:2] != 'D,' or len(values) < 4 or not motors:
         return None
     return statistics.median(motors), values[3]
+
+
+def supply_off(line: str) -> bool:
+    """A diagnostic line in which every motor reads 0 V (motor power off, or no motor answers)."""
+    try:
+        values = [float(x) for x in line.strip().split(',')[1:]]
+    except ValueError:
+        return False
+    end = values.index(-1.0) if -1.0 in values else len(values)
+    motors = values[4:end]
+    return line.strip()[:2] == 'D,' and len(values) >= 4 and bool(motors) and all(v == 0 for v in motors)
 
 
 def command_ko(operation: int, kind: int, duration_s: float = 0.0, clock_slot: int = 0, close: bool = False) -> str:
@@ -121,6 +142,7 @@ class Signals:
         self.event_values: dict[str, dict] = {}   # /voice/event name -> the numbers that came with it
         self.supply_low_v, self.supply_critical_v = supply_low_v, supply_critical_v
         self.supply: dict[str, dict] = {}         # board -> {'samples', 'rest', 'lowest', 'at', 'said', 'said_at'}
+        self.power_off: dict[str, dict] = {}      # board -> {'lines': 0 V lines in a row, 'said_at', 'at'}
 
     def _remark(self, key: str, now: float, gap: float | None = None) -> str:
         if now - self._remarked.get(key, -math.inf) < (self.remark_gap_s if gap is None else gap):
@@ -207,6 +229,19 @@ class Signals:
     def motor_supply(self, board: str, line: str, now: float) -> str:
         """One diagnostic line of board 'wheel' / 'arm'. Returns 'battery_low_wheel', 'battery_critical_arm', ...
         when the resting level falls below a threshold (again after SUPPLY_REPEAT_S while it stays there)."""
+        if board in SUPPLY_BOARDS:
+            off = self.power_off.setdefault(board, {'lines': 0, 'said_at': -math.inf, 'at': -math.inf})
+            if supply_off(line):
+                off['lines'] += 1
+                off['at'] = now
+                if off['lines'] >= POWER_OFF_LINES and now - off['said_at'] >= POWER_OFF_REPEAT_S:
+                    key = self._remark(f'power_off_{board}', now, gap=30.0)  # not right after the upload said it
+                    if key:
+                        off['said_at'] = now
+                    return key
+                return ''
+            if parse_supply(line) is not None:
+                off['lines'], off['said_at'] = 0, -math.inf  # powered again: a later switch-off is news
         parsed = parse_supply(line) if board in SUPPLY_BOARDS else None
         if parsed is None or self.supply_low_v <= 0:
             return ''
@@ -396,6 +431,9 @@ class Signals:
                            f"노랑 {t['yellow']}번, 초록 {t['green']}번 ({state}"
                            + (f", 다시 센 횟수 {t['discarded']}" if t['discarded'] else '') + f"), {ago(now - t['at'])}")
                 out.append('- ' + traffic_facts(t))
+        for board, off in self.power_off.items():
+            if off['lines'] >= POWER_OFF_LINES and now - off['at'] <= max(self.stale_s, 5.0):
+                out.append(f"- {SUPPLY_BOARDS[board]} 전원: 모든 모터가 0 V (모터 전원이 꺼져 있음, 전원 스위치를 올려야 함)")
         for board, s in self.supply.items():
             if s['rest'] is not None and now - s['at'] <= max(self.stale_s, 5.0):
                 state = ('거의 바닥, 바로 충전 필요' if s['rest'] < self.supply_critical_v else

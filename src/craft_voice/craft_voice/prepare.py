@@ -55,6 +55,8 @@ def fixed_sentences(style: str, lines: dict, step_names: dict, variety: bool = F
         for text in tracker.phrases(key):
             sentences.update(text.format(board=board, volts=f'{v / 10:.1f}') for board in SUPPLY_BOARDS.values()
                              for v in volts if text)
+    for text in tracker.phrases('notice.power_off'):
+        sentences.update(text.format(board=board) for board in SUPPLY_BOARDS.values() if text)
     for needle, _, polite in REASON_KO:
         sentences.add(lines.get('fault.' + needle) or (FAULT_CUTE.get(needle, polite) if style == 'cute' else polite))
     # "what I am doing" answers pair a cannot-answer with a doing sentence only at run time: not prepared

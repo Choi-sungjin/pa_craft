@@ -21,7 +21,7 @@ import re
 from collections import Counter, deque
 from dataclasses import dataclass, field
 from . import variety as _variety
-from .signals import STATE_FREE_REMARKS, Signals
+from .signals import STATE_FREE_REMARKS, SUPPLY_BOARDS, Signals
 from .stops import STOP_LINES, StopMonitor, stop_reason
 
 STATE_KO = {
@@ -212,6 +212,7 @@ PHRASES = {
         'notice.pick_failed': '퍽을 집지 못했어요.',
         'notice.battery_low': '{board} 배터리가 부족해요. 지금 {volts}볼트예요. 곧 충전해 주세요.',
         'notice.battery_critical': '{board} 배터리가 거의 바닥이에요! {volts}볼트예요. 지금 충전해 주세요.',
+        'notice.power_off': '{board} 전원이 0볼트예요. 전원을 올려 주세요.',
         'obstacle': '{dir} {d}미터쯤에 장애물이 있어요.',
         'obstacle.near': '바로 {dir}에 장애물이 있어요.',
     },
@@ -284,6 +285,7 @@ PHRASES = {
         'notice.pick_failed': '앗, 퍽 집기 실패했어.',
         'notice.battery_low': '{board} 배터리가 부족해! 지금 {volts}볼트야. 곧 충전해 줘.',
         'notice.battery_critical': '{board} 배터리 거의 바닥이야! {volts}볼트야. 지금 바로 충전해 줘!',
+        'notice.power_off': '{board} 전원이 0볼트야! 전원 올려 줘.',
         'obstacle': '{dir} {d}미터쯤에 뭐가 있어.',
         'obstacle.near': '바로 {dir}에 뭐가 있어.',
     },
@@ -777,7 +779,9 @@ class StateTracker:
             self._lost = True  # the heartbeat line said it: no "상태 신호가 끊겼어" too ("다시 들어온다" stays)
         while self._remarks:  # a signal just seen (a grasp, the barcode, the light, the box): said while it is news
             key, at = self._remarks.popleft()
-            if now - at <= 5.0 and (key in STATE_FREE_REMARKS or (fresh and self.label.startswith('Run.'))):
+            # "power on" waits up to a minute behind other speech: it comes once (the firmware upload), and stays true
+            if now - at <= (60.0 if key.startswith('power_off_') else 5.0) and \
+                    (key in STATE_FREE_REMARKS or (fresh and self.label.startswith('Run.'))):
                 if key == 'approach_line':
                     return Notice(key, TANK_LINES[self._tank_choice], self.generation,
                                   values=(('choice', self._tank_choice),))
@@ -785,6 +789,9 @@ class StateTracker:
                     values = tuple(self.signals.supply_values(key).items())
                     return Notice(key, self.phrase('notice.' + key.rsplit('_', 1)[0], **dict(values)),
                                   self.generation, values=values)
+                if key.startswith('power_off_'):  # power_off_arm -> notice.power_off with the board's name
+                    values = (('board', SUPPLY_BOARDS.get(key.rsplit('_', 1)[-1], '')),)
+                    return Notice(key, self.phrase('notice.power_off', **dict(values)), self.generation, values=values)
                 if key.startswith('gripcam_') or key == 'puck_loaded':
                     phrase, words = self.signals.event_words(key)
                     return Notice(key, self.phrase(phrase, **words), self.generation, values=tuple(words.items()))
@@ -886,7 +893,9 @@ class StateTracker:
     def update_motor_supply(self, board: str, line: str, now: float):
         """/control/wheel_clock_diag ('wheel'), /control/arm_diag ('arm'): one firmware diagnostic line."""
         key = self.signals.motor_supply(board, line, now)
-        if key:
+        if key.startswith('power_off_'):
+            self._remark(key, now, f"{SUPPLY_BOARDS[board]} 전원이 꺼짐 (모든 모터 0 V)")
+        elif key:
             v = self.signals.supply_values(key)
             self._remark(key, now, f"{v['board']} 배터리 부족 ({v['volts']} V)")
 
@@ -898,7 +907,9 @@ class StateTracker:
                   + (f", 각도 {values['yaw']:+.1f}도)" if 'yaw' in values else (')' if 'top' in values else '')),
                   'gripcam_none': '그리퍼 카메라에 퍽이 안 보임',
                   'puck_loaded': '퍽을 회전판 칸에 넣음' + (f" ({values['slot']:.0f}번 칸)" if 'slot' in values else ''),
-                  'pick_failed': '퍽 집기에 실패함'}.get(key, '')
+                  'pick_failed': '퍽 집기에 실패함',
+                  'power_off_wheel': '펌웨어 업로드 뒤 바퀴 모터 전원이 0 V (꺼짐)',
+                  'power_off_arm': '펌웨어 업로드 뒤 팔 모터 전원이 0 V (꺼짐)'}.get(key, '')
         self._remark(key, now, memory)  # the numbers go to the memory (facts) only: said is the recording alone (user 11-15)
 
     def update_barcode(self, text: str, now: float, quiet: bool = False):
