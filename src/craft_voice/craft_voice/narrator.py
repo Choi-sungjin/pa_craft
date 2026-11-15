@@ -33,7 +33,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 from .audio import pcm_to_wav, read_clip
-from .chatter import Chatter
+from .chatter import WEIGHT_CHANCE, Chatter, weight_line
 from .frames import encode_jpeg
 from .realtime import same_sentence
 from .robot_state import STATE_KO, Notice, StateEvent, StateTracker, is_status_question
@@ -716,6 +716,11 @@ class Narrator:
                 chatter.postpone(now)
                 self._enqueue(Utterance('thought', RAP_LINE, now, self.tracker.generation,
                                         fixed=True, clip=clip, label='chatter_rap'))
+            elif random.random() < WEIGHT_CHANCE:
+                # 6.7kg 대사 (user 11-16): 혼잣말 기회당 10%, 다섯 문장 중 하나
+                chatter.postpone(now)
+                self._enqueue(Utterance('thought', weight_line(self.tracker.style), now, self.tracker.generation,
+                                        fixed=True, label='chatter_weight'))
             else:
                 # 혼잣말 = 내 상태 읽기 (user 11-15): every state it has, said as "내 상태는? ...". The numbers change,
                 # so it is synthesized when said (not kept in the cache).

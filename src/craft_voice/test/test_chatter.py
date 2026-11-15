@@ -113,3 +113,25 @@ def test_the_monologue_reads_every_state_it_has():
                                          '바퀴 모터 배터리 11.4볼트, 팔 모터 배터리 10.9볼트.')
     t.update_control(False, True, False, False, 'arm board', 104.6)
     assert '제어는 고장 상태야' in t.status_monologue(104.7)
+
+
+def test_weight_lines_come_up_one_time_in_ten():
+    from craft_voice.chatter import WEIGHT_CHANCE, WEIGHT_LINES
+    import craft_voice.narrator as narrator_module
+    assert WEIGHT_CHANCE == 0.10 and len(WEIGHT_LINES['cute']) == 5 == len(WEIGHT_LINES['polite'])
+    assert set(WEIGHT_LINES['cute']) <= set(fixed_sentences('cute', {}, {}))   # synthesized beforehand
+    for roll, weight in ((0.05, True), (0.5, False)):
+        narrator, texts = idle_narrator()
+        real = narrator_module.random.random
+        narrator_module.random.random = lambda: roll
+        try:
+            narrator.chatter._next_at = 0.0
+            narrator._last_activity = -1e9
+            narrator._chatter(narrator.clock(), True, None)
+        finally:
+            narrator_module.random.random = real
+        said = [u for u in narrator._utterances if u.kind == 'thought']
+        assert len(said) == 1
+        assert (said[0].text in WEIGHT_LINES['cute']) is weight, (roll, said[0].text)
+    seen = {narrator_module.weight_line('cute') for _ in range(200)}
+    assert seen == set(WEIGHT_LINES['cute'])                                      # all five come up

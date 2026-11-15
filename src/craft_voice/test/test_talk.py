@@ -43,6 +43,10 @@ def test_time_date_and_who_i_am():
     assert fact_answer('몇 시야', MORNING, cute=True, clock_ok=False) == '시계가 아직 안 맞춰져서 몰라.'
     assert fact_answer('너 누구야?', MORNING, cute=True).startswith('나는 크래프트야!')
     assert '날씨' in fact_answer('뭐 물어봐도 돼?', MORNING, cute=True)
+    from craft_voice.chatter import WEIGHT_LINES
+    assert fact_answer('너 몸무게 몇이야?', MORNING, cute=True) in WEIGHT_LINES['cute']
+    assert fact_answer('크래프트 무거워?', MORNING, cute=False) in WEIGHT_LINES['polite']
+    assert fact_answer('퍽 무게는 얼마야?', MORNING, cute=True) is None
     for text in ('몇 시간 걸려?', '오늘 날씨 뭐야?', '왜 멈췄어', '이거 누구 거야?'):
         assert fact_answer(text, MORNING, cute=True) is None, text
 

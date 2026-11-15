@@ -24,6 +24,7 @@ def test_exactly_one_of_100_draws_uses_the_recording(monkeypatch, tmp_path):
             assert limit == 100
             return draw
         monkeypatch.setattr('craft_voice.narrator.random.randrange',pick)
+        monkeypatch.setattr('craft_voice.narrator.random.random', lambda: 0.99)   # 6.7kg 대사(10%)는 따로 시험
         n.tick()
         assert n.chatter._next_at > n.clock()
         u=n._utterances[0]

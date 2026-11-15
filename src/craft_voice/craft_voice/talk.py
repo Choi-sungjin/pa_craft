@@ -40,6 +40,8 @@ _MOVE = re.compile(r'(?:지금|당장|빨리|일단|얼른|다시)?(?:움직여|
                    r'후진해|전진해|돌아|돌아줘|이리와|일로와|따라와|팔올려|팔내려|팔움직여|집어|잡아|놔|놓아)(?:요|봐)?')
 _VOLUME = ('소리', '음량', '볼륨')
 _LOUDER_SOFTER = ('키워', '줄여', '크게', '작게', '높여', '낮춰', '맞춰', '올려', '내려', '조절')
+_WEIGHT = ('몸무게', '무게', '몇킬로', '몇kg', '체중', '무거워', '무겁', '가벼워', '가볍')
+_NOT_ME = ('퍽', '상자', '박스', '물건', '이거', '그거', '저거')   # the weight of something else
 _TIME = ('몇시', '지금시간', '현재시간', '시간알려', '시간몇', '몇시몇분')
 _DATE = ('며칠', '몇일', '날짜', '무슨요일', '몇요일', '몇월')
 _WHO = re.compile(r'(?:너|넌|너는|당신은?)?(?:누구|누구야|누구니|누구세요|누구예요|정체가뭐야|이름이뭐야|이름뭐야|이름이뭐니|'
@@ -143,6 +145,9 @@ def fact_answer(text: str, now: dt.datetime, cute: bool, clock_ok: bool = True) 
         if asks_time:
             return end(f'지금 {_clock(now)}')
         return end(f'오늘은 {day}')
+    if any(word in s for word in _WEIGHT) and not any(word in s for word in _NOT_ME):
+        from .chatter import weight_line
+        return weight_line('cute' if cute else 'polite')
     if _WHO.fullmatch(s):
         return ('나는 크래프트야! 경기장을 다니면서 퍽을 집어 옮기는 로봇이야.' if cute else
                 '저는 크래프트예요. 경기장을 다니면서 퍽을 집어 옮기는 로봇이에요.')

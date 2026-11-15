@@ -52,6 +52,29 @@ LINES = {
     },
 }
 
+# 6.7kg 대사(user 11-16): 대기 중 혼잣말 기회마다 WEIGHT_CHANCE 확률로 이 중 하나, 몸무게를 물어도 이 중 하나.
+WEIGHT_LINES = {
+    'cute': [
+        '내 몸무게는 비밀이야. 사실 6.7킬로지만.',
+        '다이어트 성공! 6.7킬로 그대로야. 바퀴로만 다녀서 살이 안 쪄.',
+        '6.7킬로 몸무게 유지 중. 나사 하나만 더 붙어도 큰일 나!',
+        '6.7킬로짜리 몸으로 퍽까지 옮기다니, 가성비 최고 아니야?',
+        '나 6.7킬로야. 가볍다고 얕보지 마, 퍽은 확실히 옮긴다고!',
+    ],
+    'polite': [
+        '제 몸무게는 비밀이에요. 사실 6.7킬로지만요.',
+        '다이어트 성공이에요! 6.7킬로 그대로예요. 바퀴로만 다녀서 살이 안 쪄요.',
+        '6.7킬로 몸무게 유지 중이에요. 나사 하나만 더 붙어도 큰일 나요.',
+        '6.7킬로짜리 몸으로 퍽까지 옮기다니, 가성비 최고 아닌가요?',
+        '저는 6.7킬로예요. 가볍다고 얕보지 마세요, 퍽은 확실히 옮기거든요.',
+    ],
+}
+WEIGHT_CHANCE = 0.10
+
+
+def weight_line(style: str, rng=random) -> str:
+    return rng.choice(WEIGHT_LINES.get(style, WEIGHT_LINES['polite']))
+
 
 def time_slot(hour: float) -> str:
     """하루 중 시간대(시, 소수 포함): morning 5~11:30, lunch 11:30~13:30, afternoon ~18, evening ~24, night 0~5."""
@@ -68,7 +91,8 @@ def time_slot(hour: float) -> str:
 
 def all_lines(style: str) -> list[str]:
     table = LINES.get(style, LINES['polite'])
-    return sorted({line for lines in table.values() for line in lines})
+    lines = {line for lines in table.values() for line in lines}
+    return sorted(lines | set(WEIGHT_LINES.get(style, WEIGHT_LINES['polite'])))
 
 
 def local_hour() -> float | None:
