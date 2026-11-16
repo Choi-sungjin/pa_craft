@@ -113,3 +113,15 @@ def test_time_answer_and_the_prompt_knows_the_time():
     instructions, prompt = narrator._prompt(job, has_image=False)
     assert '- 지금 시각: 2026년 11월 16일 월요일 8시 5분 (서울)' in prompt
     assert '추측해서 말하지 말고 모른다고 해' in prompt and '약속하지 마' in prompt
+
+
+def test_ready_to_run_for_the_demo():
+    from craft_voice.prepare import fixed_sentences
+    for text in ('달릴 준비 됐어?', '크래프트 달릴 준비 됐어', '달릴 준비 완료됐어?', '출발할 준비 됐니?'):
+        assert fact_answer(text, MORNING, cute=True) == '달릴 준비 완료! 언제든 맡겨 줘!', text
+    assert fact_answer('달릴 준비 됐어요?', MORNING, cute=False) == '달릴 준비 완료예요! 언제든 맡겨 주세요!'
+    assert '달릴 준비 완료! 언제든 맡겨 줘!' in fixed_sentences('cute', {}, {})     # plays at once
+    narrator, texts = quiet_robot()
+    narrator.wake('달릴 준비 됐어?')
+    assert not narrator._jobs and not any(u.kind == 'ack' for u in narrator._utterances)   # no "어디 보자!" first
+    assert narrator.speak_once() is True and texts[-1] == ('ask', '달릴 준비 완료! 언제든 맡겨 줘!')

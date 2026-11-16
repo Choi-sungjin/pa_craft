@@ -38,6 +38,8 @@ def fixed_sentences(style: str, lines: dict, step_names: dict, variety: bool = F
                     sentences.add(text.format(red=red, yellow=yellow, green=green))
     from .chatter import all_lines as chatter_lines
     sentences.update(chatter_lines(style))   # 혼잣말(켜져 있지 않아도 미리 합성해 둠)
+    from .talk import fixed_lines as talk_lines
+    sentences.update(talk_lines(style))      # 정해진 답("달릴 준비 됐어?")
     if variety:
         from . import variety as drive
         sentences.update(drive.all_lines(style))

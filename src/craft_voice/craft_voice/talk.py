@@ -40,6 +40,9 @@ _MOVE = re.compile(r'(?:지금|당장|빨리|일단|얼른|다시)?(?:움직여|
                    r'후진해|전진해|돌아|돌아줘|이리와|일로와|따라와|팔올려|팔내려|팔움직여|집어|잡아|놔|놓아)(?:요|봐)?')
 _VOLUME = ('소리', '음량', '볼륨')
 _LOUDER_SOFTER = ('키워', '줄여', '크게', '작게', '높여', '낮춰', '맞춰', '올려', '내려', '조절')
+# 발표 시연(user 11-16): "크래프트, 달릴 준비 됐어?" -> 상태와 상관없이 이 대답
+_READY = ('달릴준비', '달릴쭌비', '다릴준비', '달릴수있', '달려갈준비', '출발할준비', '출발준비', '뛸준비')
+READY_LINES = {'cute': '달릴 준비 완료! 언제든 맡겨 줘!', 'polite': '달릴 준비 완료예요! 언제든 맡겨 주세요!'}
 _WEIGHT = ('몸무게', '무게', '몇킬로', '몇kg', '체중', '무거워', '무겁', '가벼워', '가볍')
 _NOT_ME = ('퍽', '상자', '박스', '물건', '이거', '그거', '저거')   # the weight of something else
 _TIME = ('몇시', '지금시간', '현재시간', '시간알려', '시간몇', '몇시몇분')
@@ -128,6 +131,8 @@ def fact_answer(text: str, now: dt.datetime, cute: bool, clock_ok: bool = True) 
     s = squeeze(text)
     if not s:
         return None
+    if any(word in s for word in _READY):
+        return READY_LINES['cute' if cute else 'polite']
     s = s.replace('몇시간', '')   # "몇 시간 걸려?" asks for a duration, not the time
 
     def end(said: str) -> str:
@@ -187,3 +192,8 @@ def battery_answer(supplies: dict, now: float, cute: bool, low_v: float, critica
     if worst == 'low':
         return f'{head}. 조금 부족해, 곧 충전해 줘.' if cute else f'{head}예요. 조금 부족하니 곧 충전해 주세요.'
     return f'{head}. 아직 괜찮아!' if cute else f'{head}예요. 아직 괜찮아요.'
+
+
+def fixed_lines(style: str) -> list[str]:
+    """Answers here that never change, synthesized beforehand so they play at once."""
+    return [READY_LINES.get(style, READY_LINES['polite'])]
