@@ -1,0 +1,15 @@
+# systemd system service: the clock is right from power-on, before the network time arrives.
+# Installed by scripts/install_clock_restore.sh (needs sudo). See scripts/craft-clock-restore.
+[Unit]
+Description=craft: put the clock back after the battery-less clock chip reset it to 1970
+DefaultDependencies=no
+After=systemd-timesyncd.service local-fs.target
+Conflicts=shutdown.target
+Before=shutdown.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/craft-clock-restore
+
+[Install]
+WantedBy=sysinit.target

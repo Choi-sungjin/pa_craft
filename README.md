@@ -14,6 +14,7 @@
 | `craft_control` | `control_master`: 주행·팔·그리퍼·클락 제어 및 펌웨어 통신을 담당합니다. |
 | `craft_description` | 로봇 URDF 및 메시를 제공합니다. |
 | `craft_bringup` | 통합 launch, 대시보드, `global_localize`, `odom_trail`, `box_marker`, `puck_marker`를 제공합니다. |
+| `craft_voice` | 상태·인지 결과를 읽어 음성으로 안내하고 질문에 답합니다. 주행 명령은 보내지 않습니다. [음성·home 설정](docs/VOICE_AND_HOME.md)을 참조해 주십시오. |
 
 `src/craft_planning/v75_ws`는 팔 모델과 참조 구현을 보관하는 디렉터리입니다. 별도 운영 워크스페이스로 빌드하지 않습니다.
 
@@ -26,6 +27,8 @@
 - `demo/driving_sim/`, `demo/mission_sim/`, `test/`: 시뮬레이션 및 검증 자료입니다.
 
 빌드 산출물, 촬영 데이터, 실행 기록, 로컬 환경 파일 및 백업 사본은 배포 대상에서 제외합니다. 티칭 및 보정 원본은 포함합니다.
+
+음성 서비스와 `.bashrc`의 `home` 복귀 명령은 [별도 설정 안내](docs/VOICE_AND_HOME.md)에 정리되어 있습니다. `home`은 기존 `tools/go_home.py`를 호출하는 소스 작업용 명령입니다.
 
 ## 설치 및 전체 빌드
 
