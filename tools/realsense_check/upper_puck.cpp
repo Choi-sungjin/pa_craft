@@ -15,6 +15,9 @@
 #include <opencv2/dnn.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
+#ifdef CRAFT_PACKAGED_CAMERA
+#include <ament_index_cpp/get_package_share_directory.hpp>
+#endif
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -26,7 +29,14 @@
 #include <vector>
 
 namespace {
-const char * kPose = GRIP_YAW_DIR "/upper_cam_pose.txt";
+std::string camera_data_dir() {
+#ifdef CRAFT_PACKAGED_CAMERA
+  return ament_index_cpp::get_package_share_directory("craft_sensors") + "/puck_camera";
+#else
+  return GRIP_YAW_DIR;
+#endif
+}
+std::string kPose;
 
 struct Pose {double R[9], t[3], z_floor, laser[3], face, radius, sign; std::string model, serial; std::vector<std::string> cls;};
 
@@ -71,14 +81,19 @@ std::vector<Det> detect(cv::dnn::Net & net, const cv::Mat & bgr, float conf = 0.
 
 int main(int argc, char ** argv) try {
   auto t0 = std::chrono::steady_clock::now();
-  int warm = 15; std::string snap, save;
+  int warm = 15; std::string snap, save, data_dir;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
-    if (a == "--warm" && i + 1 < argc) {warm = std::atoi(argv[++i]);}
+    if (a == "--data-dir" && i + 1 < argc) {data_dir = argv[++i];}
+    else if (a == "--warm" && i + 1 < argc) {warm = std::atoi(argv[++i]);}
     else if (a == "--snap" && i + 1 < argc) {snap = argv[++i];}
     else if (a == "--save" && i + 1 < argc) {save = argv[++i];}
   }
+  kPose = (data_dir.empty() ? camera_data_dir() : data_dir) + "/upper_cam_pose.txt";
   Pose P = read_pose();
+#ifdef CRAFT_PACKAGED_CAMERA
+  P.model = ament_index_cpp::get_package_share_directory("craft_perception") + "/models/pucks_v8n_v2/model.onnx";
+#endif
   cv::Mat bgr; cv::Mat depth;  // depth [m] aligned to colour
   double fx, fy, ppx, ppy;
   if (!snap.empty()) {

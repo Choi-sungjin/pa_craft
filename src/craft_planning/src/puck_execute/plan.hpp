@@ -15,12 +15,15 @@ namespace fs = std::filesystem;
 using Pose = std::vector<double>;
 using JointMap = std::map<std::string, double>;
 
-// Runtime paths: PUCK_PICK_DIR or CRAFT_REPO, then executable ancestors, then ~/craft.
+// Installed package resources by default; explicit source overrides retain the demo workflow.
 fs::path here();
 fs::path ws();
-fs::path urdf_path();      // WS/src/craft_planning/v75_ws/src/v75_robot_description/urdf/v75_robot.urdf
-fs::path control_yaml();   // WS/src/craft_control/config/control.yaml
-fs::path home();           // Path.home()
+fs::path urdf_path();
+fs::path control_yaml();
+fs::path home();
+fs::path state_dir();
+fs::path camera_data_dir();
+fs::path camera_executable(const std::string &name);
 
 double py_mod(double a, double b);  // Python a % b (floor modulo)
 

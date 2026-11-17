@@ -48,7 +48,7 @@ ros2 launch craft_bringup craft.launch.py \
   mission:=true arm:=false localization:=slam \
   map_file:=/home/craft/maps/brief_arena1cm.yaml \
   slam_map:=/home/craft/maps/noboxes_legend_opt_arena \
-  start_lidar:=false start_cameras:=false \
+  start_lidar:=false start_cameras:=false start_robot_state_publisher:=false \
   "params_overlay:=$mission_out/overlay.yaml" > "$mission_out/stack.log" 2>&1 &
 mission_pids+=("$!")
 "$mission_root/install/craft_sensors/lib/craft_sensors/uppercam_bridge" --ros-args \

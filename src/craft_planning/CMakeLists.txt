@@ -65,7 +65,7 @@ add_library(puck_execute_math
 target_compile_features(puck_execute_math PUBLIC cxx_std_17)
 target_compile_options(puck_execute_math PRIVATE -Wall -Wextra -Wpedantic)
 target_include_directories(puck_execute_math PUBLIC src/puck_execute third_party)
-target_link_libraries(puck_execute_math PUBLIC Eigen3::Eigen yaml-cpp urdfdom::urdf_parser
+target_link_libraries(puck_execute_math PUBLIC Eigen3::Eigen yaml-cpp urdfdom::urdf_parser ament_index_cpp::ament_index_cpp
   craft_perception::craft_perception__rosidl_typesupport_cpp)
 add_library(puck_execute_core
   src/puck_execute/geometry.cpp src/puck_execute/legacy.cpp src/puck_execute/plan_generator.cpp
@@ -85,6 +85,13 @@ install(PROGRAMS scripts/puck_picker.py DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)
 install(FILES v75_ws/src/v75_robot_description/urdf/v75_robot.urdf
   DESTINATION share/${PROJECT_NAME}/urdf)
+
+# Runtime inputs: install the current taught values without modifying their source copies.
+install(DIRECTORY v75_ws/src/v75_robot_description/meshes DESTINATION share/${PROJECT_NAME})
+install(DIRECTORY ../../demo/puck_pick/ DESTINATION share/${PROJECT_NAME}/puck_pick
+  FILES_MATCHING PATTERN "teach.yaml" PATTERN "plan*.yaml"
+  PATTERN "plan_cam_pucks.json" PATTERN "carousel.yaml"
+  PATTERN "runs" EXCLUDE PATTERN "__pycache__" EXCLUDE)
 
 # Keep the original A*+arc (Python) implementation importable for reference and regression tests.
 set(reference_python_dir "${CMAKE_CURRENT_BINARY_DIR}/reference_python/${PROJECT_NAME}")

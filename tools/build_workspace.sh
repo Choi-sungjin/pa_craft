@@ -13,5 +13,3 @@ fi
 
 colcon build --base-paths src --symlink-install \
   --cmake-args -DCMAKE_BUILD_TYPE=Release "$@"
-cmake -S tools/realsense_check -B tools/realsense_check/build
-cmake --build tools/realsense_check/build --target grip_yaw upper_puck -j 2

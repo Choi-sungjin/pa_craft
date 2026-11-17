@@ -21,7 +21,7 @@
 
 - `firmware/`: OpenCR 펌웨어와 공통 모터 라이브러리입니다.
 - `demo/puck_pick/`: 티칭·집기 설정, Python 참조 구현 및 인수인계 자료입니다.
-- `tools/realsense_check/`: `grip_yaw`, `upper_puck` 카메라 실행파일과 보정 파일입니다. ROS 노드가 아닌 별도 CMake 도구이며, 아래 전체 빌드에 포함됩니다.
+- `tools/realsense_check/`: `grip_yaw`, `upper_puck` 카메라 실행파일과 보정 파일입니다. 카메라 도구는 `craft_sensors`에서 함께 빌드·설치하며, 독립 CMake 빌드는 소스 실험용으로 유지합니다.
 - `src/craft_perception/models/`: ncnn·ONNX 모델 및 현재 장치용 TensorRT 엔진입니다. 다른 GPU 또는 TensorRT 버전에서는 ONNX로 엔진을 다시 생성해야 합니다.
 - `demo/driving_sim/`, `demo/mission_sim/`, `test/`: 시뮬레이션 및 검증 자료입니다.
 
@@ -29,7 +29,13 @@
 
 ## 설치 및 전체 빌드
 
-현재 집기 실행부는 `~/craft`의 소스 트리와 카메라 도구를 사용합니다. `install/`만 복사하는 바이너리 배포는 지원하지 않습니다. 제공된 `upper_cam_pose.txt`의 ONNX 경로는 `/home/craft/craft` 기준이므로 계정이 다른 경우 해당 경로를 조정해야 합니다.
+통합 실행본은 설치된 패키지에서 노드·모델·티칭·보정값을 찾습니다. `demo/`·`tools/` 소스 경로는 실행 시 필요하지 않습니다. 설치본 아카이브 생성과 사용자 데이터 관리는 [배포 안내](docs/DEPLOYMENT.md)를 참조해 주십시오.
+
+```bash
+bash tools/build_runtime.sh
+```
+
+배포 산출물은 `dist/craft-runtime.tar.gz`이며, 원본 저장소와 별도로 실행에 필요한 설치 패키지를 묶습니다. 미션의 ObservePucks·PlacePuck·VerifyLocation은 아직 미구현이고 `drive_only: true`를 유지합니다.
 
 새 환경에서는 ROS 2 Lyrical, colcon, rosdep, vcstool 및 C++ 개발 환경을 준비해 주십시오. 주요 네이티브 의존성은 OpenCV, librealsense2, ncnn, Pinocchio, coal, urdfdom, yaml-cpp, PNG, ZXing입니다. TensorRT·CUDA는 현재 Jetson 설정에 사용됩니다. `requirements.txt`는 Python 실험·모델 도구용이며 ROS 패키지 의존성을 대신하지 않습니다.
 
@@ -61,7 +67,7 @@ source install/setup.bash
 ros2 launch craft_bringup craft.launch.py
 ```
 
-미션 실행은 launch에 `mission:=true`를 추가합니다. `config/mission.yaml`의 `drive_only` 등 미션 설정을 먼저 확인해 주십시오. 어퍼캠 박스 관측 브리지는 기존 운영 방식에 따라 `bash demo/corner/run_uppercam_bridge.sh`로 별도 실행합니다.
+미션 실행은 launch에 `mission:=true`를 추가합니다. `config/mission.yaml`의 `drive_only` 등 미션 설정을 먼저 확인해 주십시오. 어퍼캠 박스 관측 브리지와 robot_state_publisher도 통합 launch에서 실행합니다. 기존 별도 실행 프로세스와 중복 실행하지 않도록 해 주십시오.
 
 대시보드는 `ros2 run craft_bringup craft_dashboard.sh`로 실행합니다. `group:=perception|planning|control|infra`로 launch 그룹을 나누어 실행할 수도 있습니다.
 

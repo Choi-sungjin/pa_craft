@@ -1,6 +1,8 @@
 #include "plan.hpp"
 
 #include <urdf_parser/urdf_parser.h>
+#include <ament_index_cpp/get_package_share_directory.hpp>
+#include <ament_index_cpp/get_package_prefix.hpp>
 
 #include <cmath>
 #include <cstdlib>
@@ -8,22 +10,57 @@
 
 namespace puck {
 
+namespace {
+bool source_override() {
+  return std::getenv("PUCK_PICK_DIR") || std::getenv("CRAFT_REPO");
+}
+fs::path share(const std::string &package) {
+  return ament_index_cpp::get_package_share_directory(package);
+}
+// Installed defaults are immutable; user calibration and generated plans live separately.
+// Never replace an existing user file, including when upgrading the installed package.
+fs::path writable_defaults(const std::string &package, const std::string &directory) {
+  const auto dest = state_dir() / directory;
+  fs::create_directories(dest);
+  for (const auto &entry : fs::directory_iterator(share(package) / directory)) {
+    if (entry.is_regular_file())
+      fs::copy_file(entry.path(), dest / entry.path().filename(), fs::copy_options::skip_existing);
+  }
+  return dest;
+}
+}
+fs::path state_dir() {
+  if (const char *d = std::getenv("CRAFT_STATE_DIR")) return fs::absolute(d);
+  if (const char *d = std::getenv("XDG_DATA_HOME")) return fs::path(d) / "craft";
+  return home() / ".local/share/craft";
+}
 fs::path here() {
   if (const char *d = std::getenv("PUCK_PICK_DIR")) return fs::path(d);
   if (const char *d = std::getenv("CRAFT_REPO")) return fs::path(d) / "demo/puck_pick";
-  std::error_code ec;
-  auto p = fs::read_symlink("/proc/self/exe", ec).parent_path();
-  while (!ec && !p.empty()) {
-    if (fs::exists(p / "demo/puck_pick/execute.py")) return p / "demo/puck_pick";
-    const auto parent = p.parent_path();
-    if (parent == p) break;
-    p = parent;
-  }
-  return home() / "craft/demo/puck_pick";
+  static const auto path = writable_defaults("craft_planning", "puck_pick");
+  return path;
 }
-fs::path ws() { return here().parent_path().parent_path(); }
-fs::path urdf_path() { return ws() / "src/craft_planning/v75_ws/src/v75_robot_description/urdf/v75_robot.urdf"; }
-fs::path control_yaml() { return ws() / "src/craft_control/config/control.yaml"; }
+fs::path ws() { return source_override() ? here().parent_path().parent_path() : state_dir(); }
+fs::path urdf_path() {
+  return source_override() ? ws() / "src/craft_planning/v75_ws/src/v75_robot_description/urdf/v75_robot.urdf"
+                           : share("craft_planning") / "urdf/v75_robot.urdf";
+}
+fs::path control_yaml() {
+  if (const char *d = std::getenv("CRAFT_CONTROL_CONFIG")) return fs::path(d);
+  return source_override() ? ws() / "src/craft_control/config/control.yaml"
+                           : share("craft_control") / "config/control.yaml";
+}
+fs::path camera_data_dir() {
+  if (const char *d = std::getenv("CRAFT_CAMERA_DATA_DIR")) return fs::path(d);
+  if (const char *d = std::getenv("CRAFT_REPO")) return fs::path(d) / "tools/realsense_check";
+  if (source_override()) return home() / "craft/tools/realsense_check";
+  static const auto path = writable_defaults("craft_sensors", "puck_camera");
+  return path;
+}
+fs::path camera_executable(const std::string &name) {
+  if (source_override()) return camera_data_dir() / "build" / name;
+  return fs::path(ament_index_cpp::get_package_prefix("craft_sensors")) / "lib/craft_sensors" / name;
+}
 fs::path home() {
   const char *h = std::getenv("HOME");
   return fs::path(h ? h : "/");

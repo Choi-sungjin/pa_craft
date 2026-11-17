@@ -13,6 +13,9 @@
 #include <opencv2/core.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
+#ifdef CRAFT_PACKAGED_CAMERA
+#include <ament_index_cpp/get_package_share_directory.hpp>
+#endif
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -25,10 +28,17 @@
 #include <vector>
 
 namespace {
+std::string camera_data_dir() {
+#ifdef CRAFT_PACKAGED_CAMERA
+  return ament_index_cpp::get_package_share_directory("craft_sensors") + "/puck_camera";
+#else
+  return GRIP_YAW_DIR;
+#endif
+}
 // blobs from the top face only (2026-11-15 20:19: with 12-75 mm a lower object beside the prism joined it): the prism
 // is 60 mm tall, its top 48-72 mm over the surface; its top face 20-40 mm across
 const double kHLo = 48.0, kHHi = 72.0, kSideLo = 20.0, kSideHi = 40.0, kGrid = 2.0, kTopBand = 6.0, kPct = 3.0;
-const char * kCal = GRIP_YAW_DIR "/grip_yaw.json";
+std::string kCal;
 
 struct V3 {double x, y, z;};
 V3 operator-(V3 a, V3 b) {return {a.x - b.x, a.y - b.y, a.z - b.z};}
@@ -246,10 +256,11 @@ bool read_cal(double & off, double & sign, const std::string & pre = "") {
 int main(int argc, char ** argv) try {
   auto t0 = std::chrono::steady_clock::now();
   int frames = 10, warm = 0;  // 10 frames in all (user 2026-11-15); a bad first frame is dropped like any other
-  std::string serial = "261622073363", stack, save, photo;
+  std::string serial = "261622073363", stack, save, photo, data_dir;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
-    if (a == "--no-yaw") {centre_only=true;requested_posture="standing";}
+    if (a == "--data-dir" && i + 1 < argc) {data_dir = argv[++i];}
+    else if (a == "--no-yaw") {centre_only=true;requested_posture="standing";}
     else if (a == "--posture" && i+1<argc) {requested_posture=argv[++i];}
     else if (a == "--avoid" && i+2<argc) {double x=std::stod(argv[++i]);double y=std::stod(argv[++i]);avoid_targets.emplace_back(x,y);}
     else if (a == "--target" && i+3<argc) {target_x=std::stod(argv[++i]);target_y=std::stod(argv[++i]);target_radius=std::stod(argv[++i]);}
@@ -260,6 +271,7 @@ int main(int argc, char ** argv) try {
     else if (a == "--save" && i + 1 < argc) {save = argv[++i];}
     else if (a == "--photo" && i + 1 < argc) {photo = argv[++i];}
   }
+  kCal = (data_dir.empty() ? camera_data_dir() : data_dir) + "/grip_yaw.json";
   Cam c{}; std::vector<std::vector<uint16_t>> D; std::string src;
   if (!photo.empty()) {  // --photo PREFIX: record only (2026-11-15, --find at the grasp pose): colour 1280x720 + depth, no reading
     rs2::config cfg; cfg.enable_device(serial);

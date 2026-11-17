@@ -8,6 +8,7 @@
 #include <chrono>
 #include <csignal>
 #include <cstring>
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
@@ -50,8 +51,13 @@ CameraResult camera_run(Runner *node, const std::vector<std::string> &command, d
   int out[2], err[2];
   if (pipe(out) != 0) throw std::runtime_error("camera pipe failed");
   if (pipe(err) != 0) { close(out[0]); close(out[1]); throw std::runtime_error("camera pipe failed"); }
-  std::vector<char *> args; args.reserve(command.size() + 1);
-  for (const auto &s : command) args.push_back(const_cast<char *>(s.c_str()));
+  auto invocation = command;
+  const auto binary = std::filesystem::path(command.front()).filename();
+  if (binary == "upper_puck" || binary == "grip_yaw") {
+    invocation.insert(invocation.end(), {"--data-dir", camera_data_dir().string()});
+  }
+  std::vector<char *> args; args.reserve(invocation.size() + 1);
+  for (const auto &s : invocation) args.push_back(const_cast<char *>(s.c_str()));
   args.push_back(nullptr);
   posix_spawn_file_actions_t actions;
   posix_spawn_file_actions_init(&actions);
@@ -99,7 +105,7 @@ CameraResult camera_run(Runner *node, const std::vector<std::string> &command, d
   if (node && std::find(command.begin(), command.end(), "--photo") == command.end()) {
     try {
       auto msg = role == std::string("uppercam")
-        ? puck::upper_observations(result.out, (puck::home() / "craft/tools/realsense_check/upper_cam_pose.txt").string(), number("UPPER_AHEAD_BIAS_MM"), number("UPPER_LATERAL_BIAS_MM"))
+        ? puck::upper_observations(result.out, (puck::camera_data_dir() / "upper_cam_pose.txt").string(), number("UPPER_AHEAD_BIAS_MM"), number("UPPER_LATERAL_BIAS_MM"))
         : puck::grip_observations(result.out);
       msg.header.stamp = stamp;
       node->publish_observation(role, std::move(msg));
@@ -121,9 +127,9 @@ namespace {
 CameraResult capture(CameraContext &ctx, const std::vector<std::string> &command, double timeout) {
   return ctx.capture ? ctx.capture(command, timeout) : camera_run(ctx.node, command, timeout);
 }
-fs::path camera_bin(const std::string &name) { return home() / "craft/tools/realsense_check/build" / name; }
-fs::path camera_out() { return home() / "craft/tools/realsense_check/out"; }
-fs::path cal_path() { return home() / "craft/tools/realsense_check/stand_cal.json"; }
+fs::path camera_bin(const std::string &name) { return camera_executable(name); }
+fs::path camera_out() { return camera_data_dir() / "out"; }
+fs::path cal_path() { return camera_data_dir() / "stand_cal.json"; }
 std::string timestamp(const char *format) {
   std::time_t t = std::time(nullptr); std::tm local{}; localtime_r(&t, &local);
   char buf[80]; std::strftime(buf, sizeof(buf), format, &local); return buf;
@@ -417,7 +423,11 @@ CameraStepResult standcal_step(CameraContext &ctx,const Json &arg) {
 }
 namespace puck::execute {
 namespace {
-fs::path grip_locate() { return home()/"craft/tools/realsense_check/grip_locate.py"; }
+fs::path grip_locate() {
+  if (!std::getenv("CRAFT_REPO") && !std::getenv("PUCK_PICK_DIR"))
+    throw std::runtime_error("legacy grip_locate modes require the source workflow (CRAFT_REPO); installed picking supports collect/find/lie");
+  return camera_data_dir()/"grip_locate.py";
+}
 void backup_data(const fs::path &p) {
   if(!fs::exists(p))return;
   auto backup=(home()/"port_backup/tools/realsense_check")/p.filename();

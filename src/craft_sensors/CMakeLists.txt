@@ -11,6 +11,7 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 find_package(ament_cmake REQUIRED)
+find_package(ament_index_cpp REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
@@ -25,7 +26,7 @@ find_package(craft_interfaces REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
-find_package(OpenCV 4 REQUIRED COMPONENTS core imgproc imgcodecs)
+find_package(OpenCV 4 REQUIRED COMPONENTS core imgproc imgcodecs dnn)
 find_package(Eigen3 REQUIRED)
 
 add_executable(realsense_processor src/realsense_processor.cpp)
@@ -61,19 +62,43 @@ add_executable(uppercam_find_box_check src/uppercam_find_box_check.cpp src/upper
 target_include_directories(uppercam_find_box_check PRIVATE ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(uppercam_find_box_check ${OpenCV_LIBS} Eigen3::Eigen)
 
+# Existing puck camera tools, packaged with their calibration data.
+set(PUCK_CAMERA_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../tools/realsense_check")
+foreach(camera_tool grip_yaw upper_puck)
+  add_executable(${camera_tool} ${PUCK_CAMERA_DIR}/${camera_tool}.cpp)
+  target_compile_features(${camera_tool} PRIVATE cxx_std_17)
+  target_compile_definitions(${camera_tool} PRIVATE CRAFT_PACKAGED_CAMERA)
+  target_include_directories(${camera_tool} PRIVATE ${OpenCV_INCLUDE_DIRS})
+  target_link_libraries(${camera_tool} realsense2::realsense2 ${OpenCV_LIBS} ament_index_cpp::ament_index_cpp)
+endforeach()
+
 # ROS setup puts /opt/ros/.../librealsense2.so.2.57 (same soname, no CUDA) on LD_LIBRARY_PATH; an old-style
 # DT_RPATH (searched before LD_LIBRARY_PATH, unlike RUNPATH) keeps the binaries on the librealsense they were built with.
 get_filename_component(REALSENSE_LIB_DIR "${realsense2_DIR}/../.." ABSOLUTE)
-set_target_properties(realsense_processor uppercam_bridge PROPERTIES INSTALL_RPATH "${REALSENSE_LIB_DIR}")
+set_target_properties(realsense_processor uppercam_bridge grip_yaw upper_puck PROPERTIES INSTALL_RPATH "${REALSENSE_LIB_DIR}")
 target_link_options(realsense_processor PRIVATE -Wl,--disable-new-dtags)
 target_link_options(uppercam_bridge PRIVATE -Wl,--disable-new-dtags)
+target_link_options(grip_yaw PRIVATE -Wl,--disable-new-dtags)
+target_link_options(upper_puck PRIVATE -Wl,--disable-new-dtags)
 
 install(TARGETS
   realsense_processor
   uppercam_bridge
   uppercam_geometry_check
+  grip_yaw
+  upper_puck
   DESTINATION lib/${PROJECT_NAME})
 
 install(DIRECTORY config DESTINATION share/${PROJECT_NAME})
+install(FILES
+  ${PUCK_CAMERA_DIR}/grip_yaw.json ${PUCK_CAMERA_DIR}/stand_cal.json
+  ${PUCK_CAMERA_DIR}/upper_cam_pose.txt ${PUCK_CAMERA_DIR}/grip_axes.json
+  ${PUCK_CAMERA_DIR}/grip_zero.json ${PUCK_CAMERA_DIR}/grip_ref.json
+  ${PUCK_CAMERA_DIR}/grip_held.json
+  DESTINATION share/${PROJECT_NAME}/puck_camera)
+install(FILES
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../demo/corner/uppercam_selected_calibration.json
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../demo/corner/uppercam_sensor_policy.json
+  DESTINATION share/${PROJECT_NAME}/config)
 
 ament_package()

@@ -23,6 +23,8 @@
   <depend>eigen</depend>
   <depend>libpng-dev</depend>
 
+  <exec_depend>craft_sensors</exec_depend>
+  <exec_depend>craft_control</exec_depend>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>ament_index_python</exec_depend>
   <depend>std_msgs</depend>

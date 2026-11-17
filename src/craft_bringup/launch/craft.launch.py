@@ -87,6 +87,10 @@ def generate_launch_description():
         'uppercam.yolo.model_dir': LaunchConfiguration('uppercam_model_dir'),
         'uppercam.puck_survey.yolo.model_dir': LaunchConfiguration('uppercam_puck_model_dir')}, LaunchConfiguration('params_overlay')]
 
+    mission_in_planning = IfCondition(PythonExpression(
+        ["'", LaunchConfiguration('mission'), "' == 'true' and '",
+         LaunchConfiguration('group'), "' in ('all', 'planning')"]))
+
     masters = [
         Node(package='craft_perception', executable='perception_master', output='screen',
              parameters=perception_params, condition=in_group('perception')),
@@ -107,18 +111,35 @@ def generate_launch_description():
                            LaunchConfiguration('map_file'), "'.endswith('.yaml')"]))),
         # Dice memory mission on top of planning_master (mission:=true); it waits for /mission/command START.
         Node(package='craft_planning', executable='puck_picker', output='screen',
-             condition=IfCondition(LaunchConfiguration('mission'))),
+             condition=mission_in_planning),
         Node(package='craft_planning', executable='mission_master', output='screen', parameters=[mission_yaml, {
                  # its first drive waits for global_localize's "ok" whenever that runs (slam_map:= or amcl)
                  'wait_global_localization': ParameterValue(PythonExpression(find_start), value_type=bool)}, LaunchConfiguration('params_overlay')],
-             condition=IfCondition(LaunchConfiguration('mission'))),
+             condition=mission_in_planning),
     ]
 
     # Everything that is not a master: camera drivers, LiDAR, EKF, SLAM.
-    # Gripper D435 only (C310 removed 2026-11-11); the upper-cam D435 is opened by demo/corner/run_uppercam_bridge.sh.
+    # Gripper D435 and upper-cam bridge.
     nodes = [Node(package='craft_sensors', executable='realsense_processor', output='screen', parameters=[camera_yaml],
                   prefix=f'{DIE_WITH_LAUNCH} nice -n 10',  # camera yields CPU to control/EKF when the Jetson is full
                   condition=IfCondition(LaunchConfiguration('start_cameras')))]
+    robot_urdf = os.path.join(get_package_share_directory('craft_description'), 'urdf', 'v307_full_robot.urdf')
+    with open(robot_urdf, encoding='utf-8') as description:
+        robot_description = description.read()
+    nodes.append(Node(package='robot_state_publisher', executable='robot_state_publisher',
+                      parameters=[{'robot_description': ParameterValue(robot_description, value_type=str)}], output='log',
+                      remappings=[('joint_states', '/control/arm_joints')],
+                      condition=IfCondition(LaunchConfiguration('start_robot_state_publisher'))))
+    sensor_config = os.path.join(get_package_share_directory('craft_sensors'), 'config')
+    nodes.append(Node(package='craft_sensors', executable='uppercam_bridge', output='screen',
+                      prefix=f'{DIE_WITH_LAUNCH} nice -n 10',
+                      parameters=[{
+                          'urdf': os.path.join(get_package_share_directory('craft_description'), 'urdf', 'v307_full_robot.urdf'),
+                          'calibration': os.path.join(sensor_config, 'uppercam_selected_calibration.json'),
+                          'policy': os.path.join(sensor_config, 'uppercam_sensor_policy.json'),
+                          'enable_validated_square': True, 'preview_hz': 15.0,
+                          'color_size': '640x360', 'hires_size': '1920x1080', 'box_size': '640x360'}],
+                      condition=IfCondition(LaunchConfiguration('start_uppercam'))))
     nodes.append(IncludeLaunchDescription(
         os.path.join(get_package_share_directory('lidar_processor'), 'launch',
                      'lidar_processor.launch.py'),
@@ -235,6 +256,10 @@ def generate_launch_description():
                                           'set false when already running on the Pi'),
         DeclareLaunchArgument('start_cameras', default_value='true',
                               description='Start the gripper D435 driver; false for LiDAR-only runs (mapping)'),
+        DeclareLaunchArgument('start_robot_state_publisher', default_value='true',
+                              choices=['true', 'false'], description='Publish the installed robot model and joint TF'),
+        DeclareLaunchArgument('start_uppercam', default_value=LaunchConfiguration('start_cameras'),
+                              choices=['true', 'false'], description='Start the upper-cam bridge'),
         DeclareLaunchArgument('lidar_input_mode', default_value='raw',
                               description='raw: master merges scans; merged: use external /lidar/merged '
                                           '(also set start_lidar:=false)'),

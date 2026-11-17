@@ -45,3 +45,7 @@ tools/*/build/
 /c_cc[[]VMIN]
 /c_cc[[]VTIME]
 /c_cflag
+/dist/
+/build_runtime/
+/install_runtime/
+/log_runtime/
