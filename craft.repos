@@ -1,0 +1,5 @@
+repositories:
+  coin_d4_driver:
+    type: git
+    url: https://github.com/ROBOTIS-GIT/coin_d4_driver.git
+    version: 8277b288902f28b37948b42e1bb80ba59afbba60

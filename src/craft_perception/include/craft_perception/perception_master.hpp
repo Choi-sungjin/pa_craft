@@ -26,6 +26,7 @@
 #include <tf2_ros/transform_listener.h>
 #include <std_msgs/msg/empty.hpp>
 #include <std_msgs/msg/int32_multi_array.hpp>
+#include <sensor_msgs/msg/image.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <std_msgs/msg/u_int64_multi_array.hpp>
@@ -337,11 +338,20 @@ private:
   } barcode_match_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr barcode_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr hires_pub_;  // /perception/uppercam/hires for the bridge
+  rclcpp::Publisher<std_msgs::msg::Int32MultiArray>::SharedPtr barcode_roi_pub_;
+  rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr barcode_crop_sub_;
+  std::mutex barcode_crop_mutex_;
+  cv::Mat barcode_crop_;      // latest raw crop from the bridge
+  double barcode_crop_at_ = 0;
   void publish_hires(bool on);
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr mission_event_pub_;
   TrafficLightCounter traffic_light_;
   rclcpp::Publisher<msg::TrafficLight>::SharedPtr traffic_light_pub_;
   rclcpp::Subscription<std_msgs::msg::Empty>::SharedPtr traffic_light_reset_sub_;
+  // /mission/state is ReadBarcode: read the barcode even if this node has not counted the light itself (fakesign).
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr mission_state_sub_;
+  bool mission_reads_barcode_ = false;  // under traffic_light_mutex_
+  bool mission_past_barcode_ = false;  // mission left ReadBarcode: no signal / barcode until Idle, WatchSignal or reset
   rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr object_pub_, obstacle_pub_, lidar_obstacle_pub_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
   rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr diagnostics_pub_;

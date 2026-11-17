@@ -40,6 +40,19 @@ struct PixelColorConfig {
   // true: package order (ring hue first, position when no ring).
   bool use_ring_hue = true;
   double upright_ratio = 1.3;    // box taller than this x its width = an upright tower
+  // true (2026-11-14): the color from the unlit lenses above the lit lamp, not from fixed cuts or the glow hue.
+  // In the centre column of the box, between the cap and the top of the biggest lit blob, count the rows whose
+  // lens reads red and orange: none -> red lit, red only -> yellow, red + orange -> green. Tilt and a box cut
+  // short do not move the order of the lenses (cuts failed on a leaning tower, glow hue on mission_1114_1706).
+  bool use_blocks = false;
+  double block_column = 0.4;        // centre column width / box width
+  int block_min_saturation = 90;    // lens pixel: S >= this, block_min_value <= V < bright_v
+  int block_min_value = 60;
+  double block_row_share = 0.5;     // a row counts when this share of its column pixels are lens pixels
+  double block_red_hue_below = 9, block_red_hue_from = 165;  // red lens hue: < below or >= from
+  double block_orange_hue_max = 31;                           // orange (yellow) lens: below .. this
+  double block_red_min = 0.07;      // red rows / box height for a red lens above (R <= 0.04, Y >= 0.05..0.26)
+  double block_orange_min = 0.08;   // orange rows / box height for an orange lens above (Y <= 0.03, G >= 0.13)
 };
 // Lit color of the tower in `box` (pixels method), nullopt = unlit or not measurable.
 std::optional<LightColor> measure_light_color(const cv::Mat &bgr, const cv::Rect2f &box,
@@ -66,6 +79,12 @@ struct TrafficLightConfig {
   // pixels: the tower box (best of the sign classes above + off_class_id, score >= locate_min_score).
   int off_class_id = 4;
   float locate_min_score = 0.3f;
+  // pixels: tower boxes are upright; a box with height < this x width is not the tower (2026-11-14: YOLO calls the
+  // white barcode label sign_yellow, 48x16 px, and its paper passes the lit test).
+  double tower_min_aspect = 1.0;
+  // pixels: no tower box this frame -> the last one, if seen within this [s] (the tower stands still; 2026-11-14,
+  // bag mission_1114_1703 in a dark room: YOLO lost the tower on 1-4 frames at the end of most blinks). 0 = off.
+  double hold_box_s = 0.0;
   PixelColorConfig pixels;
 };
 
@@ -110,17 +129,20 @@ public:
   bool valid() const;
 
 private:
-  std::optional<LightColor> frame_color(const std::vector<Detection> &detections, const cv::Mat &bgr) const;
+  std::optional<LightColor> frame_color(double stamp_s, const std::vector<Detection> &detections, const cv::Mat &bgr);
   std::optional<BlinkEvent> close_blink();
   void end_cycle();
 
   TrafficLightConfig config_;
   bool active_ = false;
   bool complete_ = false;
+  bool overflow_ = false;  // this cycle went past expected_blinks: discarded, blinks ignored until it ends
   bool cycle_open_ = false;  // a lit frame was seen since the last cycle end
   int discarded_cycles_ = 0;
   std::string last_discard_;
   double start_s_ = 0, last_lit_s_ = 0;
+  std::optional<cv::Rect2f> last_tower_;
+  double last_tower_s_ = 0;
   std::array<int, 3> votes_{0, 0, 0};
   std::vector<BlinkEvent> blinks_;
   std::vector<std::string> rejected_;

@@ -287,14 +287,28 @@ def fake(tmp_path, monkeypatch, request):
         'require_lidar_localization': getattr(request, 'param', None) in ('localization', 'localization_missing'),
         'localization_observation_timeout_s': 0.0 if getattr(request, 'param', None)=='bad_localization_timeout' else .3,
         # One box in the middle of the 4 x 4 m room (not in the map: only the approach matters here).
-        'box_approach.camera_enabled': getattr(request, 'param', None) in ('camera', 'camera_500', 'camera_segmented', 'camera_only'),
-        'box_approach.camera_only_longitudinal': getattr(request, 'param', None) == 'camera_only',
+        'box_approach.camera_enabled': getattr(request, 'param', None) in ('camera', 'camera_500', 'camera_segmented', 'camera_only', 'dock_offset'),
+        'box_approach.camera_only_longitudinal': getattr(request, 'param', None) in ('camera_only', 'dock_offset'),
         'box_approach.dock_lookahead': 0.0 if getattr(request, 'param', None) == 'bad_dock_lookahead_zero' else (-.01 if getattr(request, 'param', None) == 'bad_dock_lookahead_negative' else .020),
         'box_approach.camera_calibrated_gap_min': .009 if getattr(request, 'param', None) == 'bad_camera_range_lower' else .010,
         'box_approach.camera_calibrated_gap_max': .081 if getattr(request, 'param', None) == 'bad_camera_range_upper' else .080,
         'box_approach.settle_s': .05 if getattr(request, 'param', None) in ('camera', 'camera_500', 'camera_segmented') else .5,
         'box_approach.max_corrections': 1 if getattr(request, 'param', None) == 'global_local' else 0,
-        'box_approach.names':['L1', 'L2', 'L3', 'B'], 'box_approach.B':[2.5, 2.5, 90.0]}}}))
+        'box_approach.B_faces':['E', 'N', 'W', 'S'],
+        'box_approach.names':['S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'L1', 'L2', 'L3', 'B'], 'box_approach.B':[2.5, 2.5, 90.0]}}}))
+    if getattr(request, 'param', None) == 'dock_offset':
+        override_path = tmp_path / 'override.yaml'
+        settings = yaml.safe_load(override_path.read_text())
+        settings['planning_master']['ros__parameters'].update({
+            'box_approach.one_shot': False, 'box_approach.settle_s': .05,
+            'box_approach.front_face_x': .165, 'box_approach.front_lidar_x': .155,
+            'box_approach.camera_final_gap': .010, 'box_approach.camera_speed': .005,
+            'box_approach.camera_lateral': False, 'box_approach.lidar_track_until_m': .01,
+            'box_approach.lidar_window_s': .1, 'box_approach.dock_update_period_s': .05})
+        override_path.write_text(yaml.safe_dump(settings))
+    # ROS YAML treats bare N as a bool; keep the compass label a string.
+    override = tmp_path / 'override.yaml'
+    override.write_text(override.read_text().replace("    - N\n", "    - 'N'\n"))
     context = Context(); rclpy.init(context=context)
     node = rclpy.create_node('fake_control',context=context)
     binary = Path(get_package_prefix('craft_planning'))/'lib/craft_planning/planning_master'
@@ -1272,3 +1286,133 @@ def test_camera_only_ignores_lidar_gap_at_the_stage(fake):
     f = fake; f.box_observation_gap = .09  # LiDAR says already inside handoff_gap: the old flow failed here
     camera_only_reach_dock(f)
     assert f.state == 'Run.Execute'
+
+
+def pick_link(f):
+    results = []
+    pub = f.node.create_publisher(TaskCommand, '/planning/pick_step', 10)
+    f.node.create_subscription(TaskResult, '/planning/pick_step_result', results.append, 10)
+    f.run_for(.2)
+    return pub, results
+
+
+def test_pick_taught_command_preserves_timing_and_correlates_result(fake):
+    f = fake; pub, results = pick_link(f)
+    c = TaskCommand(task_id=42, kind=TaskCommand.MANIPULATOR, duration_s=2.0, tolerance_rad=.008)
+    c.joints.name = JOINTS; c.joints.position = [0., .1, .2, .3, .4]
+    c.position_i_gains = [10, 20, 30, 40]
+    pub.publish(c)
+    f.wait(lambda: len(f.starts()) == 1)
+    sent = f.starts()[0]
+    assert sent.task_id != 42 and sent.joints.position == c.joints.position
+    assert sent.duration_s == 2.0 and sent.tolerance_rad == .008
+    assert sent.position_i_gains == c.position_i_gains
+    assert not f.rejected_while_held
+    f.result_id = sent.task_id - 1; f.result_status = TaskResult.SUCCEEDED
+    f.run_for(.15); assert not results
+    f.result_id = sent.task_id
+    f.wait(lambda: results)
+    assert results[-1].task_id == 42 and results[-1].status == TaskResult.SUCCEEDED
+
+
+def test_pick_back_out_exact_distance_and_stop_failure(fake):
+    f = fake; f.position = (1., 1.); pub, results = pick_link(f)
+    c = TaskCommand(task_id=43, kind=TaskCommand.NAVIGATE, speed=-.28)
+    c.header.frame_id = 'B'; pub.publish(c)
+    f.wait(lambda: len(f.starts()) == 1)
+    sent = f.starts()[0]
+    assert sent.speed < 0
+    start, end = sent.path.poses[0].pose.position, sent.path.poses[-1].pose.position
+    assert math.hypot(end.x - start.x, end.y - start.y) == pytest.approx(.28)
+    f.op('STOP'); f.wait(lambda: results)
+    assert results[-1].task_id == 43 and results[-1].status == TaskResult.FAILED
+
+
+def test_pick_rejects_busy_and_invalid_requests(fake):
+    f = fake; pub, results = pick_link(f)
+    pub.publish(TaskCommand(task_id=44, kind=TaskCommand.CLOCK, clock_slot=99))
+    f.wait(lambda: results)
+    assert results[-1].status == TaskResult.REJECTED and not f.starts()
+    f.goal(); f.wait(lambda: f.state == 'Run.Execute')
+    pub.publish(TaskCommand(task_id=45, kind=TaskCommand.CLOCK, clock_slot=12))
+    f.wait(lambda: len(results) == 2)
+    assert results[-1].task_id == 45 and results[-1].status == TaskResult.REJECTED
+
+
+@pytest.mark.parametrize('fake', ['camera_only'], indirect=True)
+def test_pick_redock_from_28cm_uses_lidar_before_camera(fake):
+    f = fake; pub, results = pick_link(f)
+    gap = .30
+    f.position = (2.5 - .1025 - .165 - gap, 2.5); f.yaw = 0.
+    f.box_observation_gap = gap
+    f.run_for(.1)
+    c = TaskCommand(task_id=46, kind=TaskCommand.NAVIGATE)
+    c.header.frame_id = 'B'; pub.publish(c)
+    f.wait(lambda: len(f.starts()) == 1)
+    sent = f.starts()[0]
+    assert sent.speed > 0 and not sent.camera_distance_control
+    assert f.box_request.source == 'lidar'
+    assert not f.rejected_while_held and not results
+    # Trigger-mode docking uses the current project's tracking settings, then the upper cam stops it.
+    f.box_observation_gap = .05
+    f.wait(lambda: f.box_request.source == 'uppercam')
+    f.box_observation_gap = .020
+    f.wait(lambda: results)
+    assert results[-1].task_id == 46 and results[-1].status == TaskResult.SUCCEEDED
+    assert len(f.starts()) == 1  # no trip back to a stage pose
+
+
+def test_pick_blocked_back_out_does_not_shorten_distance(fake):
+    f = fake; f.position = (1., 1.); pub, results = pick_link(f)
+    f.obstacles = [(.50, 1.)]  # blocks 28 cm endpoint; a shorter back-out would be clear
+    f.run_for(.1)
+    c = TaskCommand(task_id=47, kind=TaskCommand.NAVIGATE, speed=-.28)
+    c.header.frame_id = 'B'; pub.publish(c)
+    f.run_for(.6)
+    assert not f.starts() and not results
+    f.obstacles = []
+    f.wait(lambda: len(f.starts()) == 1)
+    poses = f.starts()[0].path.poses
+    assert poses[0].pose.position.x - poses[-1].pose.position.x == pytest.approx(.28)
+
+
+@pytest.mark.parametrize('fake', ['dock_offset'], indirect=True)
+@pytest.mark.parametrize('near', [False, True])
+def test_dock_left_offset_on_initial_update_and_redock(fake, near):
+    """Only fake sensors/transport in an isolated domain; production dock path and YAML offset."""
+    f = fake
+    if near:
+        pub, _ = pick_link(f)
+        f.position = (2.5 - .1025 - .165 - .30, 2.5); f.yaw = 0.
+        f.box_observation_gap = .30
+        f.run_for(.1)
+        request = TaskCommand(task_id=146, kind=TaskCommand.NAVIGATE)
+        request.header.frame_id = 'B'; pub.publish(request)
+        f.wait(lambda: len(f.starts()) == 1)
+        dock = f.starts()[0]
+    else:
+        f.position = (.5, 2.5); f.box_observation_gap = .30
+        f.pubs['/planning/approach_box'].publish(String(data='B'))
+        f.wait(lambda: len(f.starts()) == 1)
+        stage = f.starts()[0].path.poses[-1].pose
+        q = stage.orientation
+        f.yaw = math.atan2(2*(q.w*q.z+q.x*q.y), 1-2*(q.y*q.y+q.z*q.z))
+        f.position = (stage.position.x, stage.position.y); f.result_status = TaskResult.SUCCEEDED
+        f.wait(lambda: len(f.starts()) == 2)
+        dock = f.starts()[1]
+    def lateral_target(command, center_y):
+        # West face, heading 0: robot +y LEFT is map +y. Extension stays on that line.
+        end = command.path.poses[-1].pose
+        assert math.atan2(2*end.orientation.w*end.orientation.z,
+                          1-2*end.orientation.z**2) == pytest.approx(0., abs=1e-8)
+        assert end.position.y - center_y == pytest.approx(.0015, abs=1e-8)
+    lateral_target(dock, 2.5)
+    # Renew the LiDAR line with a new measured box; offset must be applied once again.
+    begin = len(f.commands); f.box_lidar_pose_shift = .004
+    f.wait(lambda: any(c.operation == TaskCommand.UPDATE_PATH and c.task_id == dock.task_id and
+                       abs(c.path.poses[-1].pose.position.y - 2.5055) < 1e-8
+                       for c in f.commands[begin:]))
+    updates = [c for c in f.commands[begin:] if c.operation == TaskCommand.UPDATE_PATH]
+    lateral_target(updates[-1], 2.504)
+    f.run_for(.2)
+    lateral_target([c for c in f.commands if c.operation == TaskCommand.UPDATE_PATH][-1], 2.504)

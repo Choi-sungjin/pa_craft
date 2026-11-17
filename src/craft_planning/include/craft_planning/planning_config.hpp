@@ -5,6 +5,8 @@
 #include "craft_planning/path_planner.hpp"
 #include "craft_planning/state_machine.hpp"
 
+#include <craft_interfaces/msg/task_command.hpp>
+#include <optional>
 #include <array>
 #include <map>
 #include <string>
@@ -13,6 +15,10 @@
 namespace rclcpp {class Node;}
 
 namespace craft_planning {
+
+// Map x/y and dock heading. Positive lateral_offset is LEFT in the dock's robot frame.
+// Always derive from the measured box, so repeated path updates never accumulate the offset.
+std::array<double, 3> box_dock_goal(const BoxTarget &box, double face_normal, double lateral_offset);
 
 struct PlanningStep {
   std::string id;
@@ -27,6 +33,7 @@ struct PlanningStep {
   double duration_s = 0.0;
   std::string box;  // Navigate to this box_approach box (/planning/approach_box) instead of goal
   bool box_near_entry = false;  // explicit held near-box entry, without stage motion
+  double dock_lateral = 0;  // [m] puck re-dock: added to box_approach.lateral_offset (+y left in dock heading)
   // Navigate (/planning/target_base_route): points the route passes before goal, in order (PathPlanner::plan via).
   std::vector<geometry_msgs::msg::Point> via;
   // /planning/leave_box: back straight out (the robot keeps its heading) box_approach.reverse_distance, down to
@@ -34,6 +41,9 @@ struct PlanningStep {
   // where no route can start ("Start is in an obstacle"); this undoes the dock line first. leave_from: box name, log only.
   bool leave = false;
   std::string leave_from;
+  double leave_distance = 0.0;  // explicit distance: never shorten a regrasp back-out
+  uint64_t pick_request_id = 0;
+  std::optional<craft_interfaces::msg::TaskCommand> taught_command;
 };
 
 // Driving up to a box (/planning/approach_box <name>): PathPlanner::plan_box with the box from the list, the goal
@@ -61,17 +71,22 @@ struct BoxApproachConfig {
   double observation_initial_timeout = 3.0;
   double camera_calibrated_gap_min = 0.010, camera_calibrated_gap_max = 0.080;
   double camera_operational_gap_max = 0.200;
-  double front_lidar_x = 0.155, front_lidar_fov_deg = 180.0;
+  double front_lidar_x = 0.203, front_lidar_fov_deg = 180.0;
   int camera_confirm_count = 3;
+  // After the dock is accepted: turn in place by the remaining heading error to the box face (upper cam, mean of the
+  // confirm frames) when it is above dock_final_yaw_tolerance_deg and not above dock_final_yaw_max_deg (larger =
+  // a bad measurement: left as it is). The turn runs at control's slow goal turn (wheel_goal_rotate_*).
+  double dock_final_yaw_tolerance_deg = 0.5, dock_final_yaw_max_deg = 10.0;
   double speed = 0.20;          // [m/s]
   double gap = 0.08;            // [m] LiDAR front face -> box face at the goal
-  double front_face_x = 0.165;  // [m] axle midpoint to LiDAR front face, measured 2026-11-09
+  double front_face_x = 0.213;  // [m] base_link to LiDAR front face (0.165 axle midpoint + 0.048, base_link moved back 2026-11-15)
   double side = 0.205;          // [m]
   double max_offset = 0.5;       // [m] a perceived box farther than this from the expected position is another box
   // At the face goal: stand still settle_s, perceive again, check the alignment; out of tolerance, back out
   // reverse_distance along the approach at reverse_speed and approach the same face again, at most max_corrections.
   double settle_s = 0.5;             // [s]
   double lateral_tolerance = 0.005;  // [m]
+  double lateral_offset = 0.0015;   // [m] robot +y (left), user 2026-11-16; all box faces
   double yaw_tolerance = 0.0175;     // [rad]
   int max_corrections = 3;
   double reverse_distance = 0.30;    // [m]
@@ -86,18 +101,24 @@ struct BoxApproachConfig {
   double reorient_deg = 10.0;   // [deg] a box measured turned more from the face approached: plan again
   // The robot at the stage point further than this off the measured box's dock line (sideways [m], heading [deg]):
   // to the measured box's stage point, square to it, and the LiDAR measures again there (once per box step).
-  double restage_lateral_m = 0.04, restage_yaw_deg = 2.0, restage_reverse_deg = 10.0;
-  // One stage (user, 2026-11-13): driving to the stage point the LiDAR looks for the box all the way; once it sees it
-  // (splice_samples scans in a row), the dock path (the stage path up to a junction, a curve of at least
-  // dock_min_radius onto the face normal, dock_straight straight) replaces the stage path at once and is made again from every new LiDAR median (dock_update_period_s) until the
-  // LiDAR gap is dock_lidar_until_gap; from there the path holds and the upper cam stops it. Not seen by the stage
-  // point: the stop, measure, dock steps as before.
+  double restage_lateral_m = 0.04, restage_yaw_deg = 2.0;
+  // One stage (user, 2026-11-14): the LiDAR looks for the box all the way to the stage point; seen in splice_samples
+  // scans in a row, the stage drive ends on an L (arc of dock_corner_radius) onto the measured box's face normal at its
+  // stage point, square to the face; there the robot stops and measures standing, the dock as before.
   bool one_shot = false;
   int splice_samples = 3;
-  double dock_update_period_s = 0.2, dock_lidar_until_gap = 0.15;
-  double dock_min_radius = 0.30;  // [m] one stage: a dock curve tighter than this is not sent
+  double dock_corner_radius = 0.30;  // [m]
+  double dock_update_period_s = 0.2;  // [s] how often the dock line is made again (LiDAR track, camera_lateral)
+  // The dock line from the LiDAR until this far [m] from the face goal (odometry), then held and the upper cam
+  // stops it (user 2026-11-15). 0 = the upper cam from the start of the dock, the path held all the way.
+  double lidar_track_until_m = 0.28;
+  // The dock in the upper cam's range: the dock line from the upper cam (median of camera_track_samples frames
+  // within camera_track_max_yaw_deg of square, at most camera_track_max_jump from the box the path goes by).
+  bool camera_lateral = false;
+  int camera_track_samples = 3;
+  double camera_track_max_yaw_deg = 10.0, camera_track_max_jump = 0.03;
   double final_yaw_tolerance = 0.0698;  // [rad] (4 deg) the upper cam check at the end of a dock
-  double dock_reference_x = 0.165;  // [m] base_link x of the point the dock tracks (0 = base_link, front_face_x = LiDAR front)
+  double dock_reference_x = 0.0;  // [m] base_link x of the point the dock tracks (0 = base_link, front_face_x = LiDAR front)
   double dock_lookahead = 0.020;       // [m] target distance from the front reference during dock tracking
   double dock_goal_tolerance = 0.01;   // [m] the dock's arrival distance (yaw_tolerance its fine alignment)
   double reverse_speed = 0.10;       // [m/s]

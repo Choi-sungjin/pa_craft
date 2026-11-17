@@ -147,7 +147,7 @@ control_master:
     # OpenCR must accept/report unwrapped motor radians (e.g. 12 -> 7 commands -5*pi/6).
     clock_slot_count: 12
     clock_slot_angle: 0.5235987755982988  # [motor rad/slot] 30 degrees
-    clock_zero_angle: 1.825614  # [motor rad] 104.6 degrees, slot 12 at the loading guide (2026-11-14 user; was 153.4 earlier the same day, 75.4 (11-11), 164.4, 135.2, 45.4, 44.8, 73.9, 166.4)
+    clock_zero_angle: 0.479966  # [motor rad] 27.5 degrees, slot 12 at the loading guide (2026-11-16 user, checkwheel; was 104.6 (11-14), 153.4 earlier on 11-14, 75.4 (11-11), 164.4, 135.2, 45.4, 44.8, 73.9, 166.4)
     # Firmware clock zero_tick stays 0: apply this offset here only.
     # Recheck physical alignment after a motor power cycle/multi-turn reset.
     clock_direction: 1.0  # +1: CCW motor rotation increases slot numbers; -1: reverse
@@ -164,7 +164,7 @@ control_master:
     # frame if any value falls outside its limits, so limits must be exactly representable.
     # The lying-puck grasp (URDF elbow 196.4, wrist -135.1 deg) stays inside these limits.
     arm_min_angle: [0.8657, 0.7209, -1.8448, -3.0543]
-    arm_max_angle: [3.1415, 5.3092, 2.5848, 3.0543]
+    arm_max_angle: [3.1415, 5.3092, 2.5848, 4.7124]  # tool_roll 270 deg (2026-11-15, was 3.0543 = 175; firmware kBootCenters)
 
     # Rotational part of /ik_solution; ControlMaster routes slide_joint to LmController.
     arm_ik_joint_names: [shoulder_joint, elbow_joint, wrist_pitch_joint, tool_roll_joint]
@@ -208,7 +208,7 @@ control_master:
     # the URDF slide limits.
     # Before: measured 579.6 to 1511.3 degrees (2026-11-05, guide moved; was -399.4 to 509.2, -391.8 to 527.5).
     # 5-degree margin below. Keep equal to firmware/lm_arm/config.h.
-    lm_min_angle: 2.4645  # [motor rad] 141.2 degrees, 4 decimals rounded inward (was 10.2032 = 584.6)
+    lm_min_angle: 1.7035  # [motor rad] 97.6 degrees (user measured 2026-11-15, slide -43.0 mm; was 2.4645 = 141.2 from the 11-07 end 136.2)
     lm_max_angle: 18.2735  # [motor rad] 1047.0 degrees, 4 decimals rounded inward (was 26.2898 = 1506.3)
     # Motor raw + and URDF slide_joint + (axis -X) both move the carriage toward the LM motor.
     lm_motor_direction: 1.0

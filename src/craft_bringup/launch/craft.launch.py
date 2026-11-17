@@ -2,7 +2,7 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import (DeclareLaunchArgument, EmitEvent, ExecuteProcess, GroupAction, IncludeLaunchDescription,
+from launch.actions import (DeclareLaunchArgument, EmitEvent, GroupAction, IncludeLaunchDescription,
                             RegisterEventHandler, OpaqueFunction, SetLaunchConfiguration)
 from launch.events import matches_action
 from lifecycle_msgs.msg import Transition
@@ -41,15 +41,6 @@ def validate_localization_inputs(context):
     return []
 
 
-def repo_root():
-    """The craft checkout: this file through the --symlink-install link, else CRAFT_REPO, else ~/craft."""
-    here = os.path.realpath(__file__)
-    for parent in [os.path.dirname(here)] + [here.rsplit(os.sep, k)[0] for k in range(2, 6)]:
-        if os.path.isfile(os.path.join(parent, 'demo', 'corner', 'global_localize.py')):
-            return parent
-    return os.environ.get('CRAFT_REPO', os.path.expanduser('~/craft'))
-
-
 def generate_launch_description():
     ekf_yaml = os.path.join(get_package_share_directory('craft_perception'), 'config', 'ekf.yaml')
     slam_yaml = os.path.join(get_package_share_directory('craft_perception'), 'config', 'slam.yaml')
@@ -62,7 +53,7 @@ def generate_launch_description():
                                           'slam_localization.yaml')
     localize_in_map = ["'", LaunchConfiguration('slam_map'), "' != ''"]  # slam_map:= set: localization mode
     amcl_yaml = os.path.join(get_package_share_directory('craft_perception'), 'config', 'amcl.yaml')
-    # global_localize.py runs (and mission_master waits for it) in a saved map: slam_map:= or localization:=amcl.
+    # global_localize runs (and mission_master waits for it) in a saved map: slam_map:= or localization:=amcl.
     find_start = ["(", *localize_in_map, " or '", LaunchConfiguration('localization'), "' == 'amcl') and '",
                   LaunchConfiguration('global_localize'), "' == 'true'"]
     # lidar_odom:=true: ekf.yaml + ekf_lidar.yaml (LiDAR odometry x/y); repeating ekf.yaml is a no-op.
@@ -94,7 +85,7 @@ def generate_launch_description():
         'localization_scan.max_slope_deg': ParameterValue(LaunchConfiguration('mapping_tilt_deg'), value_type=float),
         'd435.yolo.model_dir': LaunchConfiguration('d435_model_dir'),
         'uppercam.yolo.model_dir': LaunchConfiguration('uppercam_model_dir'),
-        'uppercam.puck_survey.yolo.model_dir': LaunchConfiguration('uppercam_puck_model_dir')}]
+        'uppercam.puck_survey.yolo.model_dir': LaunchConfiguration('uppercam_puck_model_dir')}, LaunchConfiguration('params_overlay')]
 
     masters = [
         Node(package='craft_perception', executable='perception_master', output='screen',
@@ -102,10 +93,10 @@ def generate_launch_description():
         Node(package='craft_planning', executable='planning_master', output='screen',
              parameters=[planning_yaml, rates_yaml, {'map_file': LaunchConfiguration('map_file'), 'require_arm_joints': arm_enabled,
                                                     'require_lidar_localization': ParameterValue(
-                                                        LaunchConfiguration('wheel_free'), value_type=bool)}],
+                                                        LaunchConfiguration('wheel_free'), value_type=bool)}, LaunchConfiguration('params_overlay')],
              condition=in_group('planning')),
         Node(package='craft_control', executable='control_master', output='screen',
-             parameters=[control_yaml, rates_yaml, {'arm_enabled': arm_enabled}], condition=in_group('control')),
+             parameters=[control_yaml, rates_yaml, {'arm_enabled': arm_enabled}, LaunchConfiguration('params_overlay')], condition=in_group('control')),
         # The planning map (map_file:=, a .yaml such as brief_arena1cm) on /planning/map for RViz "planning map" and
         # craft_tui; planning_master loads the file itself and publishes only /planning/padding.
         LifecycleNode(package='nav2_map_server', executable='map_server', name='planning_map_server', namespace='',
@@ -115,9 +106,11 @@ def generate_launch_description():
                           ["'", LaunchConfiguration('group'), "' in ('all', 'planning') and '",
                            LaunchConfiguration('map_file'), "'.endswith('.yaml')"]))),
         # Dice memory mission on top of planning_master (mission:=true); it waits for /mission/command START.
+        Node(package='craft_planning', executable='puck_picker', output='screen',
+             condition=IfCondition(LaunchConfiguration('mission'))),
         Node(package='craft_planning', executable='mission_master', output='screen', parameters=[mission_yaml, {
                  # its first drive waits for global_localize's "ok" whenever that runs (slam_map:= or amcl)
-                 'wait_global_localization': ParameterValue(PythonExpression(find_start), value_type=bool)}],
+                 'wait_global_localization': ParameterValue(PythonExpression(find_start), value_type=bool)}, LaunchConfiguration('params_overlay')],
              condition=IfCondition(LaunchConfiguration('mission'))),
     ]
 
@@ -139,9 +132,10 @@ def generate_launch_description():
                       parameters=ekf_params, remappings=[('odometry/filtered', '/odometry/global')],
                       condition=IfCondition(localization_is('ekf'))))
     # RViz: EKF odometry as a persistent point trail (/odometry/local/trail, latched Marker POINTS).
-    nodes.append(Node(package='craft_bringup', executable='odom_trail.py', name='odom_trail', output='log'))
-    # RViz: where the box was asked for and where it was detected (/perception/box/markers, box_marker.py).
-    nodes.append(Node(package='craft_bringup', executable='box_marker.py', name='box_marker', output='log'))
+    nodes.append(Node(package='craft_bringup', executable='odom_trail', name='odom_trail', output='log'))
+    # RViz: where the box was asked for and where it was detected (/perception/box/markers, box_marker).
+    nodes.append(Node(package='craft_bringup', executable='box_marker', name='box_marker', output='log'))
+    nodes.append(Node(package='craft_bringup', executable='puck_marker', name='puck_marker', output='log'))
     # 2D SLAM, started directly (online_async_launch.py takes no remaps and defaults to sim time).
     # LiDAR-derived outputs live under /perception/lidar/; input stays /lidar/merged (slam.yaml).
     # slam_map:=<base> localizes in a saved pose graph instead (slam_localization.yaml, /initialpose).
@@ -162,13 +156,12 @@ def generate_launch_description():
     # slam_map:= (localization mode): where the robot stands, matched over the whole map (run_corner.py's global
     # localization) -> /initialpose, status on /perception/localization/global. The map: the pose graph's own yaml.
     # localization:=amcl: the scan is matched to the planning map (map_file:=) itself, no slam_toolbox.
-    nodes.append(ExecuteProcess(
-        cmd=['/usr/bin/python3', os.path.join(repo_root(), 'demo', 'corner', 'global_localize.py'),
-             '--map', PythonExpression(["'", LaunchConfiguration('map_file'), "' if '", LaunchConfiguration('localization'),
+    nodes.append(Node(
+        package='craft_bringup', executable='global_localize', name='global_localize', output='screen',
+        arguments=['--map', PythonExpression(["'", LaunchConfiguration('map_file'), "' if '", LaunchConfiguration('localization'),
                                         "' == 'amcl' else '", LaunchConfiguration('slam_map'), ".yaml'"]),
              '--near', LaunchConfiguration('initial_x'), LaunchConfiguration('initial_y'),
              '--yaw', LaunchConfiguration('initial_yaw')],
-        name='global_localize', output='screen',
         condition=IfCondition(PythonExpression(find_start))))
     nodes.append(GroupAction([slam,
               EmitEvent(event=ChangeState(lifecycle_node_matcher=matches_action(slam),
@@ -197,6 +190,9 @@ def generate_launch_description():
         # itself is killed or its ssh drops: no orphan nodes left running (2026-11-12). A node with its own
         # prefix= must start with DIE_WITH_LAUNCH too.
         SetLaunchConfiguration('launch-prefix', DIE_WITH_LAUNCH),
+        # Empty default overlay preserves hardware launch behavior; external harnesses may override per-node ports/tasks.
+        DeclareLaunchArgument('params_overlay', default_value=slam_none_yaml,
+                              description='Optional per-node ROS parameter overlay (default has no application parameters)'),
         DeclareLaunchArgument('wheel_free', default_value='false', choices=['true', 'false'],
                               description='Exclude wheel odometry from EKFs; requires lidar_odom:=true'),
         DeclareLaunchArgument('lidar_fov_deg', default_value='180.0',
@@ -222,12 +218,12 @@ def generate_launch_description():
                                           '(e.g. /home/craft/maps/arena3_clean); empty = build a new map'),
         DeclareLaunchArgument('global_localize', default_value='true', choices=['true', 'false'],
                               description='with slam_map:=, find the robot over the whole map at start-up '
-                                          '(demo/corner/global_localize.py -> /initialpose)'),
-        DeclareLaunchArgument('initial_x', default_value='0.600',  # user 2026-11-14: start (0.6, 1.0), facing -x
+                                          '(craft_bringup global_localize -> /initialpose)'),
+        DeclareLaunchArgument('initial_x', default_value='0.662',  # user 2026-11-14: start (0.6, 1.0), facing -x; +0.048 base_link moved back 2026-11-15
                               description='rough start position x [m, map]: global_localize searches within 0.5 m'),
         DeclareLaunchArgument('initial_yaw', default_value='180.0',
                               description='start heading [deg, map]: global_localize searches within 20 deg of it'),
-        DeclareLaunchArgument('initial_y', default_value='1.000',
+        DeclareLaunchArgument('initial_y', default_value='1.081',
                               description='rough start position y [m, map] (start zone, user 2026-11-12)'),
         DeclareLaunchArgument('slam_search', default_value='wide', choices=['narrow', 'wide'],
                               description='scan-match position search: narrow +-5 cm (slam.yaml) or wide '

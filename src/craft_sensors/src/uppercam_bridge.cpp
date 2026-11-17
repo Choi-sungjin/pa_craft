@@ -9,6 +9,9 @@
 //        /perception/uppercam/image_raw/compressed (JPEG preview at preview_hz, only with a subscriber)
 //   in : /perception/uppercam/hires (std_msgs/Bool, transient local; 2026-11-14): true = colour at hires_size (the
 //        mission barcode, read only at 1080p), false = color_size. The pipeline restarts on a change (~1 s gap).
+//   in : /perception/uppercam/barcode_roi (Int32MultiArray [x, y, w, h], colour pixels; w 0 = none)
+//   out: /perception/uppercam/barcode_crop (sensor_msgs/Image bgr8, that region of the raw colour frame, every hires
+//        frame): the barcode bars without JPEG blocks (user 2026-11-14).
 // Differences: the geometry runs in this process on the camera thread (C++ is ~4x faster than the Python workers, so
 // no worker pool); the Python file-hash manifest check is gone (it pinned the Python files; this port was checked
 // against them on boxgap_1108_1236 instead: same detections, holdout MAE 1.41 vs 1.43 mm); box_depth reproject and
@@ -19,11 +22,14 @@
 #include <craft_interfaces/msg/box_observation_request.hpp>
 #include <geometry_msgs/msg/pose_array.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <cstring>
 #include <librealsense2/rs.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/compressed_image.hpp>
+#include <sensor_msgs/msg/image.hpp>
+#include <std_msgs/msg/int32_multi_array.hpp>
 #include <sensor_msgs/msg/laser_scan.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/string.hpp>
@@ -123,10 +129,11 @@ public:
     const auto calibration = declare_parameter<std::string>("calibration");
     const auto policy = declare_parameter<std::string>("policy");
     serial_ = declare_parameter<std::string>("serial", "261322075477");
+    const bool camera_enabled = declare_parameter<bool>("camera_enabled", true);
     const auto scan_topic = declare_parameter<std::string>("scan_topic", "/lidar/merged");
     square_enabled_ = declare_parameter<bool>("enable_validated_square", false);
     camera_timeout_ = declare_parameter<double>("camera_timeout", 0.30);
-    camera_front_face_x_ = declare_parameter<double>("camera_front_face_x", 0.165);
+    camera_front_face_x_ = declare_parameter<double>("camera_front_face_x", 0.213);  // base_link -> LiDAR front face (0.165 + 0.048: base_link moved back 2026-11-15)
     camera_box_side_ = declare_parameter<double>("camera_box_side", 0.205);
     depth_size_ = parse_size(declare_parameter<std::string>("depth_size", "424x240"), "depth size");
     color_size_ = parse_size(declare_parameter<std::string>("color_size", "640x360"), "color size");
@@ -156,8 +163,10 @@ public:
             lidar_max_ <= json_number(js, "spec_range_max_m")))
         throw std::runtime_error("invalid LiDAR policy");
     }
-    mount_ = uppercam::load_camera_mount(urdf_);
-    estimator_ = std::make_unique<uppercam::SquareFar20Estimator>(uppercam::load_calibration(calibration));
+    if (camera_enabled) {
+      mount_ = uppercam::load_camera_mount(urdf_);
+      estimator_ = std::make_unique<uppercam::SquareFar20Estimator>(uppercam::load_calibration(calibration));
+    }
 
     buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
     listener_ = std::make_shared<tf2_ros::TransformListener>(*buffer_);
@@ -181,15 +190,28 @@ public:
       });
     obstacle_sub_ = create_subscription<geometry_msgs::msg::PoseArray>(
       "/perception/lidar/obstacle", 10, [this](geometry_msgs::msg::PoseArray::ConstSharedPtr m) { find_box(*m); });
+    crop_pub_ = create_publisher<sensor_msgs::msg::Image>("/perception/uppercam/barcode_crop", rclcpp::SensorDataQoS());
+    roi_sub_ = create_subscription<std_msgs::msg::Int32MultiArray>(
+      "/perception/uppercam/barcode_roi", 10, [this](std_msgs::msg::Int32MultiArray::ConstSharedPtr m) {
+        if (m->data.size() != 4) return;
+        std::lock_guard<std::mutex> l(roi_lock_);
+        roi_ = cv::Rect(m->data[0], m->data[1], m->data[2], m->data[3]);
+      });
     hires_sub_ = create_subscription<std_msgs::msg::Bool>(
       "/perception/uppercam/hires", rclcpp::QoS(1).transient_local(), [this](std_msgs::msg::Bool::ConstSharedPtr m) {
         if (m->data != want_hires_.exchange(m->data))
           RCLCPP_INFO(get_logger(), "colour %s requested", m->data ? "hires" : "normal");
       });
+    pick_pause_pub_ = create_publisher<std_msgs::msg::Bool>("/perception/uppercam/pick_paused", 10);
+    pick_pause_sub_ = create_subscription<std_msgs::msg::Bool>("/perception/uppercam/pick_pause", 10,
+      [this](const std_msgs::msg::Bool &m) {pick_pause_until_ = m.data ? steady_seconds() + 2.0 : 0.0;});
     drain_timer_ = create_wall_timer(std::chrono::milliseconds(10), [this] { drain(); });
     lidar_timer_ = create_wall_timer(std::chrono::milliseconds(5), [this] { retry_lidar(); });
-    preview_thread_ = std::thread([this] { preview_worker(); });
-    camera_thread_ = std::thread([this] { camera_worker(); });
+    // LiDAR-only runs keep the same box finder/subscriptions without opening a camera.
+    if (camera_enabled) {
+      preview_thread_ = std::thread([this] { preview_worker(); });
+      camera_thread_ = std::thread([this] { camera_worker(); });
+    }
   }
 
   ~SensorBridge() override
@@ -435,6 +457,30 @@ private:
     }
   }
 
+  // Raw crop of the barcode region (set by perception) from a hires colour frame.
+  void publish_crop(const rs2::video_frame & colour)
+  {
+    try {
+      cv::Rect r;
+      {
+        std::lock_guard<std::mutex> l(roi_lock_);
+        r = roi_;
+      }
+      r &= cv::Rect(0, 0, colour.get_width(), colour.get_height());
+      if (r.width < 8 || r.height < 8 || !crop_pub_->get_subscription_count()) return;
+      const cv::Mat full(colour.get_height(), colour.get_width(), CV_8UC3, const_cast<void *>(colour.get_data()));
+      sensor_msgs::msg::Image msg;
+      msg.header.frame_id = "camera_top_color_optical_frame";
+      msg.header.stamp = to_msg(colour.get_timestamp() / 1000.0);
+      msg.height = r.height; msg.width = r.width; msg.encoding = "bgr8"; msg.step = r.width * 3;
+      msg.data.resize(static_cast<size_t>(r.height) * msg.step);
+      for (int y = 0; y < r.height; ++y)
+        std::memcpy(msg.data.data() + y * msg.step, full.ptr<uint8_t>(r.y + y) + r.x * 3, msg.step);
+      crop_pub_->publish(std::move(msg));
+    } catch (const std::exception &) {
+    }
+  }
+
   void preview_worker()
   {
     double published_at = -1e300;
@@ -465,9 +511,21 @@ private:
     }
   }
 
+  static double steady_seconds() {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+  }
+  std::atomic<double> pick_pause_until_{0.0};
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr pick_pause_pub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr pick_pause_sub_;
+
   void camera_worker()
   {
     while (!quit_) {
+      if (steady_seconds() < pick_pause_until_) {
+        std_msgs::msg::Bool ack; ack.data = true; pick_pause_pub_->publish(ack);
+        std::this_thread::sleep_for(std::chrono::milliseconds(50)); continue;
+      }
+      std_msgs::msg::Bool ack; ack.data = false; pick_pause_pub_->publish(ack);
       std::vector<std::pair<rs2::sensor, float>> global_options;
       std::optional<rs2::pipeline> pipe;
       auto release = [&] {
@@ -499,7 +557,7 @@ private:
         const double scale = profile.get_device().first<rs2::depth_sensor>().get_depth_scale();
         rs2::align align(RS2_STREAM_COLOR);
         estimator_->reset();
-        while (!quit_ && want_hires_.load() == hires) {
+        while (!quit_ && want_hires_.load() == hires && steady_seconds() >= pick_pause_until_) {
           rs2::frameset frames;
           if (!pipe->try_wait_for_frames(&frames, 100)) continue;
           const rs2::video_frame colour = frames.get_color_frame();
@@ -515,7 +573,10 @@ private:
           // Hires (barcode) frames: no depth align / box estimate. Aligning depth to 1080p on every frame made the
           // frames too old for the 0.3 s preview check: no preview at all (robot 2026-11-14). The box is not
           // observed while the barcode is read.
-          if (hires) continue;
+          if (hires) {
+            publish_crop(colour);
+            continue;
+          }
           const long index = static_cast<long>(depth.get_frame_number());
           const auto aligned = align.process(frames);
           const rs2::depth_frame d = aligned.get_depth_frame();
@@ -778,6 +839,10 @@ private:
   double camera_timeout_{}, camera_front_face_x_{}, camera_box_side_{}, preview_period_{}, lidar_min_{}, lidar_max_{};
   cv::Size depth_size_, color_size_, box_size_, hires_size_;
   std::atomic<bool> want_hires_{false};
+  std::mutex roi_lock_;
+  cv::Rect roi_;
+  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr crop_pub_;
+  rclcpp::Subscription<std_msgs::msg::Int32MultiArray>::SharedPtr roi_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr hires_sub_;
   uppercam::CameraMount mount_;
   std::unique_ptr<uppercam::SquareFar20Estimator> estimator_;  // camera thread only

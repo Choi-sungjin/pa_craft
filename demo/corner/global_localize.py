@@ -30,7 +30,7 @@ from std_msgs.msg import Empty, String
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from map_tools import MapGrid, ScanMatcher  # noqa: E402
 
-BODY_CENTER_X, BODY_R = 0.01275, 0.27  # as run_corner.py: the merged scan is in base_link, drop the robot itself
+BODY_CENTER_X, BODY_R = 0.06075, 0.27  # 0.01275 + 0.048 (base_link moved back 2026-11-15)  # as run_corner.py: the merged scan is in base_link, drop the robot itself
 
 
 def yaw_of(q):

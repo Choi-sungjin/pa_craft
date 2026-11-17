@@ -34,7 +34,7 @@
   <!--Visual / kinematic export. q=0 is the saved V75 CAD pose. Not a hardware controller or dynamics model.-->
   <link name="base_link">
     <visual name="base_link_black">
-      <origin xyz="0 0 0" rpy="0 0 0" />
+      <origin xyz="0.048 0 0" rpy="0 0 0" />
       <geometry>
         <mesh filename="package://v75_robot_description/meshes/base_link_black.stl" scale="1 1 1" />
       </geometry>
@@ -124,12 +124,12 @@
     <!-- Measured: carriage block left edge 36 mm from the waffle's LM-motor edge at the motor end
          stop (motor 808.1 deg); was x 0.02, which drew the carriage 31.4 mm too far from the motor.
          +10 mm after the first puck pick on hardware went 1 cm past the puck (2026-10-24). -->
-    <origin xyz="-0.00135 0 0" rpy="0 0 0" />
+    <origin xyz="0.04665 0 0" rpy="0 0 0" />
     <!-- + moves the carriage toward the LM motor (-X), matching motor raw +. -->
     <axis xyz="-1 0 0" />
     <!-- 5-degree margin inside measured motor limits (-394.4..504.2 deg, control.yaml, 2026-11-02);
          previous lower=-0.0438 upper=0.0630. -->
-    <limit effort="0" velocity="0" lower="-0.0381" upper="0.0627" />
+    <limit effort="0" velocity="0" lower="-0.0430" upper="0.0627" />
   </joint>
   <joint name="shoulder_joint" type="revolute">
     <parent link="slide_link" />
@@ -175,7 +175,7 @@
     <axis xyz="-2.58569494309e-15 1 7.70863789488e-17" />
     <!-- Motor limits -175–175 deg, aligned at 94 deg (2026-11-02);
          previous lower=-4.6250 upper=1.4835. -->
-    <limit effort="0" velocity="0" lower="-4.6949" upper="1.4137" />
+    <limit effort="0" velocity="0" lower="-4.6949" upper="3.0718" /><!-- upper: motor 270 deg (2026-11-15, was 1.4137 = motor 175) -->
   </joint>
   <joint name="jaw_upper_joint" type="prismatic">
     <parent link="tool_roll_link" />
@@ -188,7 +188,7 @@
     <parent link="base_link" />
     <child link="carousel_link" />
     <!-- Carousel axis measured 173 mm behind the shoulder axis (y 0.051), top view (2026-11-03); was 0.23 (179 mm). -->
-    <origin xyz="0.129 0.224 0.1" rpy="0 0 0" />
+    <origin xyz="0.177 0.224 0.1" rpy="0 0 0" />
     <axis xyz="0 0 1" />
     <limit effort="0" velocity="0" />
   </joint>
@@ -205,7 +205,7 @@
     <parent link="base_link" />
     <child link="idler_link" />
     <!-- Follows the LM plate refit to its measured span (scripts/fit_measured.py); was x 0.234. -->
-    <origin xyz="0.22164 0.0563662 0.0955" rpy="0 0 0" />
+    <origin xyz="0.26964 0.0563662 0.0955" rpy="0 0 0" />
     <axis xyz="0 0 1" />
     <limit effort="0" velocity="0" />
   </joint>
@@ -363,17 +363,17 @@
   <joint name="base_link_vis_green_joint" type="fixed">
     <parent link="base_link" />
     <child link="base_link_vis_green" />
-    <origin xyz="0 0 0" rpy="0 0 0" />
+    <origin xyz="0.048 0 0" rpy="0 0 0" />
   </joint>
   <joint name="base_link_vis_orange_joint" type="fixed">
     <parent link="base_link" />
     <child link="base_link_vis_orange" />
-    <origin xyz="0 0 0" rpy="0 0 0" />
+    <origin xyz="0.048 0 0" rpy="0 0 0" />
   </joint>
   <joint name="base_link_vis_yellow_joint" type="fixed">
     <parent link="base_link" />
     <child link="base_link_vis_yellow" />
-    <origin xyz="0 0 0" rpy="0 0 0" />
+    <origin xyz="0.048 0 0" rpy="0 0 0" />
   </joint>
   <joint name="slide_link_vis_black_joint" type="fixed">
     <parent link="slide_link" />

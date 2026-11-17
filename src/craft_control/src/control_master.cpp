@@ -624,8 +624,8 @@ private:
 
   void clear_arm_target()
   {
-    // Invalid target: stop at the current position until planning sends a new target.
-    arm_controller_.clear_target();
+    // No target: hold the pose measured now until planning sends a new target (not the live measurement each cycle).
+    if (have_arm_lm_feedback_) arm_controller_.hold(arm_joints_); else arm_controller_.clear_target();
     publish_bool(arm_target_reached_pub_, false);
   }
 
@@ -843,7 +843,7 @@ private:
     clear_lm_target();
     gripper_controller_.clear_target();
     publish_bool(gripper_target_reached_pub_, false);
-    publish_bool(gripper_grasped_pub_, false);
+    publish_bool(gripper_grasped_pub_, gripper_controller_.is_grasped());
     clear_wheel_target();
     longitudinal_.clear_target();
     clear_path_target();

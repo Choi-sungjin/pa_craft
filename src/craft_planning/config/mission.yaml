@@ -12,7 +12,7 @@ mission_master:
     locations: [L1, L2, L3]
     # Where the robot goes back to [x m, y m, yaw deg], map frame. TODO(user): confirm. (0.56, 0.98) is the marked
     # start of demo/corner/run_tour.py; 180 deg = looking at the traffic light (-x), as at the start.
-    home: [0.600, 1.000, 180.0]  # the robot start pose, facing -x (user 2026-11-14; was the brief zone centre 0.743, 0.950)
+    home: [0.662, 1.081, -179.6]  # the robot start pose, facing -x (x +0.048: base_link moved 48 mm back 2026-11-15; user 2026-11-14; was the brief zone centre 0.743, 0.950)
     # Where the upper cam reads the barcode, [x m, y m, yaw deg] map frame; [] = read it where the robot stands.
     # Brief (mission.pdf, 2026-11-14 user): the barcode is 0.40 m high anywhere on the 3rd wall panel from (0,0)
     # along +y (the traffic light's panel; posts every 0.394 m -> y 0.818..1.152, centre 0.985), facing +x, wall
@@ -42,7 +42,12 @@ mission_master:
     # true (user 2026-11-12, no arm for now): skip every arm action. The upper-cam barcode is still read (2026-11-14), then the
     # robot drives up to S1..S6, then L1..L3, then home. false = the full mission (pick, place, verify).
     drive_only: true
-    # --- skeleton parts (observe / pick / place / verify are not connected yet) ---
+    # Real pick adapter (puck_picker.py -> execute.py --planning). One mode per slot in collection order.
+    # Omit pick_modes for automatic standing-first, nearest-first collection (fresh survey per pick).
+    # Explicit find/lie2/lie5 modes remain available for calibration experiments.
+    # pick_modes: [lie2, lie5, find, find, find, find, find, find, find, find, find, find]
+    pick_timeout_s: 600.0
+    # --- skeleton parts (observe / place / verify are not connected yet) ---
     skeleton_action_s: 0.5     # a skeleton action reports done after this long
     # The pick skeleton cannot say which puck it took: true hands the surveyed ids out to the clock slots, lowest
     # first, so the whole sequence can be walked through. MUST be false once the pick reports the puck id.

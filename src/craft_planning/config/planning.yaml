@@ -1,7 +1,7 @@
 planning_master:
   ros__parameters:
     # All application parameters are required and validated by configure().
-    map_file: maps/brief_arena1cm.yaml  # project2 brief drawing, 1 cm (user 2026-11-13); was maps/maze.stl
+    map_file: maps/maze.stl
     map_frame: map
     stl_slice_heights: [0.10, 0.20, 0.30]
     occupancy_threshold: 65
@@ -64,17 +64,17 @@ planning_master:
       dock_straight: 0.25   # [m]
       dock_extend: 0.15     # [m]
       dock_overrun: 0.005   # [m]
-      camera_final_gap: 0.025  # [m] (user 2026-11-13, was 0.020; 2026-11-10 was 0.010: touched the box with the upper cam at ~16 mm)
+      camera_final_gap: 0.020  # [m] (user 2026-11-10, was 0.010: touched the box with the upper cam at ~16 mm; measure the real gap at 20)
       camera_gap_tolerance: 0.003
       handoff_gap: 0.100  # [m] experimental stopped LiDAR-to-camera handoff
       source_gap_diff: 0.020
       camera_timeout: 0.500  # age of the selected acquisition, not processing time
-      lidar_observation_timeout: 0.200
+      lidar_observation_timeout: 0.500  # [s] user 2026-11-16: was 0.2 (2 scans); 05:47 S1 faulted at ~95% CPU with valid scans
       camera_speed: 0.02
       camera_calibrated_gap_min: 0.010
       camera_calibrated_gap_max: 0.080
       camera_operational_gap_max: 0.200  # [m] operating bound, not a calibration guarantee
-      front_lidar_x: 0.155               # [m] scan origin from base_link, lidar launch geometry
+      front_lidar_x: 0.203               # 0.155 + 0.048 (base_link moved back 2026-11-15); [m] scan origin from base_link, lidar launch geometry
       front_lidar_fov_deg: 180.0         # [deg] front outward horizontal scan coverage
       camera_uncertainty_max: 0.005  # near (<= 30 mm) and final
       camera_far_uncertainty_max: 0.010
@@ -82,10 +82,14 @@ planning_master:
       lidar_uncertainty_max: 0.010
       observation_initial_timeout: 5.0  # held still while waiting for the first observation
       camera_confirm_count: 3
+      # After the dock: turn in place by the remaining heading error to the box face (upper cam, mean of the confirm
+      # frames), at control's slow goal turn. Above max = a bad measurement, no turn. (user 2026-11-16)
+      dock_final_yaw_tolerance_deg: 0.5
+      dock_final_yaw_max_deg: 10.0
       speed: 0.20         # [m/s] (user, 2026-11-08)
       gap: 0.03           # [m] LiDAR front face -> box face at the planned face goal: places the stage point (approach_len +
                           # stage_lead behind it; user 2026-11-10, was 0.08: the LiDAR stood ~0.45 m off, now ~0.36 m)
-      front_face_x: 0.165   # [m] axle midpoint to LiDAR front face, user measurement 2026-11-09
+      front_face_x: 0.213   # [m] base_link to LiDAR front face: 0.165 axle midpoint (user 2026-11-09) + 0.048, base_link moved back 2026-11-15
       side: 0.205         # [m]
       # The box step (user, 2026-11-08): plan to the stage point of every approachable face of the known box below
       # (PathPlanner::plan_box), drive the shortest, stand still settle_s at the stage point and take the LiDAR box
@@ -127,36 +131,45 @@ planning_master:
       # as measured are dropped (not around the planning.yaml place: a box standing off it would be partly freed).
       # Box half diagonal 0.145 m + room for a turned / smeared box.
       ignore_radius: 0.25        # [m]
+      # One stage (user, 2026-11-14/15): driving to the stage point the LiDAR looks for the box all the way. Seen with
+      # both face ends (square_boxes L1-L3: the map gives the centre along the face, any scan) in splice_samples scans
+      # in a row (median) while the robot faces within 60 deg of the dock
+      # heading: the stage drive becomes the dock right there (send_dock, from the robot pose onto the face normal),
+      # no stage point, no turn in place, no standing measurement (the dock path is measured again on the way in).
+      # Not seen on the way: the planned stage point (any arrival direction), turn, measure, dock.
+      one_shot: true
+      splice_samples: 3
+      dock_corner_radius: 0.15  # [m] unused since 2026-11-15 (the curve-straight-curve splice is gone)
+      dock_update_period_s: 0.2   # [s] dock line renewal (LiDAR track below, camera_lateral)
+      # The dock path was made once at the dock start and held (mission_1115_0109 S4: on that path to 1.3 mm by
+      # odometry, 43 mm off the box by the upper cam at the end). Now the LiDAR keeps making it again from the robot
+      # every dock_update_period_s (median of splice_samples scans; S boxes only with both face ends seen) until the
+      # robot is this far from the face goal by odometry (LiDAR front ~0.30 m from the face: both ends still seen),
+      # then the path is held and the upper cam only stops it. 0 = held from the dock start (before 2026-11-15).
+      lidar_track_until_m: 0.28  # [m]
+      # In the upper cam's range (0-200 mm) it can make the dock line (user 2026-11-13: the LiDAR shakes on the bumpy floor).
+      # mission_1114_1627/1708: upper cam lateral 0.7-1.5 mm std standing, 1.5-2.2 mm per frame moving under 150 mm
+      # gap (5.2 mm at 150-200), LiDAR 3.9-8.8 mm (30 mm at 0.6-1 m); the two 3.9 +- 6.2 mm apart. Valid camera frames
+      # 150-500 mm off sideways came while turning or the face 17+ deg askew: frames over camera_track_max_yaw_deg are
+      # left out, a box over camera_track_max_jump from the one the path goes by is not taken. false: path held.
+      # Simulator 2026-11-14 (02/05/12/13/17): the upper cam saw the robot ~30 mm off the LiDAR line at 160 mm; steering
+      # that out in the last 140 mm left it 7-17 deg askew (02: +12 mm, +6.7 deg vs +2.8 mm, +0.05 deg held). Off until
+      # it is tried on the robot.
+      camera_lateral: false
+      camera_track_samples: 3
+      camera_track_max_yaw_deg: 10.0
+      camera_track_max_jump: 0.08    # [m] sideways; the L1 offset scenario needed 52 mm (LiDAR line off, ends unseen)
       # The robot at the stage point further than this off the measured box's dock line: it drives to the measured
       # box's stage point (same face), turns square to it and the LiDAR measures again head-on before the dock (user
       # 2026-11-10: a second, straighter look at the face). Once per box step, like reorient_deg. The lateral bound
       # stays above stage_goal_tolerance (0.03), below it the new stage drive would arrive at once.
-      # One stage (user, 2026-11-13): driving to the stage point the LiDAR looks for the box all the way. Seen in
-      # splice_samples scans in a row (median), the dock path (the stage path up to a junction, from there a curve of
-      # at least dock_min_radius onto the face normal, dock_straight straight to the face goal, on into the box by
-      # dock_extend; camera_fast_speed, camera_speed from camera_slow_gap) replaces the
-      # stage path in the running task, and is made again from the robot's pose and the newest LiDAR median every
-      # dock_update_period_s until dock_lidar_until_gap from the face; from there it holds and the upper cam stops it.
-      # Not seen on the way: stop at the stage point, measure, dock, as before. false: always the stop, measure, dock.
-      one_shot: true
-      splice_samples: 3
-      dock_update_period_s: 0.2   # [s]
-      dock_lidar_until_gap: 0.15  # [m] LiDAR front face to the box face
-      # [m] one stage: the curve onto the face normal (before the dock_straight straight) nowhere tighter than this, so
-      # the robot follows it driving, never turning on the spot (user 2026-11-13). The junction is the farthest point
-      # of the path ahead (5 cm steps) that allows it; none: not sent, the drive goes on and the next median is tried.
-      dock_min_radius: 0.30
       restage_lateral_m: 0.04
       restage_yaw_deg: 2.0
-      # Restage onto the measured dock line by backing straight onto it (2026-11-13): to the point on the line
-      # |sideways| / tan(this) behind the robot (at least reverse_min_distance, at most reverse_distance), so the
-      # back-out leaves at most this much off the line heading. Blocked or too far: the forward stage drive as before.
-      restage_reverse_deg: 10.0  # [deg]
       reorient_deg: 10.0         # [deg] the box measured at the stage point turned more than this from the face approached:
                                  # plan again from the measured box to its nearest allowed face (once; 2026-11-10, a box turned 45 deg)
       # The last stage_final_m of the stage drive (user, 2026-11-10): at most stage_final_speed, and from there a target
       # stage_final_lookahead ahead of base_link instead of the speed table's 0.18 m (a point to stop at, not a line).
-      stage_final_m: 0.075         # [m] 1/4 of 0.30 (user 2026-11-13: shorter slow end of the stage drive)
+      stage_final_m: 0.30          # [m]
       stage_final_speed: 0.05      # [m/s]
       stage_final_lookahead: 0.08  # [m]
       # Within stage_capture_m of the stage point for stage_capture_s without arriving: turn in place to the stage
@@ -169,38 +182,39 @@ planning_master:
       dock_goal_tolerance: 0.01  # [m]
       settle_s: 0.5
       lateral_tolerance: 0.020   # [m]
+      lateral_offset: 0.0015     # [m] +y LEFT in dock heading; user 2026-11-16: 1.5 mm left for every box
       yaw_tolerance_deg: 1.0
-      max_corrections: 0  # 0: no back-out and re-dock; out of tolerance the step ends FAILED with the END line (3 = up to three back-outs)
+      # Upper cam dock (camera_enabled, user 2026-11-16): at CameraVerify the upper cam box further than lateral_tolerance
+      # along the face from the dock line's box -> back out (reverse_distance) and dock again on the corrected line,
+      # at most max_corrections times per box step, then accepted as before. (LiDAR-only docks: see above.)
+      max_corrections: 1  # 0: no back-out and re-dock
       reverse_distance: 0.45     # [m] back to the stage point (approach_len + stage_lead): room to straighten out
       # [m] the line behind blocked (padding, an obstacle): back out the longest clear distance down to this (5 cm
       # steps); none clear: wait, and fail after block_wait_s.
       reverse_min_distance: 0.10
       reverse_speed: 0.10        # [m/s]
       names: [S1, S2, S3, S4, S5, S6, L1, L2, L3]
-      # Expected [x, y, yaw of a face normal deg], map frame: the project2 brief (box_detector ARENA_BOXES; walls and boxes set
-      # to the drawing by the user 2026-11-13, map brief_arena1cm); was box_detector on arena5_legend_opt_arena1cm (2026-11-10);
+      # Expected [x, y, yaw of a face normal deg], map frame: box_detector.py on arena5_legend_opt_arena1cm (2026-11-10);
       # only where to drive toward and what to look for (/planning/box_search); the dock goes by the perceived box.
       # <box>_faces: the sides of the map it can be approached from (user, 2026-11-10; the others are walled in).
       # Quoted: a bare N is YAML 1.1's false to the ROS parameter parser.
-      S1: [1.468, 0.950, 90.0]
+      S1: [1.476, 1.159, 90.0]
       S1_faces: ["E", "S"]
-      S2: [3.670, 3.152, 90.0]
+      S2: [3.616, 3.436, 90.0]
       S2_faces: ["S"]
-      S3: [2.936, 5.354, 90.0]
+      S3: [3.069, 5.336, 90.0]
       S3_faces: ["N", "S"]
-      S4: [0.734, 5.354, 90.0]
+      S4: [0.864, 5.389, 85.0]
       S4_faces: ["N", "W", "S"]
-      S5: [2.202, 5.354, 90.0]
+      S5: [2.272, 5.321, 90.0]
       S5_faces: ["N", "W"]
-      S6: [3.670, 3.886, 90.0]
+      S6: [3.611, 3.889, 90.0]
       S6_faces: ["W"]
-      # L1, L2: LiDAR box centre (median of the dock scans that saw both face ends, bag mission_1114_0302, user 2026-11-14);
-      # brief: L1 (3.670, 0.950), L2 (2.202, 3.700). Moved in brief_arena1cm.pgm too.
-      L1: [3.735, 0.997, 90.0]
+      L1: [3.576, 1.066, 90.0]
       L1_faces: ["W", "S", "E"]
-      L2: [2.300, 3.722, 90.0]
+      L2: [2.349, 3.726, 90.0]
       L2_faces: ["E", "W", "S", "N"]
-      L3: [3.670, 5.354, 90.0]
+      L3: [3.754, 5.324, 90.0]
       L3_faces: ["N", "S"]
     ik:
       urdf: urdf/v75_robot.urdf
@@ -229,13 +243,9 @@ planning_master:
       # User 2026-11-12: the chassis is ~310 mm wide (half 155 mm), padding 0.16 is fine: the S2 south lane leaves
       # 0.192 m between its face normal and the wall (arena5 noboxes), which 0.23 closed. Was 0.23 (2026-11-10), 0.243.
       # The half diagonal above (~243 mm) is not covered any more: a turn in place right at a wall can touch it.
-      # 2026-11-14 (user): walls 0.20 for driving (lanes: go_home under the x 1.1 wall end had 13 cm left at 0.25),
-      # obstacle points r_obstacle 0.25, and r_turn 0.25 where it turns in place (stage points are rejected below it;
-      # a drive start / leave end below it is reported in /planning/box_status). Was 0.25 for everything (2026-11-13:
-      # 0.16 left 5 mm per side, 0.20 let a turn in place sweep its corners (~253 mm) into walls).
-      r_robot: 0.20     # [m] map walls, every drive except the dock (r_approach)
-      r_obstacle: 0.25  # [m] LiDAR obstacle points (people, robots, walls seen off the map)
-      r_turn: 0.25      # [m] clearance a turn in place needs
+      # 2026-11-15: base_link moved 48 mm back (turn-in-place centre): the chassis front corners are now ~0.29 m from it
+      # (0.24 m before), the rear ones less. r_robot left at 0.24 for now: watch the front clearance.
+      r_robot: 0.24  # [m] (user 2026-11-14: +4 cm, mission_1114_2253 came within 44 mm (LiDAR height) of the x=1.10 wall end; was 0.20. 2026-11-13: 0.16 left 5 mm per side, chassis corners touched wall ends in turns)
       # Padding of the whole map for the box dock: the second path, made after reaching the stage point and turning
       # there (and plan_box's face / dock line checks): half the chassis width (310 mm) + 5 mm, a straight drive
       # sweeps only the width (user, 2026-11-10). Everything else, the drive to the stage point included: r_robot.

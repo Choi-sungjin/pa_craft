@@ -30,3 +30,18 @@ __pycache__/
 *.db3
 # nested CMake build trees
 tools/*/build/
+
+# External source dependency (version pinned in craft.repos)
+/src/coin_d4_driver/
+
+# Local captures, execution records, and backup copies
+/demo/puck_pick/runs/
+/log_camera_startup_live/
+/test/drive/logs/
+*.bak-*
+*.before_*
+*.tag_*
+/xte/
+/c_cc[[]VMIN]
+/c_cc[[]VTIME]
+/c_cflag

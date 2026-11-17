@@ -222,8 +222,8 @@ perception_master:
         # false (user 2026-11-14: the label is always one of match.codes, no unregistered code): the pattern vote
         # alone, no ZXing. true: ZXing on full_frame_every + the regions, the vote only on frames it reads nothing.
         decode: false
-        work_width: 640
-        min_gradient: 120.0
+        work_width: 960        # alternating-edge locator (2026-11-14, mission_1114_2310: the old one merged the label
+        min_gradient: 40.0     #   on the floor line with the carpet); min_gradient = alternation score threshold
         max_regions: 6
         full_frame_every: 1    # every frame (PC 1080p ~7 ms)
         # Nothing decoded on a frame: compare the bar profile with these codes (Code 128) and vote (user 2026-11-14).
@@ -267,23 +267,41 @@ perception_master:
         color_source: pixels  # 2026-11-12: yolo (yellow 0.75) missed yellow in 2 of 7 bags; pixels 7/7
         off_class_id: 4        # sign_off
         locate_min_score: 0.3
+        tower_min_aspect: 1.0  # tower box height >= this x width (bag mission_1114_1703: barcode label 48x16 boxed as
+                               # sign_yellow, white paper read as lit; tower 38-43 x 59-70)
+        hold_box_s: 1.0        # no tower box -> the last one seen within this [s] (dark room: YOLO dropped the tower
+                               # at the end of blinks, 0.1-0.57 s blinks rejected). 0 = off
         pixels:
           cap_fraction: 0.2    # top of the box left out: the white cap (unlit cap bottom p50 0.18, p95 0.20)
           bright_v: 235        # V of the clipped lamp core
           on_fraction: 0.10    # core share (below the cap) to be lit: unlit p95 0.027, lit min 0.18
-          use_ring_hue: false  # color by core position only
+          use_ring_hue: true   # 2026-11-14: red by position, yellow/green by ring hue (mission_1114_1551: leaning tower, green core on yellow_cut; ring hue Y 14-22, G 29-79)
           red_cut: 0.49        # core position along the whole box (0 = top): red above (0.36-0.40)
           yellow_cut: 0.72     # yellow above (0.58-0.63), green below (0.80-0.85)
           red_by_position: true      # use_ring_hue true only:
           ring_fraction: 0.06        #   ring width / tower height
           ring_min_saturation: 80
           ring_min_pixels: 10
-          green_hue_min: 21.5        #   OpenCV hue 0..179 (package 45; our green 23-40)
+          green_hue_min: 25.0        #   OpenCV hue 0..179: ring hue Y <= 22, G >= 29 (5 bags)
           green_hue_max: 100.0
           red_hue_below: 0.0
           red_hue_from: 179.0
-          yellow_hue_max: 21.5
-          upright_ratio: 1.3   # box height >= this x width = upright tower, else glow-hue vote
+          yellow_hue_max: 25.0
+          upright_ratio: 1.1   # box height >= this x width = upright tower, else glow-hue vote. Was 1.3: mission_1114_2328 yellow boxes 51x64-66 (1.23-1.29) took the glow vote, red lens above won -> yellow read as red; towers here 1.23-1.38
+          # Color from the unlit lenses above the lit lamp (2026-11-14, user idea): centre column, rows between the
+          # cap and the top of the biggest lit blob; none red -> R, red only -> Y, red + orange -> G. Overrides
+          # use_ring_hue / cuts for upright towers. Share of box height over 7 bags (leaning, dark room incl.):
+          # red rows R <= 0.04, Y 0.05-0.26, G >= 0.22; orange rows R/Y <= 0.03, G >= 0.13.
+          use_blocks: true
+          block_column: 0.4
+          block_min_saturation: 90
+          block_min_value: 60
+          block_row_share: 0.5
+          block_red_hue_below: 9.0
+          block_red_hue_from: 165.0
+          block_orange_hue_max: 31.0
+          block_red_min: 0.07
+          block_orange_min: 0.08
       # Puck survey on the same upper-cam frames (schedule.uppercam_puck), only once traffic_light is complete:
       # signal model until the 12 blinks, this puck model after. Both load at start, so no restart; a
       # traffic_light reset goes back to the signal model. Pucks and the light are never in view together.
@@ -372,7 +390,8 @@ perception_master:
       # base_link is the turning center (midway between the front and rear axles); the body filter
       # stays on the body center (LiDAR midpoint), 12.75 mm ahead of it (2026-10-31, front LiDAR 155 mm
       # ahead, LiDARs 284.5 mm apart; was 26 mm before the chassis change). Same as lidar_processor.launch.py.
-      body_center_x: 0.01275
+      # 2026-11-15: base_link moved 48 mm back to the measured turn-in-place centre (ICP over 16 turns, mission_1115_0047/0109: the robot pivots ~45-50 mm behind the axle midpoint, rear-heavy): 0.01275 + 0.048.
+      body_center_x: 0.06075
       # Floor ROI per LiDAR side (left/right in base_link), angles from the LiDAR's outward axis. Up to *_clear_deg
       # everything is kept; beyond it up to 90 deg, step_deg bins keep points only within *_max_range_m of the
       # LiDAR (the beams there dip to the floor). From the arena bags after the 2026-11-01 22:00 LiDAR rework

@@ -1264,27 +1264,6 @@ PathPlan PathPlanner::plan_on(
   return result;
 }
 
-// True when a path planned with the goal heading doubles back into its straight approach: within 0.3 m before the
-// approach entry (approach_len before the goal) the path heads more than 100 deg away from the goal heading.
-static bool hairpin_at_entry(const nav_msgs::msg::Path & path, double heading, double approach_len)
-{
-  const auto & poses = path.poses;
-  if (poses.size() < 3) {return false;}
-  std::vector<double> arc(poses.size(), 0.0);
-  for (std::size_t i = 1; i < poses.size(); ++i) {
-    const auto & a = poses[i - 1].pose.position, & b = poses[i].pose.position;
-    arc[i] = arc[i - 1] + std::hypot(b.x - a.x, b.y - a.y);
-  }
-  const double entry = arc.back() - approach_len, ux = std::cos(heading), uy = std::sin(heading);
-  for (std::size_t i = 1; i < poses.size(); ++i) {
-    if (arc[i] < entry - 0.30 || arc[i - 1] > entry) {continue;}
-    const auto & a = poses[i - 1].pose.position, & b = poses[i].pose.position;
-    const double len = std::hypot(b.x - a.x, b.y - a.y);
-    if (len > 1e-6 && ((b.x - a.x) * ux + (b.y - a.y) * uy) / len < std::cos(100.0 * kPi / 180.0)) {return true;}
-  }
-  return false;
-}
-
 PathPlan PathPlanner::plan_box(
   const nav_msgs::msg::Odometry & odom, const BoxTarget & box, const geometry_msgs::msg::PoseArray & map_obstacles,
   const double * face_normal, double stage_lead, const std::vector<double> * allowed_normals) const
@@ -1341,16 +1320,12 @@ PathPlan PathPlanner::plan_box(
               stage_why = t; continue;
             }
           }
-          // Into the stage point straight along the face normal (approach_len), so the tracking error is steered
-          // out before it stops there: control's arrival takes any side offset up to wheel_goal_tolerance and the
-          // dock starts from it (2026-11-10: arriving from the side left 48 mm, the dock swung to -16 deg and
-          // touched the box). No room for that straight, or a route that would double back into it (a hairpin at
-          // the entry: Pure Pursuit cuts it and spins in place; S1 east in the simulator, 2026-11-10): any arrival
-          // direction, as before.
-          auto q = plan_on(data, odom, stage, map_obstacles, true);
-          std::string entry = q.ok ? "straight entry" : "no straight entry (" + q.error + ")";
-          if (q.ok && hairpin_at_entry(q.global, heading, config.approach_len)) {q.ok = false; entry = "hairpin, no straight entry";}
-          if (!q.ok) {q = plan_on(data, odom, stage, map_obstacles);}
+          // Any arrival direction at the stage point (user 2026-11-15): the dock path from wherever the robot stands
+          // curves onto the face normal itself (send_dock Hermite), so the stage drive needs no straight entry along
+          // it. The straight entry (approach_len, goal heading) made loops when the box was re-measured close ahead
+          // and a little aside (mission_1115_0047 S2/S3).
+          auto q = plan_on(data, odom, stage, map_obstacles);
+          const std::string entry = "any direction";
           if (q.ok) {why += std::string(face) + " " + entry + ", ";}
           if (!q.ok) {stage_why = "stage: " + q.error; retryable = retryable || q.retryable; continue;}
           p = std::move(q); staged = true;

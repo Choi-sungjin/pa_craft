@@ -16,18 +16,21 @@ bool barcode_decoder_available();
 std::vector<std::string> decode_code128(const cv::Mat &image);
 
 // Where a barcode may be, found without knowing where it is placed (user 2026-11-14: the barcode's place is not
-// fixed, only that it is in the upper cam's view). On a work_width copy: |  |gx| - |gy|  | (bars give a strong
-// gradient in one direction only), threshold, close along the bars' run, keep blobs that are elongated and
-// filled. Rects are in full-image pixels, padded for the quiet zone, best first (gradient x area).
+// fixed, only that it is in the upper cam's view). On a work_width copy, score alternating edges (much |gradient|
+// across the bars, little net gradient, little along them), threshold, close, keep elongated filled blobs under
+// max_area_fraction of the frame. Rects in full-image pixels, padded for the quiet zone, best first.
+// Was |gx|-|gy| on 640 px: a label on the wall/floor line merged with the carpet into one frame-sized region
+// (mission_1114_2310), so the label was never tried.
 struct BarcodeLocatorConfig {
-  int work_width = 640;
-  float min_gradient = 120.0f;  // Scharr |gx|-|gy| after a 5x5 mean
-  int min_area = 120;           // work px (bag 2026-11-11: the symbol ~40x12 px at 640x360)
+  int work_width = 960;
+  float min_gradient = 40.0f;   // alternation score threshold (Sobel units, 11x5 window)
+  int min_area = 150;           // work px
   int min_side = 4;             // work px
-  double min_aspect = 1.5, max_aspect = 12.0;
-  double min_fill = 0.5;        // contour area / its min-area rect
+  double min_aspect = 1.3, max_aspect = 12.0;
+  double min_fill = 0.45;       // contour area / its min-area rect
+  double max_area_fraction = 0.03;  // larger blobs are texture, not a label
   int max_regions = 6;
-  double pad = 0.3;             // of the rect's width on each side (quiet zone), same height fraction x2
+  double pad = 0.3;             // of the rect's longer side on each side (quiet zone)
   bool valid() const;
 };
 std::vector<cv::Rect> find_barcode_regions(const cv::Mat &image, const BarcodeLocatorConfig &config = {});

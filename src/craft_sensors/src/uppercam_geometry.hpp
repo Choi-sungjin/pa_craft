@@ -20,7 +20,7 @@ namespace uppercam
 constexpr double kSide = 0.205;        // box top square [m]
 constexpr double kBoxHeight = 0.070;   // box top over the floor [m]
 constexpr double kCamHeight = 0.6229;  // colour lens over the floor [m] (user's triangulation 2026-11-07)
-constexpr double kLaserX = 0.19067;    // URDF front_laser x, the calibration's reference
+constexpr double kLaserX = 0.23867;    // URDF front_laser x; base_link moved back 48 mm 2026-11-15
 constexpr const char * kMethod = "square_far20_spec_reimplementation_v1";
 
 // base_link <- camera optical frame as the estimator uses it: URDF joint, turned 1.5 deg CCW, y 32.2 mm,

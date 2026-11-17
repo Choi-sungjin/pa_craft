@@ -41,12 +41,24 @@ void ArmController::set_target(const ArmIkJointValues & joint_positions)
 {
   target_joint_positions_ = joint_positions;
   has_target_ = true;
+  hold_.reset();
 }
 
 // clear target arm motor pose
 void ArmController::clear_target()
 {
   has_target_ = false;
+  hold_.reset();
+}
+
+void ArmController::hold(const ArmJoints & current_pose)
+{
+  ArmIkJointValues pose{};
+  for (std::size_t joint = 0; joint < kArmIkJoints; ++joint) {
+    pose[joint] = std::clamp(current_pose[joint], min_angle_[joint], max_angle_[joint]);
+  }
+  has_target_ = false;
+  hold_ = pose;
 }
 
 // validate target arm motor pose
@@ -79,7 +91,7 @@ ArmIkJointValues ArmController::compute_command(const ArmJoints & current_pose) 
     out[joint] = std::clamp(current_pose[joint], min_angle_[joint], max_angle_[joint]);
   }
   if (!has_target_) {
-    return out;
+    return hold_ ? *hold_ : out;
   }
 
   for (std::size_t joint = 0; joint < kArmIkJoints; ++joint) {

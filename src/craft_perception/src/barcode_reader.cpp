@@ -1,6 +1,7 @@
 #include "craft_perception/barcode_reader.hpp"
 #include <opencv2/imgproc.hpp>
 #include <algorithm>
+#include <array>
 #ifdef CRAFT_WITH_ZXING
 #include <ZXing/BitMatrix.h>
 #include <ZXing/MultiFormatWriter.h>
@@ -47,7 +48,8 @@ std::vector<std::string> decode_code128(const cv::Mat &image) {
 
 bool BarcodeLocatorConfig::valid() const {
   return work_width >= 64 && min_gradient > 0 && min_area > 0 && min_side > 0 && min_aspect >= 1.0 &&
-         max_aspect > min_aspect && min_fill > 0 && min_fill <= 1.0 && max_regions > 0 && pad >= 0 && pad <= 2.0;
+         max_aspect > min_aspect && min_fill > 0 && min_fill <= 1.0 && max_regions > 0 && pad >= 0 && pad <= 2.0 &&
+         max_area_fraction > 0 && max_area_fraction <= 1.0;
 }
 
 std::vector<cv::Rect> find_barcode_regions(const cv::Mat &image, const BarcodeLocatorConfig &config) {
@@ -61,30 +63,41 @@ std::vector<cv::Rect> find_barcode_regions(const cv::Mat &image, const BarcodeLo
   cv::Mat small;
   if (s < 1.0) cv::resize(grey, small, cv::Size(), s, s, cv::INTER_AREA);
   else small = grey;
-  cv::Mat gx, gy, diff, mask;
-  cv::Scharr(small, gx, CV_32F, 1, 0);
-  cv::Scharr(small, gy, CV_32F, 0, 1);
-  cv::absdiff(cv::abs(gx), cv::abs(gy), diff);
-  cv::blur(diff, diff, cv::Size(5, 5));
-  cv::compare(diff, config.min_gradient, mask, cv::CMP_GT);
+  small.convertTo(small, CV_32F);
+  cv::Mat gx, gy, agx, agy;
+  cv::Sobel(small, gx, CV_32F, 1, 0, 3);
+  cv::Sobel(small, gy, CV_32F, 0, 1, 3);
+  agx = cv::abs(gx); agy = cv::abs(gy);
+  // Alternating edges (2026-11-14): bars give much |gradient| across them but little net gradient over a window,
+  // a single edge (floor line, post) gives a net gradient and carpet gives gradient both ways. Score per direction:
+  // mean|g_along| - |mean g_along| - mean|g_cross|, bars upright (11x5 window) or lying (5x11).
+  auto alternation = [](const cv::Mat &g, const cv::Mat &ag, const cv::Mat &across, cv::Size k) {
+    cv::Mat m1, m2, m3; cv::blur(ag, m1, k); cv::blur(g, m2, k); cv::blur(across, m3, k);
+    return cv::Mat(m1 - cv::abs(m2) - m3);
+  };
+  cv::Mat score = cv::max(alternation(gx, agx, agy, cv::Size(11, 5)), alternation(gy, agy, agx, cv::Size(5, 11)));
+  cv::Mat mask;
+  cv::compare(score, config.min_gradient, mask, cv::CMP_GT);
   cv::morphologyEx(mask, mask, cv::MORPH_CLOSE, cv::getStructuringElement(cv::MORPH_RECT, cv::Size(9, 3)));
   cv::morphologyEx(mask, mask, cv::MORPH_OPEN, cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3)));
   std::vector<std::vector<cv::Point>> contours;
   cv::findContours(mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+  const double max_area = config.max_area_fraction * mask.rows * mask.cols;
+  cv::Mat positive = cv::max(score, 0.0);
   std::vector<std::pair<double, cv::Rect>> scored;
   for (const auto &c : contours) {
     const auto r = cv::minAreaRect(c);
     const double w = r.size.width, h = r.size.height;
-    if (std::min(w, h) < config.min_side || w * h < config.min_area) continue;
+    if (std::min(w, h) < config.min_side || w * h < config.min_area || w * h > max_area) continue;
     const double aspect = std::max(w, h) / std::min(w, h);
     if (aspect < config.min_aspect || aspect > config.max_aspect) continue;
     if (cv::contourArea(c) / (w * h) < config.min_fill) continue;
     const cv::Rect box = cv::boundingRect(c);
-    scored.emplace_back(cv::mean(diff(box))[0] * box.area(), box);
+    scored.emplace_back(cv::mean(positive(box))[0] * box.area(), box);
   }
   std::sort(scored.begin(), scored.end(), [](const auto &a, const auto &b) {return a.first > b.first;});
   const cv::Rect frame(0, 0, grey.cols, grey.rows);
-  for (const auto &[score, box] : scored) {
+  for (const auto &[score_, box] : scored) {
     if (static_cast<int>(out.size()) >= config.max_regions) break;
     const double x = box.x / s, y = box.y / s, w = box.width / s, h = box.height / s;
     const double px = config.pad * std::max(w, h) + 8.0;  // quiet zone either way the bars run
@@ -136,8 +149,26 @@ std::vector<cv::Mat> bar_profiles(const cv::Mat &grey, const cv::Rect &region) {
   if (r.width < 8 || r.height < 8) return out;
   cv::Mat c; grey(r).convertTo(c, CV_32F);
   cv::Mat gx, gy; cv::Sobel(c, gx, CV_32F, 1, 0, 3); cv::Sobel(c, gy, CV_32F, 0, 1, 3);
-  const double sxy = cv::sum(gx.mul(gy))[0], sxx = cv::sum(gx.mul(gx))[0], syy = cv::sum(gy.mul(gy))[0];
-  const double angle = 0.5 * std::atan2(2 * sxy, sxx - syy);  // gradient direction = across the bars
+  // Gradient direction across the bars = the mode of the gradient orientation (doubled angle, magnitude weighted,
+  // 2 deg bins). The structure-tensor mean used before was pulled off by the label border and the wall edge: 21.6 deg
+  // on bars at 12.5 deg (uppercam 1080p, 2026-11-14), P2-02 scored 0.55 there and 0.69 at the mode.
+  cv::Mat mag, ori;
+  cv::cartToPolar(gx, gy, mag, ori);
+  std::array<double, 180> hist{};
+  for (int y = 0; y < mag.rows; ++y) {
+    for (int x = 0; x < mag.cols; ++x) {
+      const double a2 = std::fmod(2.0 * ori.at<float>(y, x), 2 * CV_PI);
+      hist[static_cast<int>(a2 / (2 * CV_PI) * 180) % 180] += mag.at<float>(y, x);
+    }
+  }
+  int mode = 0;
+  double top = -1;
+  for (int b = 0; b < 180; ++b) {
+    const double v = hist[(b + 179) % 180] + 2 * hist[b] + hist[(b + 1) % 180];
+    if (v > top) {top = v; mode = b;}
+  }
+  double angle = (mode + 0.5) * CV_PI / 180;  // half the doubled angle: [0, pi)
+  if (angle > CV_PI / 2) angle -= CV_PI;
   cv::Mat c4; cv::resize(c, c4, cv::Size(), kUp, kUp, cv::INTER_CUBIC);
   const cv::Mat rot = cv::getRotationMatrix2D(cv::Point2f(c4.cols / 2.0f, c4.rows / 2.0f), angle * 180.0 / CV_PI, 1.0);
   cv::Mat u; cv::warpAffine(c4, u, rot, c4.size(), cv::INTER_LINEAR, cv::BORDER_REPLICATE);

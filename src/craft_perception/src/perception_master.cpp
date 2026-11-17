@@ -364,6 +364,8 @@ void PerceptionMaster::configure() {
     light.color_source = source == "pixels" ? ColorSource::kPixels : ColorSource::kYolo;
     light.off_class_id = param<int64_t>("uppercam.traffic_light.off_class_id");
     light.locate_min_score = param<double>("uppercam.traffic_light.locate_min_score");
+    light.tower_min_aspect = param<double>("uppercam.traffic_light.tower_min_aspect");
+    light.hold_box_s = param<double>("uppercam.traffic_light.hold_box_s");
     const std::string px = "uppercam.traffic_light.pixels.";
     light.pixels.bright_v = param<int64_t>(px + "bright_v");
     light.pixels.on_fraction = param<double>(px + "on_fraction");
@@ -381,6 +383,17 @@ void PerceptionMaster::configure() {
     light.pixels.red_by_position = param<bool>(px + "red_by_position");
     light.pixels.cap_fraction = param<double>(px + "cap_fraction");
     light.pixels.use_ring_hue = param<bool>(px + "use_ring_hue");
+    light.pixels.use_blocks = param<bool>(px + "use_blocks");
+    light.pixels.block_column = param<double>(px + "block_column");
+    light.pixels.block_min_saturation = param<int64_t>(px + "block_min_saturation");
+    light.pixels.block_min_value = param<int64_t>(px + "block_min_value");
+    light.pixels.block_row_share = param<double>(px + "block_row_share");
+    light.pixels.block_red_hue_below = param<double>(px + "block_red_hue_below");
+    light.pixels.block_red_hue_from = param<double>(px + "block_red_hue_from");
+    light.pixels.block_orange_hue_max = param<double>(px + "block_orange_hue_max");
+    light.pixels.block_red_min = param<double>(px + "block_red_min");
+    light.pixels.block_orange_min = param<double>(px + "block_orange_min");
+    mission_event("INFO", "SIGNAL_COLOR_SOURCE", "color_source=%s", source.c_str());
     mission_event("INFO", "SIGNAL_COLOR_SOURCE", "color_source=%s", source.c_str());
     for (const int id : {light.red_class_id, light.yellow_class_id, light.green_class_id, light.off_class_id}) {
       if (id >= static_cast<int>(uppercam_labels_.size())) {
@@ -549,12 +562,24 @@ void PerceptionMaster::connect() {
   // Upper-cam colour size for the bridge (2026-11-14): the light is counted at the normal size (640x360, full rate);
   // only after SIGNAL_COMPLETE, while the barcode is not confirmed, 1080p (the barcode is unreadable below it). Latched.
   hires_pub_ = create_publisher<std_msgs::msg::Bool>("/perception/uppercam/hires", rclcpp::QoS(1).transient_local());
+  // Raw (not JPEG) crop of the best barcode region from the bridge (user 2026-11-14): perception finds the region on
+  // the JPEG frame and sends it, the bridge answers with that region of the raw colour frame.
+  barcode_roi_pub_ = create_publisher<std_msgs::msg::Int32MultiArray>("/perception/uppercam/barcode_roi", 10);
+  barcode_crop_sub_ = create_subscription<sensor_msgs::msg::Image>("/perception/uppercam/barcode_crop",
+    rclcpp::SensorDataQoS(), [this](sensor_msgs::msg::Image::ConstSharedPtr m) {
+      if (m->encoding != "bgr8" || m->width < 8 || m->height < 8 || m->step < m->width * 3) return;
+      cv::Mat crop = cv::Mat(m->height, m->width, CV_8UC3, const_cast<uint8_t *>(m->data.data()), m->step).clone();
+      std::lock_guard<std::mutex> lock(barcode_crop_mutex_);
+      barcode_crop_ = crop;
+      barcode_crop_at_ = now().seconds();
+    });
   publish_hires(false);
   traffic_light_reset_sub_ = create_subscription<std_msgs::msg::Empty>("/perception/traffic_light/reset", 10,
     [this](std_msgs::msg::Empty::ConstSharedPtr) {
       std::lock_guard<std::mutex> lock(traffic_light_mutex_);
       traffic_light_.reset();
       barcode_.reset();
+      mission_past_barcode_ = false;
       barcode_pub_->publish(std_msgs::msg::String());  // empty = not read yet
       publish_hires(false);
       std_msgs::msg::Header header;
@@ -562,6 +587,23 @@ void PerceptionMaster::connect() {
       header.frame_id = uppercam_frame_;
       publish_traffic_light(header);
       mission_event("INFO", "SIGNAL_RESET", "signal counter and barcode reset");
+    });
+  // The mission moves to ReadBarcode once it accepts the signal, also from a fake one (fakesign) this node never
+  // counted: read the barcode at 1080p from then on as well (user 2026-11-14).
+  mission_state_sub_ = create_subscription<std_msgs::msg::String>("/mission/state",
+    rclcpp::QoS(1).reliable().transient_local(), [this](std_msgs::msg::String::ConstSharedPtr m) {
+      const bool reading = m->data.rfind("ReadBarcode", 0) == 0;
+      std::lock_guard<std::mutex> lock(traffic_light_mutex_);
+      if (reading && !mission_reads_barcode_ && !barcode_.confirmed()) publish_hires(true);
+      // Left ReadBarcode (a barcode it got elsewhere, e.g. fakebarcode): back to color_size, no signal / barcode work
+      // until the next start. At 1080p the bridge sends no box observation: mission_1114_2349 kept 1080p after
+      // fakebarcode and S1 faulted in CameraVerify on "box observation invalid or stale" (user 2026-11-15).
+      if (!reading && mission_reads_barcode_) {
+        mission_past_barcode_ = true;
+        publish_hires(false);
+      }
+      if (m->data.rfind("Idle", 0) == 0 || m->data.rfind("WatchSignal", 0) == 0) mission_past_barcode_ = false;
+      mission_reads_barcode_ = reading;
     });
   object_pub_ = create_publisher<geometry_msgs::msg::PoseArray>("/perception/vision/d435/object_detection", 10);
   obstacle_pub_ = create_publisher<geometry_msgs::msg::PoseArray>("/perception/vision/d435/obstacle", 10);
@@ -1125,8 +1167,8 @@ bool PerceptionMaster::uppercam_traffic_light(Task &task) {
   bool need_signal, need_barcode;
   {
     std::lock_guard<std::mutex> lock(traffic_light_mutex_);
-    need_signal = !traffic_light_.complete();
-    need_barcode = !need_signal && !barcode_.confirmed();  // after the light: frames are 1080p only then
+    need_signal = !traffic_light_.complete() && !mission_reads_barcode_ && !mission_past_barcode_;
+    need_barcode = !need_signal && !barcode_.confirmed() && !mission_past_barcode_;  // after the light (or the mission's ReadBarcode): 1080p
   }
   if (!need_signal && !need_barcode) return false;
   if (!is_fresh_input(image->header.stamp)) return false;
@@ -1147,7 +1189,28 @@ bool PerceptionMaster::uppercam_traffic_light(Task &task) {
     }
     // Nothing decoded: pattern-match the four mission codes on the best regions (too small / bent to decode).
     std::optional<KnownCodeMatch> match;
+    if (!regions.empty()) {  // the bridge crops the best one from the raw frame
+      std_msgs::msg::Int32MultiArray roi;
+      roi.data = {regions[0].x, regions[0].y, regions[0].width, regions[0].height};
+      barcode_roi_pub_->publish(roi);
+    }
     if (texts.empty() && barcode_match_.enabled) {
+      cv::Mat crop;
+      {
+        std::lock_guard<std::mutex> lock(barcode_crop_mutex_);
+        if (!barcode_crop_.empty() && now().seconds() - barcode_crop_at_ < 0.5) crop = barcode_crop_;
+      }
+      if (!crop.empty()) {
+        // ZXing on the small raw crop first (~1-2 ms, user 2026-11-15: close and sharp enough it just reads), even
+        // with uppercam.barcode.decode off; the pattern vote when it reads nothing.
+        texts = decode_code128_regions(crop, {cv::Rect(0, 0, crop.cols, crop.rows)});
+      }
+      if (!crop.empty() && texts.empty()) {
+        match = match_known_code128(crop, {cv::Rect(0, 0, crop.cols, crop.rows)}, barcode_match_.codes);
+        if (match && (match->score < barcode_match_.min_score || match->margin < barcode_match_.min_margin)) match.reset();
+      }
+    }
+    if (!match && texts.empty() && barcode_match_.enabled) {
       const std::vector<cv::Rect> top(regions.begin(),
         regions.begin() + std::min<std::size_t>(barcode_match_.regions, regions.size()));
       match = match_known_code128(bgr, top, barcode_match_.codes);
@@ -1198,7 +1261,7 @@ bool PerceptionMaster::uppercam_traffic_light(Task &task) {
   if (traffic_light_.complete()) {  // the light stayed dark for end_off_s after a valid 12
     mission_event("INFO", "SIGNAL_COMPLETE", "(%d/%d) total R=%d Y=%d G=%d",
       counts.total(), traffic_light_.expected_blinks(), counts.red(), counts.yellow(), counts.green());
-    if (!barcode_.confirmed()) publish_hires(true);  // now the barcode: 1080p until it is confirmed
+    if (!barcode_.confirmed() && !mission_past_barcode_) publish_hires(true);  // now the barcode: 1080p until confirmed
   }
   if (blink || traffic_light_.complete()) publish_traffic_light(header);
   return true;

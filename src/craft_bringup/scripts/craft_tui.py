@@ -47,7 +47,7 @@ except ImportError:
     cv2 = None
 
 LATCHED = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
-BODY_CENTER_X, BODY_R = 0.01275, 0.27  # merged scan is in base_link: drop the robot itself (run_corner.py)
+BODY_CENTER_X, BODY_R = 0.06075, 0.27  # 0.01275 + 0.048 (base_link moved back 2026-11-15)  # merged scan is in base_link: drop the robot itself (run_corner.py)
 FIT_TOL = 0.05                          # [m] a scan point within this of a wall counts as fitting
 
 BOX_PHASE_TEXT = {

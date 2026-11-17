@@ -2,9 +2,9 @@
 <!-- v307_full_robot: make_urdf_usd.py가 생성(V303 통합본 + 상단 D435 실측 43.6도). SI 단위. -->
 <robot name="v307_full_robot">
   <link name="base_link">
-    <inertial><origin xyz="-0.0228095032 -0.00410348064 0.149603686" rpy="0 0 0"/><mass value="5.000111"/><inertia ixx="0.143453075" ixy="0.00313637572" ixz="0.0329086051" iyy="0.151701509" iyz="-0.00305281255" izz="0.0824836837"/></inertial>
-    <visual><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://craft_description/meshes/visual/base_link.stl"/></geometry><material name="base_link_mat"><color rgba="0.93 0.36 0.1 1"/></material></visual>
-    <collision><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://craft_description/meshes/collision/base_link.stl"/></geometry></collision>
+    <inertial><origin xyz="0.0251904968 -0.00410348064 0.149603686" rpy="0 0 0"/><mass value="5.000111"/><inertia ixx="0.143453075" ixy="0.00313637572" ixz="0.0329086051" iyy="0.151701509" iyz="-0.00305281255" izz="0.0824836837"/></inertial>
+    <visual><origin xyz="0.048 0 0" rpy="0 0 0"/><geometry><mesh filename="package://craft_description/meshes/visual/base_link.stl"/></geometry><material name="base_link_mat"><color rgba="0.93 0.36 0.1 1"/></material></visual>
+    <collision><origin xyz="0.048 0 0" rpy="0 0 0"/><geometry><mesh filename="package://craft_description/meshes/collision/base_link.stl"/></geometry></collision>
   </link>
   <link name="slide_link">
     <inertial><origin xyz="0.0146031475 -0.000185518595 0.0107615661" rpy="0 0 0"/><mass value="0.180426"/><inertia ixx="6.46258835e-05" ixy="6.54442244e-07" ixz="-1.22292275e-05" iyy="8.8552421e-05" iyz="1.25846815e-06" izz="8.39891282e-05"/></inertial>
@@ -66,7 +66,7 @@
     <visual><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://craft_description/meshes/visual/rear_right_wheel_link.stl"/></geometry><material name="rear_right_wheel_link_mat"><color rgba="0.6 0.6 0.6 1"/></material></visual>
     <collision><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://craft_description/meshes/collision/rear_right_wheel_link.stl"/></geometry></collision>
   </link>
-  <joint name="lm_slide" type="prismatic"><parent link="base_link"/><child link="slide_link"/><origin xyz="0.142 -0.0435 0.09825" rpy="0 0 0"/><axis xyz="0 1 0"/>
+  <joint name="lm_slide" type="prismatic"><parent link="base_link"/><child link="slide_link"/><origin xyz="0.19 -0.0435 0.09825" rpy="0 0 0"/><axis xyz="0 1 0"/>
     <limit lower="-0.021" upper="0.108" effort="60.0" velocity="0.0513"/>
     <dynamics damping="0.01" friction="2.0"/></joint>
   <joint name="shoulder" type="revolute"><parent link="slide_link"/><child link="shoulder_link"/><origin xyz="0.035 0 0.01975" rpy="0 0 0"/><axis xyz="0 1 0"/>
@@ -87,37 +87,37 @@
   <joint name="jaw_lower" type="prismatic"><parent link="tool_roll_link"/><child link="jaw_lower_link"/><origin xyz="0 0 0" rpy="0 0 0"/><axis xyz="0.0694790287 0 0.997583412"/>
     <limit lower="-0.01" upper="0.01268" effort="20.0" velocity="0.08"/>
     <dynamics damping="0.01" friction="0.5"/></joint>
-  <joint name="carousel" type="continuous"><parent link="base_link"/><child link="carousel_link"/><origin xyz="-0.002 0 0.08575" rpy="0 0 0"/><axis xyz="0 0 1"/>
+  <joint name="carousel" type="continuous"><parent link="base_link"/><child link="carousel_link"/><origin xyz="0.046 0 0.08575" rpy="0 0 0"/><axis xyz="0 0 1"/>
     <limit effort="3.0" velocity="3.0"/>
     <dynamics damping="0.01" friction="0.05"/></joint>
-  <joint name="front_left_wheel" type="continuous"><parent link="base_link"/><child link="front_left_wheel_link"/><origin xyz="0.098 0.144 0" rpy="0 0 0"/><axis xyz="0 1 0"/>
+  <joint name="front_left_wheel" type="continuous"><parent link="base_link"/><child link="front_left_wheel_link"/><origin xyz="0.146 0.144 0" rpy="0 0 0"/><axis xyz="0 1 0"/>
     <limit effort="3.0" velocity="8.06"/>
     <dynamics damping="0.01" friction="0.02"/></joint>
-  <joint name="front_right_wheel" type="continuous"><parent link="base_link"/><child link="front_right_wheel_link"/><origin xyz="0.098 -0.144 0" rpy="0 0 0"/><axis xyz="0 1 0"/>
+  <joint name="front_right_wheel" type="continuous"><parent link="base_link"/><child link="front_right_wheel_link"/><origin xyz="0.146 -0.144 0" rpy="0 0 0"/><axis xyz="0 1 0"/>
     <limit effort="3.0" velocity="8.06"/>
     <dynamics damping="0.01" friction="0.02"/></joint>
-  <joint name="rear_left_wheel" type="continuous"><parent link="base_link"/><child link="rear_left_wheel_link"/><origin xyz="-0.098 0.144 0" rpy="0 0 0"/><axis xyz="0 1 0"/>
+  <joint name="rear_left_wheel" type="continuous"><parent link="base_link"/><child link="rear_left_wheel_link"/><origin xyz="-0.05 0.144 0" rpy="0 0 0"/><axis xyz="0 1 0"/>
     <limit effort="3.0" velocity="8.06"/>
     <dynamics damping="0.01" friction="0.02"/></joint>
-  <joint name="rear_right_wheel" type="continuous"><parent link="base_link"/><child link="rear_right_wheel_link"/><origin xyz="-0.098 -0.144 0" rpy="0 0 0"/><axis xyz="0 1 0"/>
+  <joint name="rear_right_wheel" type="continuous"><parent link="base_link"/><child link="rear_right_wheel_link"/><origin xyz="-0.05 -0.144 0" rpy="0 0 0"/><axis xyz="0 1 0"/>
     <limit effort="3.0" velocity="8.06"/>
     <dynamics damping="0.01" friction="0.02"/></joint>
   <link name="base_footprint"/>
   <joint name="base_footprint_joint" type="fixed"><parent link="base_link"/><child link="base_footprint"/><origin xyz="0 0 -0.034346" rpy="0 0 0"/></joint>
   <link name="front_laser"/>
-  <joint name="front_laser_joint" type="fixed"><parent link="base_link"/><child link="front_laser"/><origin xyz="0.19067 2e-05 0.0567" rpy="0 0 0"/></joint>
+  <joint name="front_laser_joint" type="fixed"><parent link="base_link"/><child link="front_laser"/><origin xyz="0.23867 2e-05 0.0567" rpy="0 0 0"/></joint>
   <link name="rear_laser"/>
-  <joint name="rear_laser_joint" type="fixed"><parent link="base_link"/><child link="rear_laser"/><origin xyz="-0.11567 0 0.0507" rpy="0 -0 3.14159265"/></joint>
+  <joint name="rear_laser_joint" type="fixed"><parent link="base_link"/><child link="rear_laser"/><origin xyz="-0.06767 0 0.0507" rpy="0 -0 3.14159265"/></joint>
   <link name="imu_link"/>
-  <joint name="imu_link_joint" type="fixed"><parent link="base_link"/><child link="imu_link"/><origin xyz="-0.0355 0.0895 0.03512" rpy="0 0 0"/></joint>
+  <joint name="imu_link_joint" type="fixed"><parent link="base_link"/><child link="imu_link"/><origin xyz="0.0125 0.0895 0.03512" rpy="0 0 0"/></joint>
   <link name="camera_top_color_link"/>
-  <joint name="camera_top_color_link_joint" type="fixed"><parent link="base_link"/><child link="camera_top_color_link"/><origin xyz="-0.0621011188 -0.0325 0.592847012" rpy="-0 0.760950852 0"/></joint>
+  <joint name="camera_top_color_link_joint" type="fixed"><parent link="base_link"/><child link="camera_top_color_link"/><origin xyz="-0.0141011188 -0.0325 0.592847012" rpy="-0 0.760950852 0"/></joint>
   <link name="camera_top_color_optical_frame"/>
-  <joint name="camera_top_color_optical_frame_joint" type="fixed"><parent link="base_link"/><child link="camera_top_color_optical_frame"/><origin xyz="-0.0621011188 -0.0325 0.592847012" rpy="-2.33174718 -0 -1.57079633"/></joint>
+  <joint name="camera_top_color_optical_frame_joint" type="fixed"><parent link="base_link"/><child link="camera_top_color_optical_frame"/><origin xyz="-0.0141011188 -0.0325 0.592847012" rpy="-2.33174718 -0 -1.57079633"/></joint>
   <link name="camera_top_depth_link"/>
-  <joint name="camera_top_depth_link_joint" type="fixed"><parent link="base_link"/><child link="camera_top_depth_link"/><origin xyz="-0.0620531531 0.0325 0.592861129" rpy="-0 0.760950852 0"/></joint>
+  <joint name="camera_top_depth_link_joint" type="fixed"><parent link="base_link"/><child link="camera_top_depth_link"/><origin xyz="-0.0140531531 0.0325 0.592861129" rpy="-0 0.760950852 0"/></joint>
   <link name="camera_top_depth_optical_frame"/>
-  <joint name="camera_top_depth_optical_frame_joint" type="fixed"><parent link="base_link"/><child link="camera_top_depth_optical_frame"/><origin xyz="-0.0620531531 0.0325 0.592861129" rpy="-2.33174718 -0 -1.57079633"/></joint>
+  <joint name="camera_top_depth_optical_frame_joint" type="fixed"><parent link="base_link"/><child link="camera_top_depth_optical_frame"/><origin xyz="-0.0140531531 0.0325 0.592861129" rpy="-2.33174718 -0 -1.57079633"/></joint>
   <link name="camera_wrist_color_link"/>
   <joint name="camera_wrist_color_link_joint" type="fixed"><parent link="wrist_pitch_link"/><child link="camera_wrist_color_link"/><origin xyz="-0.0561524751 0.106 -0.0146339865" rpy="1.5413706 -0.063011052 -2.70433289"/></joint>
   <link name="camera_wrist_color_optical_frame"/>

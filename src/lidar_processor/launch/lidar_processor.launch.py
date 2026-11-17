@@ -74,14 +74,15 @@ def generate_launch_description():
         # 2026-10-30: base_link 를 두 LiDAR 가운데에서 앞뒤 바퀴 축 가운데로 옮김(4WD 스키드 스티어의
         # 회전 중심). 두 LiDAR 가운데가 축 가운데보다 26 mm 앞(실측) → x 에 +0.026 (예전 ±0.1437)
         # 2026-10-31 (축 간격 0.16 m 차체): 회전축 중심이 전방 LiDAR 중심에서 15.5 cm 뒤(실측) -> 가운데 +0.01275
-        DeclareLaunchArgument('body_center_x', default_value='0.01275',
+        # 2026-11-15: base_link moved 48 mm back to the measured turn-in-place centre (ICP over 16 turns, mission_1115_0047/0109: the robot pivots ~45-50 mm behind the axle midpoint, rear-heavy): every x here +0.048.
+        DeclareLaunchArgument('body_center_x', default_value='0.06075',
                               description='몸체 중앙(두 LiDAR 가운데)의 base_link x [m], 몸체 필터 중심'),
         # 2026-10-31 뒤집어 재장착 후 실측: 1층 판 32 cm 양끝 안쪽에 LiDAR, 몸체 내측 24.9 cm -> 한 개 두께
         # 3.55 cm, 몸체 중심 간 28.45 cm. 전방 LiDAR 중심이 회전축 중심에서 15.5 cm 앞 -> 후방 -0.1295.
         # 두 LiDAR 모두 로봇 좌우 가운데 선 위(확인) -> y 0.
-        DeclareLaunchArgument('front_x', default_value='0.155'),
+        DeclareLaunchArgument('front_x', default_value='0.203'),  # 0.155 before 2026-11-15
         DeclareLaunchArgument('front_y', default_value='0.0'),
-        DeclareLaunchArgument('rear_x', default_value='-0.1295'),
+        DeclareLaunchArgument('rear_x', default_value='-0.0815'),  # -0.1295 before 2026-11-15
         DeclareLaunchArgument('rear_y', default_value='0.0'),
         # 2026-10-31: 두 LiDAR 를 뒤집어(업사이드다운) 다시 장착 -> roll 180도. 병합·보정 코드는 roll 180도(z 축
         # 아래)를 보고 스캔 각도 부호를 뒤집는다. 각 LiDAR 의 스캔 0도는 로봇 안쪽(반대편 LiDAR)을 향함 (실측:

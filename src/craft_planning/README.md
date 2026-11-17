@@ -374,3 +374,168 @@ Until then `assume_unknown_picks: true` hands the surveyed ids out to the slots 
 
 `box_approach.square_boxes` (L1-L3): these boxes are not turned, so they take the map yaw and skip the second stage
 drive + LiDAR measurement of a box step.
+
+### Calibrated puck pick integration (2026-11-15)
+
+`mission:=true` also starts `puck_picker.py`. A `PickPuck` action now waits for the
+actual executor result; it no longer succeeds after the skeleton delay.
+The adapter runs `demo/puck_pick/execute.py --planning --slot N --box NAME --auto`.
+`planning_master` owns all control task IDs, the hold heartbeat, watchdogs and STOP.
+The executor sends one correlated request at a time on `/planning/pick_step` and
+waits for `/planning/pick_step_result`. Arm durations, tolerances, gains and taught
+poses pass through unchanged. No grasp confirmation, a failed step, timeout or
+cancellation fails the pick and stops the sequence.
+
+For lying prisms the existing calibrated order is preserved:
+
+1. Pick at taught cell 2 or 5; place on cell 8 and rise.
+2. Reverse **0.28 m** along the robot heading. This request is never shortened to
+   the default reverse minimum if the endpoint is blocked.
+3. Move elbow/wrist/LM; raise shoulder halfway with roll held; then finish shoulder
+   travel with roll rotation.
+4. Re-dock at the same box via the existing near-entry LiDAR/camera docking FSM.
+5. Regrasp, load into the requested clock slot, carry via, via, nominal.
+
+The C++ camera executables need exclusive camera access. The project camera
+drivers now accept `pick_pause` leases and acknowledge `pick_paused` after closing
+the USB stream. The executor renews the lease during capture, releases it after
+capture (also on error), and drivers resume when an abandoned lease expires after
+2 seconds. Uppercam remains available for re-docking. Restart the rebuilt
+`uppercam_bridge` and `realsense_processor` before using this integration.
+
+For a single lying pick with the project already running, docked at S1, arm at
+nominal, and planning in `Run.AwaitRequest`:
+
+```bash
+source ~/craft/install/setup.bash
+python3 ~/craft/demo/puck_pick/execute.py --planning --lie --cell 5 --pick --box S1 --slot 12 --auto
+```
+
+Without `--planning`, the experimental executor retains its manual wheel pauses.
+`--dry-run` prints the pose plan without starting ROS or moving the robot.
+
+Mission configuration: `drive_only: true` still skips picks. For a collection run,
+set it to false and set `pick_modes` to one entry per collected slot in visiting
+order: `collect`, `find`, `lie2`, or `lie5`. Omit the list for automatic `collect` everywhere (standing first, then nearest).
+The adapter's `executor_path` parameter defaults to `~/craft/demo/puck_pick/execute.py`;
+its `log_dir` defaults to `~/craft_mission_logs/picks` and each request has a log.
+`pick_timeout_s` bounds the mission pick; adapter `timeout_s` defaults to 600 s.
+
+Limits: lying picks still use the taught 2/5 cell locations (only lateral correction
+is calibrated); no arbitrary-position lying picker or validated cylinder picker
+has been added. Observe/Place/Verify and puck-ID assignment are still the prior
+skeletons, so enabling picks does **not** make the full competition mission complete.
+Hardware validation of reverse/re-dock with the regrasp arm pose remains required.
+
+### RViz puck footprints (2026-11-16)
+
+`craft.launch.py` starts `craft_bringup/puck_marker.py` and the RViz configs include
+`/perception/pucks/markers` (MarkerArray, reliable, transient local). It draws flat
+footprints in `map`, fixed at each observation's timestamp:
+
+- Standing cylinder: circle; standing prism: square.
+- Lying cylinder: capsule; lying prism: long rectangle, aligned with the observed axis.
+- Red/green fill: detected colour; grey: colour unknown.
+- Text: ID (or local detection index), `standing`/`lying`, colour, shape, source and confidence.
+- Unknown posture/shape: diamond and `unknown`; missing yaw is labelled explicitly.
+
+It consumes upper/gripper `puck_survey_observations` plus the calibrated executor's
+`/perception/pucks/picker_upper` and `picker_grip` snapshots. Uppercam's coarse
+position/class alone does not prove posture. The gripper depth result confirms
+posture and provides the geometric footprint axis. A nearby matching-shape upper
+snapshot (within 60 mm) supplies colour for the gripper snapshot; its coarse marker
+is replaced by the detailed one. This association is for display only.
+
+Live observations expire after 3 s; executor snapshots after 30 s or explicit clear.
+An empty observation clears that source immediately. Missing TF or missing measured
+3D position is not drawn at a guessed location. Full-project TF uses the gripper
+camera alias `camera_color_optical_frame` -> `camera_wrist_color_optical_frame`.
+
+For an already-running project, start the display node separately:
+
+```bash
+ros2 run craft_bringup puck_marker.py
+```
+
+For a standalone arm demo without `map` TF, use `--ros-args -p fixed_frame:=base_link`.
+RViz: Add → MarkerArray → `/perception/pucks/markers`; TopDownOrtho gives a 2D view.
+The footprints use nominal 30 mm width/diameter and 60 mm length, not fitted dimensions.
+
+### Two-puck collection priority (2026-11-16)
+
+S1..S6 each contain two pucks: red/green, cylinder/prism. Cylinders always stand;
+prisms may stand or lie. The default mission `PickPuck` mode is now `collect`:
+
+1. Survey the docked box at nominal with `upper_puck` before each pick.
+2. Keep confident detections (>=0.4) in the docked 205 mm box footprint (ahead
+   0..205 mm, lateral +/-102.5 mm after camera bias correction).
+3. Treat cylinders as standing. For prisms, estimate the local box surface from
+   surrounding depth excluding detected pucks; compare the puck's 95th percentile
+   top height to that surface: 45..75 mm standing, 20..40 mm lying, otherwise unknown.
+4. Sort by **standing first**, then increasing planar distance from `base_link` to
+   the corrected puck centre. Colour, shape and confidence do not override these
+   rules; confidence only breaks an exact distance tie.
+5. Run the selected standing/lying sequence into the requested slot. After loading,
+   return to nominal. The next mission pick takes a **new** survey, not the old list.
+
+Mission requests include the remaining count: 2 for the first pick, 1 for the
+second. A missing/extra detection or unknown prism posture triggers one rescan,
+then fails instead of violating priority. A highest-priority target out of calibrated
+reach also fails; it is never silently skipped in favour of another puck.
+
+`execute.py --collect --planning --box S1 --slot 1 --expected-pucks 2 --auto`
+executes one policy-selected pick; use slot 2 / expected-pucks 1 for the second.
+The mission supplies these values automatically. `--find` also uses the ranking
+policy for standing candidates; `--lie --cell` remains the explicit teaching mode.
+Selection candidates, posture, distance and the selected target are saved in
+`runs/find_*/log.json` under `selection` and printed as `PICK POLICY`.
+
+The gripper reader gates blobs around the selected calibration position and avoids
+the other candidate's predicted camera position. Standing and lying modes no longer
+compete on frame count during a selected pick. Cylinders use `--no-yaw` (centre only,
+no yaw stability rejection or tool-roll correction). Synthetic two-puck depth checks
+cover choosing each prism, rejecting an ambiguous rival and cylinder centre-only mode.
+
+Calibration limits still apply: automatic lying dispatch uses the taught 2/5 row
+neighbourhoods (within 20 mm of their corrected row coordinates), coarse lateral
+positioning and local gripper corrections up to 25 mm. Forward corrections require
+the complete local model solution; failure stops before descent. Arbitrary-position
+lying trajectories, uppercam posture classification with two real pucks and real
+cylinder picks still need hardware validation. `drive_only` remains the current
+mission configuration until the collection trial is enabled.
+
+### View the decision simulation in RViz
+
+```bash
+bash ~/craft/demo/puck_pick/run_pick_policy_sim.sh
+```
+
+The launcher opens six simultaneous S1..S6 examples in a separate ROS domain (217),
+using the actual `pick_policy.py` parser and selector. Gold circles mark the current
+target; grey ghosts have been removed. Every five seconds the display advances from
+first pick to a fresh survey of the remaining puck, then completion. Closing RViz
+stops both display processes. No hardware/control nodes are launched.
+
+The deterministic verification covers 1,788 pairs (including 1,500 seeded random
+pairs), reversed detector ordering, fresh second-pick surveys, unknown/missing/extra
+observations and always-standing cylinders. The independent expected result uses
+standing priority followed by base-link planar distance. Inputs are synthetic
+perception outputs: camera classification and physical motion are outside this test.
+
+`--verify-only` runs without a window. Results and screenshots are under
+`demo/puck_pick/runs/policy_sim/`; `verification.json` includes counts and the six
+example orders. On domain217, `/puck_pick_sim/command` accepts String values
+`pause`, `play`, `next`, `reset`. `PICK_SIM_DOMAIN_ID` overrides the isolated domain.
+
+### Driving and LiDAR simulation (camera-free)
+
+`bash ~/craft/demo/driving_sim/run.sh` opens an isolated domain216 simulation with
+this unchanged `planning_master`, the production wheel tracking controllers,
+the V307 URDF and lightweight dual LiDAR ray casting. RViz shows the known map,
+planner padding, initial/current issued paths, actual trajectory and front/rear
+scans. An unmapped obstacle appears during travel so sensor-driven replanning is
+visible. No hardware controller, drivers or camera pipeline is started.
+
+See `demo/driving_sim/README.md` for sensor/CAD assumptions, the simulation-only
+0.34 m planner radius, tests and recorded results. This uses ideal wheel kinematics
+and ground-truth localization; it is not a SLAM or contact-physics validation.

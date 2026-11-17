@@ -1,0 +1,25 @@
+# Synthetic spacious arena. URDF visual/sensor geometry and production planner/controller code are real inputs.
+arena: {width: 6.0, height: 4.0, resolution: 0.02, wall_thickness: 0.10, border: 0.20}
+map_file: map.yaml
+urdf: ../../src/craft_description/urdf/v307_full_robot.urdf
+start: [0.65, 0.65, 0.0]
+goals:
+  - [5.30, 0.65, 1.57079632679]
+  - [5.30, 3.30, 3.14159265359]
+  - [0.65, 3.30, -1.57079632679]
+  - [0.65, 0.65, 0.0]
+# These rectangles are baked into map.pgm. Dynamic box is NOT in the planner map.
+static_rectangles:
+  - {name: known_A, x: 2.8, y: 0.70, width: 0.45, depth: 0.60, height: 0.50}
+  - {name: known_B, x: 3.4, y: 2.90, width: 0.60, depth: 0.60, height: 0.50}
+  - {name: known_C, x: 1.6, y: 2.00, width: 0.60, depth: 0.70, height: 0.50}
+dynamic: {enabled: false, x: 3.0, y: 1.5, width: 0.25, depth: 0.25, height: 0.25}
+auto_obstacle_after_m: 0.80
+repeat: true
+lidar:
+  hz: 10.0
+  range_min: 0.10
+  range_max: 8.0
+  noise_std: 0.003
+  dropout: 0.01
+seed: 16

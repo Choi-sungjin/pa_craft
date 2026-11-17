@@ -1,0 +1,11 @@
+# Simulation-only overrides; never used by craft.launch.py or hardware.
+planning_master:
+  ros__parameters:
+    require_arm_joints: false
+    require_lidar_localization: false
+    box_approach.camera_enabled: false
+    box_approach.camera_only_longitudinal: false
+    # V307 full XY base mesh + visual origin has front corner radius ~0.326 m.
+    # Simulation pads enough for the CAD body; production parameters are untouched.
+    path_planner.r_robot: 0.34
+    fsm.execution_timeout_s: 180.0

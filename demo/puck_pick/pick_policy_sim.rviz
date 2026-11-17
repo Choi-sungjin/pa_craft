@@ -1,0 +1,39 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Pick decision simulation
+      Enabled: true
+      Topic:
+        Value: /puck_pick_sim/markers
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+        History Policy: Keep Last
+        Depth: 1
+  Global Options:
+    Fixed Frame: pick_sim
+    Background Color: 20; 26; 38
+    Frame Rate: 30
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Measure
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Name: Decision overview
+      Target Frame: pick_sim
+      Angle: 0
+      Scale: 560
+      X: 0.0
+      Y: -0.04
+    Saved: ~
+Window Geometry:
+  Width: 1550
+  Height: 1000
+  X: 90
+  Y: 40
+  Displays:
+    collapsed: true

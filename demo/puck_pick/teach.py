@@ -138,12 +138,21 @@ def main():
                     print('\njog off: the board holds the last target')
                 elif int(v[6]) == 2 and v[7:13] == [0.0] * 6:
                     print('\ntorque looks off (relaxed or fault): h first, then j')
-                elif any(not lo <= x <= hi for x, (lo, hi) in zip(v[:6], limits)):
-                    # The board drops a whole command when one axis is out of its limits: nothing would move.
+                elif any(not lo - math.radians(10) <= x <= hi + math.radians(10) for x, (lo, hi) in zip(v[:6], limits)):
+                    # Far outside (> 10 deg): the clamp below would be a big move by itself
                     out = [f'{n} {math.degrees(x):.1f} (limits {math.degrees(lo):.1f}..{math.degrees(hi):.1f})'
                            for n, x, (lo, hi) in zip(NAMES, v[:6], limits) if not lo <= x <= hi]
-                    print('\nno jog: outside the motor limits, the board would ignore every command: ' + ', '.join(out)
+                    print('\nno jog: more than 10 deg outside the motor limits: ' + ', '.join(out)
                           + '. Support the arm, r, move it inside by hand, h, then j.')
+                elif any(not lo <= x <= hi for x, (lo, hi) in zip(v[:6], limits)):
+                    # Slightly outside (user 2026-11-15: start anyway): the board drops a command with an axis outside,
+                    # so that axis' target is set just inside its limit; the first command moves it there.
+                    m = math.radians(0.2)
+                    jog['target'] = [min(max(x, lo + m), hi - m) for x, (lo, hi) in zip(v[:6], limits)]
+                    jog['on'] = True
+                    moved = [f'{n} {math.degrees(x):.1f} -> {math.degrees(t):.1f}'
+                             for n, x, t in zip(NAMES, v[:6], jog['target']) if abs(x - t) > 1e-9]
+                    print('\njog on; outside the limits, these move just inside first: ' + ', '.join(moved))
                 else:
                     jog['target'] = list(v[:6])
                     jog['on'] = True
@@ -166,9 +175,23 @@ def main():
                 yaml.safe_dump(saved, open(OUT, 'w'), sort_keys=False)
             elif k in '\r\n' and v is not None:
                 raw = [round(math.degrees(x), 1) for x in v[:6]]
+                # 2026-11-15 (g2_225): the shoulder faulted and dropped just before Enter and the dropped pose was
+                # saved. While jogging the arm must sit at the jog target: refuse when an arm joint is > 1.5 deg off
+                # (the gripper is left out: closed on a puck it stops short of its target).
+                if jog['on'] and jog['target'] is not None:
+                    off = [(NAMES[a], round(math.degrees(v[a] - jog['target'][a]), 1))
+                           for a in range(5) if abs(math.degrees(v[a] - jog['target'][a])) > 1.5]
+                    if off:  # warn only (user 2026-11-15: no refusal while teaching); --strict refuses as before
+                        if '--strict' in sys.argv:
+                            print(f'\nNOT saved: the arm is not at the jog target {off} (fault / dropped?). '
+                                  'Check it, jog back, then Enter again.')
+                            continue
+                        print(f'\nnote: the arm is {off} off the jog target (saved anyway; a fault drop would be saved too)')
                 saved.append({'name': nxt, 'time': time.strftime('%Y-%m-%d %H:%M:%S'), 'raw_deg': raw,
                               'target': [round(x, 5) for x in raw_to_target(raw)],
-                              'jog': jog['on']})
+                              'jog': jog['on'],
+                              'jog_target_raw_deg': [round(math.degrees(x), 1) for x in jog['target'][:6]]
+                              if jog['on'] and jog['target'] is not None else None})
                 yaml.safe_dump(saved, open(OUT, 'w'), sort_keys=False)
                 names = names[1:]
                 print(f'\nsaved {nxt}: ' + '  '.join(f'{n} {x}' for n, x in zip(NAMES, raw)))

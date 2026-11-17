@@ -19,7 +19,9 @@ constexpr double kGripperCurrentAPerTick = 0.00269;
 // lm_/arm_/gripper_angle_tolerance (the board reports moving until each axis is inside its own).
 // Measured degrees: shoulder 44.6–185, elbow 36.3–309.2 (new bracket, 2026-11-06; was 35.2–320.6), wrist_pitch
 // -110.7–152.1 (2026-11-06 after the reassembly; was -16.7–250.5), tool_roll -234.1–247.8 (2026-11-02;
-// was 39–187, 38–323, 70.1–340, -180–180). tool_roll keeps -175–175: one turn, so the boot unwrap stays unique.
+// was 39–187, 38–323, 70.1–340, -180–180). tool_roll: -175–270 since 2026-11-15 (user: up to 270 for the lying-puck
+// regrasp; the 11-02 measured end was 247.8: jog past it slowly first). Past one turn its power-up turn is set like
+// the LM's: kBootCenters, tool_roll at the nominal pose (raw 0) at power-up, within +-180 deg.
 // Gripper: -53.1–234 degrees (both closed), open at 94 degrees; limits use -48.1–229.
 // LM: 136.2–1052.0 degrees (2026-11-07, timing belt re-fitted; was
 // 579.6–1511.3, guide moved against the sag, 2026-11-05; was -399.4–509.2, -391.8–527.5, -141.4–808.1).
@@ -36,18 +38,19 @@ const craft::AxisConfig kAxes[6] = {
   // acceleration); the measured peak runs ~1.34x the cap, ~90 deg/s at 50, under the ~125-140 deg/s a half-loaded
   // XM430-W350 reaches at 11-12 V. Do not go past 60. With the time-based profile these are the speed caps. The
   // gripper keeps 30. Acceleration 30 x 214.577 rev/min^2 (LM), 10 (arm).
-  {1, false, kPositionTickRad, -16384, 1, 2.4645, 18.2735, 30, 180, 0.008726646259971648},  // 0.5 deg = 0.06 mm carriage
+  {1, false, kPositionTickRad, -16384, 1, 1.7035, 18.2735, 30, 180, 0.008726646259971648},  // 0.5 deg = 0.06 mm carriage; min 97.6 deg (user 2026-11-15, was 2.4645)
   {2, false, kPositionTickRad, 0, 1, 0.8657, 3.1415, 10, 50, 0.008726646259971648},
   {3, false, kPositionTickRad, 0, 1, 0.7209, 5.3092, 10, 50, 0.008726646259971648},
   {4, false, kPositionTickRad, 0, 1, -1.8448, 2.5848, 10, 50, 0.008726646259971648},
-  {5, false, kPositionTickRad, 0, 1, -3.0543, 3.0543, 10, 50, 0.008726646259971648},
+  {5, false, kPositionTickRad, 0, 1, -3.0543, 4.7124, 10, 50, 0.008726646259971648},  // max 270 deg (was 3.0543 = 175)
   {6, false, kPositionTickRad, 0, 1, -0.8395, 3.9968, 10, 30, 0.03490658503988659},
 };
 
 // Power-up turn per axis (MotorBoard::setBootCenters): LM at the nominal pose, raw 548.3 deg = 9.5696 rad, carriage
 // lined up with clock 12 (demo/puck_pick/execute.py NOMINAL_RAW_DEG; 2026-11-06 LM and clock re-aligned; was 829.7, 941.1, before
-// the 2026-11-06 reassembly 1030.9). The others are single-turn: NAN.
-const double kBootCenters[6] = {9.5696, NAN, NAN, NAN, NAN, NAN};
+// the 2026-11-06 reassembly 1030.9). tool_roll (2026-11-15, range past one turn): the nominal pose's raw 0 deg; power
+// up with tool_roll within +-180 deg of it. The others are single-turn: NAN.
+const double kBootCenters[6] = {9.5696, NAN, NAN, NAN, 0.0, NAN};
 
 // Every axis moves with a time-based profile (MotorBoard::setTimeBased, 2026-11-06): one TIME per task
 // (control_master sends TaskCommand.duration_s; 0 for a GRIPPER task), the axes of a move start together. The

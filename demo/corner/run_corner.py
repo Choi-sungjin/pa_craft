@@ -40,7 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from map_tools import MapGrid, ScanMatcher, corner_goal  # noqa: E402
 
 CORNERS = {'br': (1, -1), 'tr': (1, 1), 'bl': (-1, -1), 'tl': (-1, 1)}
-BODY_CENTER_X, BODY_R = 0.01275, 0.27  # merged scan is in base_link; drop anything on the robot
+BODY_CENTER_X, BODY_R = 0.06075, 0.27  # 0.01275 + 0.048 (base_link moved back 2026-11-15)  # merged scan is in base_link; drop anything on the robot
 INTERRUPTED = False  # set by the SIGINT handler in main()
 
 

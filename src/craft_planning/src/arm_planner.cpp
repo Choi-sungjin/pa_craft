@@ -2,9 +2,15 @@
 #include "v75_arm_ik/arm_ik_core.hpp"
 #include "craft_planning/arm_planner.hpp"
 
+#include <ament_index_cpp/get_package_share_path.hpp>
+#include <yaml-cpp/yaml.h>
+
 #include <algorithm>
 #include <cmath>
+#include <iomanip>
+#include <limits>
 #include <random>
+#include <sstream>
 #include <stdexcept>
 
 namespace craft_planning {
@@ -40,12 +46,23 @@ struct ArmPlanner::Impl {
       if (seen[index]) throw std::invalid_argument("duplicate arm joint: " + input.name[i]);
       seen[index] = true;
       const double value = input.position[i];
-      if (!std::isfinite(value) || value < arm.model.lowerPositionLimit[index] ||
-        value > arm.model.upperPositionLimit[index])
+      const double lower = arm.model.lowerPositionLimit[index];
+      const double upper = arm.model.upperPositionLimit[index];
+      if (!std::isfinite(value))
       {
-        throw std::invalid_argument("arm joint position is non-finite or outside URDF limits: " + input.name[i]);
+        throw std::invalid_argument(input.name[i] + " position is non-finite");
       }
-      q[index] = value;
+      // Measured rotary feedback may overshoot by up to 1 degree. Clamp only the
+      // FK/IK seed; control.yaml limits and commanded targets remain unchanged. Slide is in m.
+      const double tolerance = index == 0 ? 0.0 : 3.14159265358979323846 / 180.0;
+      if (value < lower - tolerance || value > upper + tolerance)
+      {
+        std::ostringstream reason;
+        reason << input.name[i] << ' ' << std::fixed << std::setprecision(4) << value
+               << " beyond limit " << (value < lower ? lower : upper);
+        throw std::invalid_argument(reason.str());
+      }
+      q[index] = std::clamp(value, lower, upper);
     }
     return q;
   }
@@ -91,11 +108,59 @@ void ArmPlanner::configure(const ArmPlannerConfig &config) {
   if (next->arm.chain_joints != kControlJointOrder) {
     throw std::invalid_argument("URDF IK chain must match slide, shoulder, elbow, wrist pitch and tool roll control order");
   }
+  try {
+    const auto path = ament_index_cpp::get_package_share_path("craft_control") / "config/control.yaml";
+    const YAML::Node p = YAML::LoadFile(path.string())["control_master"]["ros__parameters"];
+    if (!p || !p.IsMap()) throw std::invalid_argument("missing control_master.ros__parameters");
+    const auto array = [&p](const char *key) {
+      const auto values = p[key].as<std::vector<double>>(std::vector<double>{});
+      if (values.size() != 4 || !std::all_of(values.begin(), values.end(),
+          [](double value) {return std::isfinite(value);}))
+      {
+        throw std::invalid_argument(std::string(key) + " requires four finite values");
+      }
+      return values;
+    };
+    const auto scalar = [&p](const char *key) {
+      const double value = p[key].as<double>(std::numeric_limits<double>::quiet_NaN());
+      if (!std::isfinite(value)) throw std::invalid_argument(std::string(key) + " must be finite");
+      return value;
+    };
+    const auto lows = array("arm_min_angle"), highs = array("arm_max_angle");
+    const auto offsets = array("arm_joint_offsets"), directions = array("arm_joint_directions");
+    auto &model = next->arm.model;
+    // Invert the standalone motor_bad() mappings: use the calibrated motor stops,
+    // including their existing safety margins, for both feedback checks and IK.
+    for (std::size_t i = 0; i < 4; ++i) {
+      if (lows[i] >= highs[i] || std::abs(directions[i]) != 1.0) {
+        throw std::invalid_argument(kControlJointOrder[i + 1] +
+          ": arm_min_angle must be < arm_max_angle and arm_joint_directions must be +/-1");
+      }
+      const double a = (lows[i] - offsets[i]) / directions[i];
+      const double b = (highs[i] - offsets[i]) / directions[i];
+      model.lowerPositionLimit[i + 1] = std::min(a, b);
+      model.upperPositionLimit[i + 1] = std::max(a, b);
+    }
+    const double low = scalar("lm_min_angle"), high = scalar("lm_max_angle");
+    const double offset = scalar("lm_motor_offset"), direction = scalar("lm_motor_direction");
+    const double scale = scalar("lm_meters_per_rad");
+    if (low >= high || std::abs(direction) != 1.0 || scale <= 0.0) {
+      throw std::invalid_argument("slide_joint: lm_min_angle must be < lm_max_angle, "
+        "lm_motor_direction must be +/-1 and lm_meters_per_rad must be > 0");
+    }
+    const double a = (low - offset) * scale / direction;
+    const double b = (high - offset) * scale / direction;
+    model.lowerPositionLimit[0] = std::min(a, b);
+    model.upperPositionLimit[0] = std::max(a, b);
+  } catch (const std::exception &error) {
+    throw std::invalid_argument("cannot configure arm limits from craft_control/config/control.yaml: " +
+      std::string(error.what()));
+  }
   if (!next->arm.model.lowerPositionLimit.allFinite() ||
     !next->arm.model.upperPositionLimit.allFinite() ||
-    (next->arm.model.lowerPositionLimit.array() > next->arm.model.upperPositionLimit.array()).any())
+    (next->arm.model.lowerPositionLimit.array() >= next->arm.model.upperPositionLimit.array()).any())
   {
-    throw std::invalid_argument("URDF arm joint limits must be finite and ordered");
+    throw std::invalid_argument("control.yaml converted arm joint limits must be finite and strictly ordered");
   }
   next->base_frame = config.base_frame;
   next->params.pos_tol = config.position_tolerance;
@@ -161,7 +226,7 @@ ArmPlan ArmPlanner::plan(const geometry_msgs::msg::PoseStamped &goal,
       }
     }
     if (solutions.empty()) {
-      output.error = "TCP goal is unreachable within URDF joint limits and IK tolerances";
+      output.error = "TCP goal is unreachable within control.yaml joint limits and IK tolerances";
       return output;
     }
     constexpr double kSameLoad = 1e-3;  // [m]

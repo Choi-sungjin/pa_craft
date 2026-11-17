@@ -1,6 +1,6 @@
 assume:
   lidar_center_x: 0.128
-  puck_x_offset: -0.0416
+  puck_x_offset: 0.0256
   lidar_center_y: 0.0525
   lidar_front_y: 0.034
   lidar_z:
@@ -12,7 +12,7 @@ assume:
   - 0.205
   - 0.208
   shelf_height: 0.074
-  puck_ahead: 0.1059
+  puck_ahead: 0.1603
   puck_size:
   - 0.03
   - 0.03
@@ -31,46 +31,46 @@ assume:
   tool_tilt_deg: null
   shelf_ahead: null
 puck_grasp_urdf:
-- 0.0864
-- -0.07189999999999999
+- 0.15360000000000001
+- -0.1263
 - 0.117
 waypoints:
 - name: approach
   joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5432353160030416
-    elbow_joint: 1.7461489176709764
-    wrist_pitch_joint: 2.3008316990710687
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.7666523828418521
+    elbow_joint: 1.4370122816634145
+    wrist_pitch_joint: 2.28183151312016
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
 - name: grasp
   joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5686689937597662
-    elbow_joint: 2.327666968221708
-    wrist_pitch_joint: 1.816053018403215
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.8861106512559649
+    elbow_joint: 1.819923236083392
+    wrist_pitch_joint: 2.0063550930453324
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
 - name: close
   joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5686689937597662
-    elbow_joint: 2.327666968221708
-    wrist_pitch_joint: 1.816053018403215
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.8861106512559649
+    elbow_joint: 1.819923236083392
+    wrist_pitch_joint: 2.0063550930453324
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.0018
 frames:
 - &id001
   joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5432353160030416
-    elbow_joint: 1.7461489176709764
-    wrist_pitch_joint: 2.3008316990710687
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.7666523828418521
+    elbow_joint: 1.4370122816634145
+    wrist_pitch_joint: 2.28183151312016
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - *id001
 - *id001
@@ -92,665 +92,665 @@ frames:
 - *id001
 - *id001
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5432353160030416
-    elbow_joint: 1.7461489176709764
-    wrist_pitch_joint: 2.3008316990710687
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.7666523828418521
+    elbow_joint: 1.4370122816634145
+    wrist_pitch_joint: 2.28183151312016
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5576099519748297
-    elbow_joint: 1.7410683973604553
-    wrist_pitch_joint: 2.3089908759297453
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.7875026662149527
+    elbow_joint: 1.4075353238783517
+    wrist_pitch_joint: 2.3079114800520655
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5720412654304774
-    elbow_joint: 1.736069664984292
-    wrist_pitch_joint: 2.317011587370204
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.7773704688123912
+    elbow_joint: 1.4466619540394239
+    wrist_pitch_joint: 2.2789170472935547
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5865310336342777
-    elbow_joint: 1.7311448577082722
-    wrist_pitch_joint: 2.324899918962367
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.7981514769317433
+    elbow_joint: 1.4176781029768173
+    wrist_pitch_joint: 2.304573182756753
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.580807107803873
-    elbow_joint: 1.7571489519560033
-    wrist_pitch_joint: 2.30461975054504
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.7884359012892523
+    elbow_joint: 1.4557780407971466
+    wrist_pitch_joint: 2.2761888205789145
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5954167880709764
-    elbow_joint: 1.7522704781052438
-    wrist_pitch_joint: 2.3123418366486392
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.8091704058202969
+    elbow_joint: 1.427215454140104
+    wrist_pitch_joint: 2.3014701952248555
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.610090956879465
-    elbow_joint: 1.7474424088019664
-    wrist_pitch_joint: 2.3199490296633716
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.8304768337024651
+    elbow_joint: 1.397189952564424
+    wrist_pitch_joint: 2.327642561438311
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.6248315274900293
-    elbow_joint: 1.7426562333708686
-    wrist_pitch_joint: 2.327447927003848
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.8205581053716957
+    elbow_joint: 1.436145532082205
+    wrist_pitch_joint: 2.2986057102513
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.6196012677188081
-    elbow_joint: 1.7678190278603358
-    wrist_pitch_joint: 2.3075153922856027
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.8418193566145378
+    elbow_joint: 1.4065281722220047
+    wrist_pitch_joint: 2.3244151113886007
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.6344779720444367
-    elbow_joint: 1.7630212061223556
-    wrist_pitch_joint: 2.3148898022178974
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.8323138676250543
+    elbow_joint: 1.4444641420241753
+    wrist_pitch_joint: 2.295984630575914
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.6296028200064163
-    elbow_joint: 1.7874391841226975
-    wrist_pitch_joint: 2.295346976255576
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.8535534809612837
+    elbow_joint: 1.415180308019355
+    wrist_pitch_joint: 2.321482143764448
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.6249958557097812
-    elbow_joint: 1.8112143811500763
-    wrist_pitch_joint: 2.2761787435248317
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.8444375558260933
+    elbow_joint: 1.4521649333641364
+    wrist_pitch_joint: 2.293613443554857
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.6206404529006624
-    elbow_joint: 1.8343966437830892
-    wrist_pitch_joint: 2.257351883700938
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.865677432788486
+    elbow_joint: 1.4231446111346149
+    wrist_pitch_joint: 2.318847181341929
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.6165220858194704
-    elbow_joint: 1.8570296989260222
-    wrist_pitch_joint: 2.2388371956391975
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.8569295543905546
+    elbow_joint: 1.4592395406725422
+    wrist_pitch_joint: 2.291500130201933
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.6126279887915065
-    elbow_joint: 1.8791521529748991
-    wrist_pitch_joint: 2.2206088386182845
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.878190262157226
+    elbow_joint: 1.4304164219789925
+    wrist_pitch_joint: 2.3165158336487552
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.6089468839856751
-    elbow_joint: 1.9007982905050935
-    wrist_pitch_joint: 2.2026438058939206
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.8697907344921856
+    elbow_joint: 1.465677680099527
+    wrist_pitch_joint: 2.2896541031932607
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.6054687613606577
-    elbow_joint: 1.9219987195445087
-    wrist_pitch_joint: 2.1849214994795236
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.8910917688653559
+    elbow_joint: 1.4369883857871983
+    wrist_pitch_joint: 2.3144956556523626
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.6021846990663002
-    elbow_joint: 1.9427808979716619
-    wrist_pitch_joint: 2.167423383346728
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.8830224334482326
+    elbow_joint: 1.4714672067539996
+    wrist_pitch_joint: 2.2880861701026847
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5990867155639201
-    elbow_joint: 1.96316956674841
-    wrist_pitch_joint: 2.15013269807236
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.9043824524355177
+    elbow_joint: 1.4428505982737014
+    wrist_pitch_joint: 2.3127960521156403
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.596167646875503
-    elbow_joint: 1.9831871093736926
-    wrist_pitch_joint: 2.1330342241354945
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.8966264467505105
+    elbow_joint: 1.4765941366137894
+    wrist_pitch_joint: 2.2868085194605596
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5934210439315539
-    elbow_joint: 2.002853852350526
-    wrist_pitch_joint: 2.11611408410261
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.9180634832416918
+    elbow_joint: 1.4479906907668332
+    wrist_pitch_joint: 2.3114282213362785
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5908410861359912
-    elbow_joint: 2.022188318076469
-    wrist_pitch_joint: 2.0993595761722297
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.9106050321515287
+    elbow_joint: 1.4810426348618921
+    wrist_pitch_joint: 2.2858347283313822
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5884225081226089
-    elbow_joint: 2.04120743904776
-    wrist_pitch_joint: 2.0827590332143213
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.9321366928463217
+    elbow_joint: 1.45239386067677
+    wrist_pitch_joint: 2.3104051343416545
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5861605373229555
-    elbow_joint: 2.0599267403683457
-    wrist_pitch_joint: 2.066301702693389
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.9249609257112146
+    elbow_joint: 1.4847949710722934
+    wrist_pitch_joint: 2.285179791081238
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5840508404569502
-    elbow_joint: 2.078360496109278
-    wrist_pitch_joint: 2.049977643818462
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.9466045826077554
+    elbow_joint: 1.4560428502259406
+    wrist_pitch_joint: 2.3097415475509937
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5820894774354859
-    elbow_joint: 2.0965218639525043
-    wrist_pitch_joint: 2.0337776389966997
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.9396973701798472
+    elbow_joint: 1.4878314402737558
+    wrist_pitch_joint: 2.284860169931086
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5802728614574904
-    elbow_joint: 2.1144230016909775
-    wrist_pitch_joint: 2.017693117236222
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.9334164495856301
+    elbow_joint: 1.5179090492527354
+    wrist_pitch_joint: 2.2610634815463238
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5785977243133518
-    elbow_joint: 2.1320751684827326
-    wrist_pitch_joint: 2.001716087588605
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.9276787460842197
+    elbow_joint: 1.546520331842076
+    wrist_pitch_joint: 2.2381899024583944
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5770610860875096
-    elbow_joint: 2.149488813224953
-    wrist_pitch_joint: 1.9858390810722266
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.9224194237199133
+    elbow_joint: 1.573856198859921
+    wrist_pitch_joint: 2.216113357804856
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5756602285967374
-    elbow_joint: 2.166673651991937
-    wrist_pitch_joint: 1.9700550997960153
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.9175867399550433
+    elbow_joint: 1.60006900542258
+    wrist_pitch_joint: 2.1947332350070665
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5743926720155699
-    elbow_joint: 2.1836387361432834
-    wrist_pitch_joint: 1.9543575722258364
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.9131386297555986
+    elbow_joint: 1.6252826286867814
+    wrist_pitch_joint: 2.1739677219423097
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5732561542328887
-    elbow_joint: 2.200392512436923
-    wrist_pitch_joint: 1.9387403137148782
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.909040357414322
+    elbow_joint: 1.6495993918025402
+    wrist_pitch_joint: 2.1537492311678275
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.572248612558609
-    elbow_joint: 2.2169428762616077
-    wrist_pitch_joint: 1.9231974915644727
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.9052628543426529
+    elbow_joint: 1.6731049625402397
+    wrist_pitch_joint: 2.1340211635017967
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5713681674604989
-    elbow_joint: 2.23329721892423
-    wrist_pitch_joint: 1.907723593999961
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.9017815126330164
+    elbow_joint: 1.6958719067990293
+    wrist_pitch_joint: 2.114735560952644
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5706131080611738
-    elbow_joint: 2.2494624697806183
-    wrist_pitch_joint: 1.8923134025428974
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.8985752902914237
+    elbow_joint: 1.717962322648941
+    wrist_pitch_joint: 2.0958513674443244
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.569981879166493
-    elbow_joint: 2.265445133877563
-    wrist_pitch_joint: 1.876961967340634
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.895626034986637
+    elbow_joint: 1.7394298299774966
+    wrist_pitch_joint: 2.077333115420556
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5694730696306745
-    elbow_joint: 2.281251325673908
-    wrist_pitch_joint: 1.8616645850801072
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.892917964388255
+    elbow_joint: 1.7603210985434712
+    wrist_pitch_joint: 2.059149917452963
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5690854018917746
-    elbow_joint: 2.2968867993254145
-    wrist_pitch_joint: 1.8464167791675008
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.8904372609016897
+    elbow_joint: 1.780677038941694
+    wrist_pitch_joint: 2.0412746805413056
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5688177225348245
-    elbow_joint: 2.3123569759487443
-    wrist_pitch_joint: 1.8312142819011203
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.888171751422622
+    elbow_joint: 1.800533743139346
+    wrist_pitch_joint: 2.0236834858227217
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5686689937597662
-    elbow_joint: 2.327666968221708
-    wrist_pitch_joint: 1.816053018403215
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.8861106512559649
+    elbow_joint: 1.819923236083392
+    wrist_pitch_joint: 2.0063550930453324
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5686689937597662
-    elbow_joint: 2.327666968221708
-    wrist_pitch_joint: 1.816053018403215
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.8861106512559649
+    elbow_joint: 1.819923236083392
+    wrist_pitch_joint: 2.0063550930453324
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.021
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5686689937597662
-    elbow_joint: 2.327666968221708
-    wrist_pitch_joint: 1.816053018403215
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.8861106512559649
+    elbow_joint: 1.819923236083392
+    wrist_pitch_joint: 2.0063550930453324
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.01998947368421053
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5686689937597662
-    elbow_joint: 2.327666968221708
-    wrist_pitch_joint: 1.816053018403215
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.8861106512559649
+    elbow_joint: 1.819923236083392
+    wrist_pitch_joint: 2.0063550930453324
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.018978947368421054
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5686689937597662
-    elbow_joint: 2.327666968221708
-    wrist_pitch_joint: 1.816053018403215
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.8861106512559649
+    elbow_joint: 1.819923236083392
+    wrist_pitch_joint: 2.0063550930453324
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.01796842105263158
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5686689937597662
-    elbow_joint: 2.327666968221708
-    wrist_pitch_joint: 1.816053018403215
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.8861106512559649
+    elbow_joint: 1.819923236083392
+    wrist_pitch_joint: 2.0063550930453324
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.016957894736842106
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5686689937597662
-    elbow_joint: 2.327666968221708
-    wrist_pitch_joint: 1.816053018403215
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.8861106512559649
+    elbow_joint: 1.819923236083392
+    wrist_pitch_joint: 2.0063550930453324
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.015947368421052634
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5686689937597662
-    elbow_joint: 2.327666968221708
-    wrist_pitch_joint: 1.816053018403215
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.8861106512559649
+    elbow_joint: 1.819923236083392
+    wrist_pitch_joint: 2.0063550930453324
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.014936842105263158
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5686689937597662
-    elbow_joint: 2.327666968221708
-    wrist_pitch_joint: 1.816053018403215
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.8861106512559649
+    elbow_joint: 1.819923236083392
+    wrist_pitch_joint: 2.0063550930453324
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.013926315789473686
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5686689937597662
-    elbow_joint: 2.327666968221708
-    wrist_pitch_joint: 1.816053018403215
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.8861106512559649
+    elbow_joint: 1.819923236083392
+    wrist_pitch_joint: 2.0063550930453324
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.012915789473684212
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5686689937597662
-    elbow_joint: 2.327666968221708
-    wrist_pitch_joint: 1.816053018403215
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.8861106512559649
+    elbow_joint: 1.819923236083392
+    wrist_pitch_joint: 2.0063550930453324
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.011905263157894738
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5686689937597662
-    elbow_joint: 2.327666968221708
-    wrist_pitch_joint: 1.816053018403215
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.8861106512559649
+    elbow_joint: 1.819923236083392
+    wrist_pitch_joint: 2.0063550930453324
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.010894736842105264
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5686689937597662
-    elbow_joint: 2.327666968221708
-    wrist_pitch_joint: 1.816053018403215
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.8861106512559649
+    elbow_joint: 1.819923236083392
+    wrist_pitch_joint: 2.0063550930453324
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.009884210526315789
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5686689937597662
-    elbow_joint: 2.327666968221708
-    wrist_pitch_joint: 1.816053018403215
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.8861106512559649
+    elbow_joint: 1.819923236083392
+    wrist_pitch_joint: 2.0063550930453324
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.008873684210526317
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5686689937597662
-    elbow_joint: 2.327666968221708
-    wrist_pitch_joint: 1.816053018403215
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.8861106512559649
+    elbow_joint: 1.819923236083392
+    wrist_pitch_joint: 2.0063550930453324
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.007863157894736844
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5686689937597662
-    elbow_joint: 2.327666968221708
-    wrist_pitch_joint: 1.816053018403215
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.8861106512559649
+    elbow_joint: 1.819923236083392
+    wrist_pitch_joint: 2.0063550930453324
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.006852631578947369
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5686689937597662
-    elbow_joint: 2.327666968221708
-    wrist_pitch_joint: 1.816053018403215
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.8861106512559649
+    elbow_joint: 1.819923236083392
+    wrist_pitch_joint: 2.0063550930453324
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.005842105263157895
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5686689937597662
-    elbow_joint: 2.327666968221708
-    wrist_pitch_joint: 1.816053018403215
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.8861106512559649
+    elbow_joint: 1.819923236083392
+    wrist_pitch_joint: 2.0063550930453324
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.004831578947368423
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5686689937597662
-    elbow_joint: 2.327666968221708
-    wrist_pitch_joint: 1.816053018403215
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.8861106512559649
+    elbow_joint: 1.819923236083392
+    wrist_pitch_joint: 2.0063550930453324
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.0038210526315789507
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5686689937597662
-    elbow_joint: 2.327666968221708
-    wrist_pitch_joint: 1.816053018403215
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.8861106512559649
+    elbow_joint: 1.819923236083392
+    wrist_pitch_joint: 2.0063550930453324
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.002810526315789475
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - &id002
   joints:
-    slide_joint: 0.04125000000000001
-    shoulder_joint: 0.5686689937597662
-    elbow_joint: 2.327666968221708
-    wrist_pitch_joint: 1.816053018403215
+    slide_joint: 0.022049999999999986
+    shoulder_joint: 0.8861106512559649
+    elbow_joint: 1.819923236083392
+    wrist_pitch_joint: 2.0063550930453324
     tool_roll_joint: 0.0
     jaw_upper_joint: -0.0017999999999999995
   puck:
-  - 0.0864
-  - -0.07189999999999999
+  - 0.15360000000000001
+  - -0.1263
   - 0.104
 - *id002
 - *id002

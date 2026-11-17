@@ -3,12 +3,36 @@
 #include <gtest/gtest.h>
 
 #include <cstdio>
+#include <cmath>
 #include <fstream>
 #include <stdexcept>
 #include <unistd.h>
 
 namespace craft_planning {
 namespace {
+
+TEST(BoxDockGoal, LeftShiftForEveryHeadingWithoutChangingForwardGap) {
+  const BoxTarget box{1.476, 1.159, M_PI / 2, 0.205, 0.233};  // S1, 213 mm front + 20 mm gap
+  for (const double normal : {0.0, M_PI / 2, M_PI, -M_PI / 2, 0.37}) {
+    const auto before = box_dock_goal(box, normal, 0.0);
+    const auto after = box_dock_goal(box, normal, 0.0015);
+    const double heading = after[2], dx = after[0] - before[0], dy = after[1] - before[1];
+    EXPECT_NEAR(-std::sin(heading) * dx + std::cos(heading) * dy, 0.0015, 1e-14);
+    EXPECT_NEAR(std::cos(heading) * dx + std::sin(heading) * dy, 0.0, 1e-14);
+    EXPECT_DOUBLE_EQ(before[2], after[2]);
+    // Repeated LiDAR/camera updates use the observation again, never the already shifted goal.
+    EXPECT_EQ(after, box_dock_goal(box, normal, 0.0015));
+    const auto right = box_dock_goal(box, normal, -0.0015);
+    EXPECT_NEAR(right[0] - before[0], -dx, 1e-14);
+    EXPECT_NEAR(right[1] - before[1], -dy, 1e-14);
+  }
+  const auto before = box_dock_goal(box, M_PI / 2, 0.0);
+  const auto after = box_dock_goal(box, M_PI / 2, 0.0015);
+  EXPECT_NEAR(before[0], 1.476, 1e-14);
+  EXPECT_NEAR(after[0], 1.4775, 1e-14);  // heading -90 deg: robot left is map +x
+  EXPECT_NEAR(before[1], 1.4945, 1e-14);
+  EXPECT_NEAR(after[1], before[1], 1e-14);
+}
 
 std::map<std::string, std::vector<PlanningStep>> parse(const std::string &yaml) {
   char name[] = "/tmp/craft-missions-XXXXXX";

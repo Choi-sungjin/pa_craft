@@ -31,12 +31,14 @@ bool TrafficLightCounter::configure(const TrafficLightConfig &c) {
 void TrafficLightCounter::reset() {
   active_ = false;
   complete_ = false;
+  overflow_ = false;
   cycle_open_ = false;
   discarded_cycles_ = 0;
   last_discard_.clear();
   votes_ = {0, 0, 0};
   blinks_.clear();
   rejected_.clear();
+  last_tower_.reset();
 }
 
 // The best-scoring lit detection of this frame; one light, so one color per frame.
@@ -56,6 +58,40 @@ std::optional<LightColor> measure_light_color(const cv::Mat &bgr, const cv::Rect
   const cv::Mat bright = ch[2] >= c.bright_v;
   const int core = cv::countNonZero(bright);
   if (core < c.on_fraction * roi.area()) return {};  // unlit (or too little glow)
+  if (c.use_blocks && full.height >= c.upright_ratio * full.width) {
+    // Top of the biggest lit blob (a lit cap rim can join the core as a separate blob).
+    cv::Mat labels, stats, centroids;
+    const int n = cv::connectedComponentsWithStats(bright, labels, stats, centroids, 8, CV_32S);
+    int big = 0;
+    for (int i = 1; i < n; ++i) if (!big || stats.at<int>(i, cv::CC_STAT_AREA) > stats.at<int>(big, cv::CC_STAT_AREA)) big = i;
+    if (!big) return {};
+    std::vector<int> rows;
+    for (int y = 0; y < labels.rows; ++y)
+      for (int x = 0; x < labels.cols; ++x) if (labels.at<int>(y, x) == big) rows.push_back(y);
+    auto p10 = rows.begin() + rows.size() / 10;
+    std::nth_element(rows.begin(), p10, rows.end());
+    const int top = *p10;
+    const int cw = std::max(1, static_cast<int>(std::lround(c.block_column * roi.width)));
+    const int cx0 = (roi.width - cw) / 2;
+    int red = 0, orange = 0;
+    std::vector<uchar> hues;
+    for (int y = 0; y < top; ++y) {
+      hues.clear();
+      for (int x = cx0; x < cx0 + cw; ++x) {
+        const int s = ch[1].at<uchar>(y, x), v = ch[2].at<uchar>(y, x);
+        if (s >= c.block_min_saturation && v >= c.block_min_value && v < c.bright_v) hues.push_back(ch[0].at<uchar>(y, x));
+      }
+      if (hues.empty() || hues.size() < c.block_row_share * cw) continue;
+      auto mid = hues.begin() + hues.size() / 2;
+      std::nth_element(hues.begin(), mid, hues.end());
+      const double hue = *mid;
+      if (hue < c.block_red_hue_below || hue >= c.block_red_hue_from) ++red;
+      else if (hue <= c.block_orange_hue_max) ++orange;
+    }
+    if (orange >= c.block_orange_min * full.height) return LightColor::kGreen;
+    if (red >= c.block_red_min * full.height) return LightColor::kYellow;
+    return LightColor::kRed;
+  }
   if (full.height < c.upright_ratio * full.width) {
     // Not an upright tower in the image: vote over the saturated glow (package lamp_color()).
     const cv::Mat lit = (ch[2] >= 170) & (ch[1] >= 90);
@@ -110,18 +146,26 @@ std::optional<LightColor> measure_light_color(const cv::Mat &bgr, const cv::Rect
   return yc < c.red_cut ? LightColor::kRed : yc < c.yellow_cut ? LightColor::kYellow : LightColor::kGreen;
 }
 
-std::optional<LightColor> TrafficLightCounter::frame_color(
-  const std::vector<Detection> &detections, const cv::Mat &bgr) const {
+std::optional<LightColor> TrafficLightCounter::frame_color(double stamp_s,
+  const std::vector<Detection> &detections, const cv::Mat &bgr) {
   if (config_.color_source == ColorSource::kPixels) {
     // The tower: the best box of any sign class; its color comes from the pixels, not the class.
     const Detection *tower = nullptr;
     for (const auto &d : detections) {
       const bool sign = d.class_id == config_.red_class_id || d.class_id == config_.yellow_class_id ||
         d.class_id == config_.green_class_id || d.class_id == config_.off_class_id;
-      if (sign && d.score >= config_.locate_min_score && (!tower || d.score > tower->score)) tower = &d;
+      const bool upright = d.box.height >= config_.tower_min_aspect * d.box.width;
+      if (sign && upright && d.score >= config_.locate_min_score && (!tower || d.score > tower->score)) tower = &d;
     }
-    if (!tower) return {};
-    return measure_light_color(bgr, tower->box, config_.pixels);
+    if (tower) {
+      last_tower_ = tower->box;
+      last_tower_s_ = stamp_s;
+      return measure_light_color(bgr, tower->box, config_.pixels);
+    }
+    if (last_tower_ && stamp_s - last_tower_s_ >= 0 && stamp_s - last_tower_s_ <= config_.hold_box_s) {
+      return measure_light_color(bgr, *last_tower_, config_.pixels);
+    }
+    return {};
   }
   const Detection *best = nullptr;
   for (const auto &d : detections) {
@@ -143,7 +187,7 @@ std::optional<BlinkEvent> TrafficLightCounter::update(double stamp_s,
   if (complete()) return {};
   std::optional<BlinkEvent> closed;
   if (active_ && stamp_s - last_lit_s_ > config_.max_gap_s) closed = close_blink();
-  if (const auto color = frame_color(detections, bgr)) {
+  if (const auto color = frame_color(stamp_s, detections, bgr)) {
     if (!active_) {
       active_ = true;
       start_s_ = stamp_s;
@@ -161,6 +205,7 @@ std::optional<BlinkEvent> TrafficLightCounter::update(double stamp_s,
 // The light went dark for end_off_s: accept the cycle, or drop it and wait for the next one.
 void TrafficLightCounter::end_cycle() {
   cycle_open_ = false;
+  if (overflow_) {overflow_ = false; blinks_.clear(); rejected_.clear(); return;}  // already discarded at blink 13
   if (valid()) {
     complete_ = true;
     return;
@@ -204,8 +249,20 @@ std::optional<BlinkEvent> TrafficLightCounter::close_blink() {
     rejected_.emplace_back(reason);
     return {};
   }
+  if (overflow_) return {};
   BlinkEvent event{static_cast<LightColor>(winner), start_s_, last_lit_s_, frames, votes_[winner]};
   blinks_.push_back(event);
+  // More blinks than the rule allows (user 2026-11-16): drop the whole result at once, wait for the next cycle.
+  if (static_cast<int>(blinks_.size()) > config_.expected_blinks) {
+    std::snprintf(reason, sizeof(reason), "t=%.2f blink %zu > %d: whole cycle discarded", start_s_, blinks_.size(),
+      config_.expected_blinks);
+    last_discard_ = reason;
+    ++discarded_cycles_;
+    blinks_.clear();
+    rejected_.clear();
+    overflow_ = true;
+    return {};
+  }
   return event;
 }
 

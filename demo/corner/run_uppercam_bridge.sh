@@ -7,6 +7,11 @@ REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 [ -n "$SSH_CLIENT" ] && export ROS_STATIC_PEERS=${SSH_CLIENT%% *}
 source "$REPO/install/setup.bash"
 C="$REPO/demo/corner"
+if pgrep -f "lib/craft_sensors/uppercam_bridge" >/dev/null 2>&1; then
+  echo "[camera] 기존 uppercam_bridge 프로세스 종료 중..."
+  pkill -9 -f "lib/craft_sensors/uppercam_bridge" 2>/dev/null || true
+  sleep 0.5
+fi
 # nice 10: the bridge yields CPU to control/EKF when the Jetson is full (2026-11-12)
 # preview_hz 15: traffic_light counts 1 s blinks on the preview
 # hires_size 1920x1080 (2026-11-14): only while perception asks on /perception/uppercam/hires (after the light, until the barcode is confirmed)

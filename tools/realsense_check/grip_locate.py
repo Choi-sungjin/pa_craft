@@ -168,15 +168,14 @@ def locate(prefix):
     return sorted(out, key=lambda o: -o['score']), bgr
 
 
-HELD = os.path.join(HERE, 'grip_held.json')   # where a well-held puck sits in the picture with the jaws closed, per shape
+HELD = os.path.join(HERE, 'grip_held.json')   # closed-jaw reference: use the prism entry for every shape
 HELD_X_PX = 10.0   # [px, 1280x720] sideways along the jaws (13:01 sideways: +14, 13:12 off: -21)
 HELD_Y_PX = 10.0   # [px] its lower edge, i.e. how deep it sits in the jaws: shallower (+) than this stops (13:21 shallow: +16)
 HELD_DEEP_PX = 25.0  # [px] deeper (-) is a firmer hold: allowed up to this (14:54 green cylinder -11, held fine; user)
 
 
 def held_check(prefix):
-    """Jaws closed on a puck: compare where it hangs in the picture with a well-held one of its shape (grip_held.json:
-    the 12:35 prism and the 12:10 cylinder, both loaded fine). Prints 'HELD OK' or 'HELD BAD' with the numbers."""
+    """Use the prism reference and the same grasp criteria for every puck shape (user 2026-11-16)."""
     found, _ = locate(prefix)
     if not found:
         print(f'{prefix}: HELD BAD no puck between the jaws'); return
@@ -185,16 +184,18 @@ def held_check(prefix):
     # The shape from the plan (--shape, the upper cam's class), not from this frame: with the jaws closed over it a
     # cylinder reads as a prism now and then (2026-11-14 14:58: green_prism 0.88, checked against the prism).
     sh = sys.argv[sys.argv.index('--shape') + 1] if '--shape' in sys.argv else shape(o['cls'])
-    ref = json.load(open(HELD)).get(sh) if os.path.exists(HELD) else None
+    ref = None
+    if os.path.exists(HELD):
+        with open(HELD) as held_file:
+            ref = json.load(held_file).get('prism')
     cx, bottom = x + w / 2, y + h
     if ref is None:
-        print(f"{prefix}: HELD UNKNOWN {o['cls']} centre x {cx:.0f} bottom y {bottom:.0f} px (no reference for this shape)"); return
+        print(f"{prefix}: HELD UNKNOWN {o['cls']} centre x {cx:.0f} bottom y {bottom:.0f} px (no prism reference)"); return
     dx, dy = cx - ref['cx'], bottom - ref['bottom']
-    # A cylinder centres itself between the closing jaws; sideways along the jaw faces it may sit anywhere without
-    # harm (user, 2026-11-14): only how deep it sits counts. A prism keeps the sideways check.
-    side_bad = sh != 'cylinder' and abs(dx) > HELD_X_PX
+    # One criterion: the prism's reference, lateral check, edge limits and confidence for all shapes.
+    side_bad = abs(dx) > HELD_X_PX
     bad = side_bad or dy > HELD_Y_PX or dy < -HELD_DEEP_PX or o['score'] < 0.85
-    print(f"{prefix}: HELD {'BAD' if bad else 'OK'} {sh} (frame reads {o['cls']} {o['score']:.2f}) sideways {dx:+.0f} px{' (not checked)' if sh == 'cylinder' else ''}, lower edge {dy:+.0f} px"
+    print(f"{prefix}: HELD {'BAD' if bad else 'OK'} {sh} (prism criterion; frame reads {o['cls']} {o['score']:.2f}) sideways {dx:+.0f} px, lower edge {dy:+.0f} px"
           f" (limits sideways {HELD_X_PX:g}, edge +{HELD_Y_PX:g} shallow / -{HELD_DEEP_PX:g} deep; score >= 0.85)")
 
 
@@ -265,9 +266,14 @@ def main():
             sh = shape(o['cls'])
             side = 0.0 if sh == 'cylinder' else float(zs.get(sh, {}).get('side_mm', 8.0))
             axes = os.path.join(HERE, 'grip_axes.json')
-            shift = (np.array(json.load(open(axes))['cam_per_arm']) @ np.array([side, 0.0])) if os.path.exists(axes) else np.zeros(2)
+            # A cylinder keeps its back_mm (2026-11-14 user: 5, the arm that far toward the robot; 2026-11-16: kept
+            # through a re-zero): the second axis of --gripcal is ahead, so - back_mm there.
+            back = float(zs.get(sh, {}).get('back_mm', 0.0)) if sh == 'cylinder' else 0.0
+            shift = (np.array(json.load(open(axes))['cam_per_arm']) @ np.array([side, -back])) if os.path.exists(axes) else np.zeros(2)
             zs[sh] = {'point': kind, 'mm': [m[0] + float(shift[0]), m[1] + float(shift[1]), m[2]], 'measured_mm': list(m),
                       'side_mm': side, 'cls': o['cls'], 'stamp': time.strftime('%Y-%m-%d %H:%M')}
+            if back:
+                zs[sh]['back_mm'] = back
             json.dump(zs, open(ZERO, 'w'), indent=1)
             print('zero stored for {} ({} centre): x {:+.1f} y {:+.1f} z {:.1f} mm'.format(sh, kind, *zs[sh]['mm']))
         if '--set-ref' in sys.argv:

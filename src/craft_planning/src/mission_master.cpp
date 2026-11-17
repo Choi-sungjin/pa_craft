@@ -3,8 +3,8 @@
 //        /planning/state
 //   out: /mission/state, /planning/command, /planning/approach_box, /planning/leave_box, /planning/target_base_pose, the perception resets,
 //        <log_dir>/mission_<time>/{signal.json, allocation.json, mission.log}
-// Driving (approach_box, go_home) goes through planning_master. Looking at the pucks, picking, placing and verifying
-// are SKELETONS here (run_skeleton): they log what they would do and succeed after skeleton_action_s.
+// Driving and taught picking go through planning_master. PickPuck uses puck_picker.py; observe, place and verify
+// remain skeletons (run_skeleton). The full competition mission still needs perception identity and placement wiring.
 #include "craft_planning/mission_fsm.hpp"
 
 #include <craft_perception/msg/puck_survey.hpp>
@@ -71,6 +71,12 @@ public:
     }
     c.view_barcode = !barcode_view_.empty();
     c.action_timeout_s[name(Kind::ViewBarcode)] = c.action_timeout_s[name(Kind::GoHome)];  // go_home_timeout_s
+    c.action_timeout_s[name(Kind::PickPuck)] = declare_parameter<double>("pick_timeout_s", 600.0);
+    pick_modes_ = declare_parameter<std::vector<std::string>>("pick_modes", std::vector<std::string>{});
+    if (!pick_modes_.empty() && pick_modes_.size() != c.start_boxes.size() * c.pucks_per_box)
+      throw std::invalid_argument("pick_modes must contain one collect/find/lie2/lie5 per collected puck");
+    for (const auto &mode : pick_modes_) if (mode != "collect" && mode != "find" && mode != "lie2" && mode != "lie5")
+      throw std::invalid_argument("pick_modes entries must be collect, find, lie2 or lie5");
     config_ = c;
     fsm_ = MissionFsm(config_);  // validates
     home_ = declare_parameter<std::vector<double>>("home");
@@ -88,6 +94,14 @@ public:
     if (!(hz > 0) || skeleton_action_s_ < 0) throw std::invalid_argument("loop_hz must be > 0, skeleton_action_s >= 0");
 
     const auto latched = rclcpp::QoS(1).transient_local();
+    pick_pub_ = create_publisher<String>("/mission/pick_request", 10);
+    pick_cancel_pub_ = create_publisher<String>("/mission/pick_cancel", 10);
+    subs_.push_back(create_subscription<String>("/mission/pick_result", 10, [this](const String &m) {
+      std::istringstream in(m.data); std::string token, status;
+      in >> token >> status;
+      if (!fsm_.busy() || fsm_.action().kind != Kind::PickPuck || !request_sent_ || token != pick_token_) return;
+      pick_done_ = true; pick_ok_ = status == "OK"; std::getline(in, pick_reason_);
+    }));
     state_pub_ = create_publisher<String>("/mission/state", latched);
     planning_command_pub_ = create_publisher<String>("/planning/command", 10);
     approach_pub_ = create_publisher<String>("/planning/approach_box", 10);
@@ -151,10 +165,11 @@ private:
   void send_planning(const std::string &text) {String m; m.data = text; planning_command_pub_->publish(m);}
 
   void begin(const MissionAction &a, double now) {
+    pick_done_ = false;
     action_at_ = now; request_sent_ = request_busy_ = request_complete_ = false; start_sent_at_ = -1e9;
     note("action: " + a.describe());
     switch (a.kind) {
-      case Kind::ObservePucks: case Kind::PickPuck: case Kind::PlacePuck: case Kind::VerifyLocation:
+      case Kind::ObservePucks: case Kind::PlacePuck: case Kind::VerifyLocation:
         RCLCPP_WARN(get_logger(), "[SKELETON] %s: not implemented, reported as done after %.1f s",
                     a.describe().c_str(), skeleton_action_s_);
         break;
@@ -176,7 +191,8 @@ private:
       case Kind::HoldStill: return now - action_at_ >= a.seconds;
       case Kind::ApproachBox: case Kind::LeaveBox: case Kind::GoHome: case Kind::ViewBarcode:
         return run_drive(a, now, ok, reason);
-      case Kind::ObservePucks: case Kind::PickPuck: case Kind::PlacePuck: case Kind::VerifyLocation:
+      case Kind::PickPuck: return run_pick(a, now, ok, reason);
+      case Kind::ObservePucks: case Kind::PlacePuck: case Kind::VerifyLocation:
         return run_skeleton(a, now, ok, reason);
       case Kind::None: return true;
     }
@@ -214,10 +230,23 @@ private:
     return request_complete_;
   }
 
-  // SKELETON (2026-11-12): the camera -> pick link and the arm sequences are not connected yet.
+  bool run_pick(const MissionAction &a, double now, bool &ok, std::string &reason) {
+    if (planning_state_ == "Fault") {ok = false; reason = "planning fault during pick"; return true;}
+    if (!request_sent_) {
+      if (planning_state_ == "Ready" && now - start_sent_at_ >= 1.0) {send_planning("START"); start_sent_at_ = now;}
+      if (planning_state_ != "Run.AwaitRequest" || pick_pub_->get_subscription_count() == 0) return false;
+      pick_token_ = std::to_string(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
+      const auto mode = pick_modes_.empty() ? "collect" : pick_modes_.at(a.slot - 1);
+      String m; m.data = pick_token_ + " " + a.box + " " + std::to_string(a.slot) + " " + mode + " " + std::to_string(config_.pucks_per_box - a.index);
+      pick_pub_->publish(m); request_sent_ = true;
+    }
+    if (!pick_done_) return false;
+    ok = pick_ok_; reason = pick_reason_; return true;
+  }
+
+  // Remaining skeletons: perception identity, placement and verification are not connected yet.
   //   ObservePucks:   gripper D435 survey at the box -> which puck ids stand on it and where (needs the camera TF).
-  //   PickPuck:       graspable check (grasp_region), arm pick, close, gripper_grasped_ must be true, load into the
-  //                   clock slot; report the puck id taken (action_done puck_id; -1 here = not known).
   //   PlacePuck:      clock to the slot, take the puck out, put it down on the grid spot (demo/puck_pick sis3).
   //   VerifyLocation: observe the location again, record ids and positions from that observation.
   bool run_skeleton(const MissionAction &, double now, bool &ok, std::string &) {
@@ -238,6 +267,7 @@ private:
     write_records();
     if (fsm_.state() == MissionState::Fault && !fault_handled_) {
       fault_handled_ = true;
+      String cancel; cancel.data = pick_token_; pick_cancel_pub_->publish(cancel);
       send_planning("STOP");  // safe stop: planning holds every axis
       RCLCPP_ERROR(get_logger(), "mission fault: %s", fsm_.reason().c_str());
       note("FAULT " + fsm_.reason());
@@ -323,6 +353,10 @@ private:
       << (config_.assume_unknown_picks ? "true" : "false") << "\n}\n";
   }
 
+  std::vector<std::string> pick_modes_;
+  std::string pick_token_, pick_reason_;
+  bool pick_done_ = false, pick_ok_ = false;
+  rclcpp::Publisher<String>::SharedPtr pick_pub_, pick_cancel_pub_;
   MissionConfig config_;
   MissionFsm fsm_;
   MissionInputs inputs_;

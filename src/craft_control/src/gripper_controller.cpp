@@ -61,7 +61,6 @@ void GripperController::clear_target()
   has_target_ = false;
   closing_ = false;
   overcurrent_time_ = 0.0;
-  grasped_ = false;
 }
 
 double GripperController::compute_command(double current_angle) const
