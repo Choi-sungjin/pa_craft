@@ -44,3 +44,65 @@
 - `python make_urdf_usd.py` (Python 3.14, `cad/review_dependencies` 사용)
 - 입력: `delivery/V306_.../WORLD_SCENE_V306_FULLFLIP_MEASURED_43p6.json`(BRep), `MESH_BODIES.json`(Fusion 메시 바디)
 - 검증: `python validate.py`
+
+## RViz 확인 도구
+
+```bash
+ros2 launch craft_description arm_sliders.launch.py   # LM 가이드 + 팔 관절만 슬라이더
+ros2 launch craft_description box_reach.launch.py     # 전방 박스(205×205×70 mm) 커버 검사
+```
+
+### `arm_sliders` — 고른 관절만 슬라이더로
+
+- 기본은 `lm_slide`(mm), `shoulder`/`elbow`/`wrist_pitch`/`tool_roll`(deg)이다. 나머지 움직이는 관절(집게, 캐러셀, 바퀴)은 0으로 고정해 발행한다.
+- 다른 URDF: `urdf:=/경로/로봇.urdf joints:="joint_a joint_b"`. `joints:="''"`이면 움직이는 관절 전부에 슬라이더를 띄운다.
+- `.urdf`는 파일을 그대로 읽고, `.xacro`일 때만 xacro를 쓴다.
+
+### `box_reach` — 박스 윗면을 TCP로 다 덮는지 검사
+
+- **조절**
+  - 관절: TCP 위치를 창에 mm로 표시하고, RViz에는 파란 점으로 보인다.
+  - 관절 리밋 체크박스: 관절마다 한계 ON/OFF. OFF면 그 관절 한계를 무시하고 판정한다(회전 ±180°, 직동 ±300 mm).
+  - 숫자 칸: 모든 슬라이더 옆. 값을 넣고 Enter. 관절은 한계 안으로 자르고, 나머지는 슬라이더 범위를 넓힌다.
+  - LM 스트로크: 현재 범위의 중앙을 기준으로 양쪽 대칭으로 늘이거나 줄인다. URDF 한계도 같이 바꾼다.
+  - 링크 길이 4개: L1 어깨–팔꿈치, L2 팔꿈치–손목, L3 손목–비틀기, L4 비틀기–TCP
+  - 박스: 로봇 앞면과의 거리, 좌우 중심, 검사 높이
+  - TCP 각도 허용: 0이면 수직 아래만 보고, 180이면 방향과 상관없이 본다.
+  - 높이 여유(기본 30 mm): 박스 윗면 점 바로 위 0~여유 높이 중 어디서든 TCP가 그 각도로 오면 그 점은 초록이다.
+- **링크 길이 변경:** URDF 관절 원점을 같은 방향으로 늘이거나 줄여 robot_state_publisher에 다시 넣는다. 메시도 링크 방향으로 같이 늘인다. 양 끝 관절 허브(링크 길이의 30%, 최대 35 mm)는 모양을 그대로 두고 그 사이만 늘이거나 줄이며, 끝 허브 너머는 늘어난 만큼 평행 이동한다. L4는 그리퍼 몸체와 두 집게를 함께 늘인다. 늘인 메시는 임시 폴더(`/tmp/box_reach_meshes_*`)에 STL로 쓰고, 종료할 때 지운다. 충돌 메시는 바꾸지 않는다.
+- **박스 위치:** 박스는 +x(전방), 바닥 `base_footprint`(z −34.3 mm)에 놓는다. 거리는 박스 높이대(바닥~박스 높이)와 박스 좌우 폭 안에 있는 몸체 메시의 가장 앞 점부터 잰다(V307 기본 배치: x 242.8 mm). 그래서 거리 0이면 박스가 몸체에 닿는다. 팔과 LM 가이드는 빼고 잰다. 좌우 기본값은 LM 가이드 중앙이다.
+- **판정**
+  - 박스 윗면을 5 mm 격자로 나눠, 닿으면 초록, 못 닿으면 빨강으로 칠한다.
+  - 좌우는 LM 가이드 범위로, 전후와 높이는 팔(x‑z 평면 3링크 IK)과 관절 한계로 본다.
+  - 충돌은 보지 않는다.
+- **launch 인자:** `stroke:=210`(시작 LM 스트로크 mm), `limits:="shoulder:0:45 elbow:-30:170"`(관절 한계 바꾸기, deg/mm, URDF 파일은 그대로)
+- **무게 토크 패널(창 오른쪽):**
+  - 현재 자세에서 무게(중력)만으로 shoulder, elbow, wrist_pitch에 걸리는 토크를 보여 준다. URDF 링크 질량과 무게중심, 그리고 집게 하중(g 입력)을 쓴다. 가속과 마찰은 뺀다.
+  - 관절과 모터가 직결이라 관절 토크가 곧 모터 토크다.
+  - 모터는 XM430‑W350 @12 V 기준이다. 스톨 4.1 N·m는 ROBOTIS e-manual 값이고, 정격 0.82 N·m는 스톨의 20%로 잡은 추정값이다. 각 값을 정격·스톨 대비 %로 보여 준다(초록 ≤ 정격, 주황 ≤ 스톨, 빨강 > 스톨).
+  - 링크 길이를 바꾸면 무게중심은 메시와 같은 방식으로 옮기지만 질량은 그대로 둔다.
+  - 모터 값은 파라미터 `motor_name`, `motor_stall_nm`, `motor_rated_nm`로 바꾼다.
+- **다른 로봇:** `box_reach.py` 파라미터 `slide_joint`, `arm_joints`, `roll_joint`, `tcp_joint`, `front_axis`, `front_face`, `floor_z`, `box_size`를 바꾼다.
+
+### 현재 베스트 설정 (2026-11-18)
+
+`box_reach`로 찾은 값 중 지금까지 가장 좋은 설정이다. 전체 커버 **71.4%**(좌우 100%, 전후·높이 71.4%)다.
+
+| 항목 | 값 | 원래 |
+|---|---|---|
+| LM 스트로크 | 210 mm (중앙 기준 대칭, −61.5~148.5 mm) | 129 mm |
+| shoulder 한계 | 0~45° (뒤로 꺾임 없음) | −18~45° |
+| L1 어깨–팔꿈치 | 110 mm | 188 mm |
+| L2 팔꿈치–손목 | 110 mm | 95 mm |
+| L3 손목–비틀기 | 45 mm | 45 mm |
+| L4 비틀기–TCP | 152.6 mm | 152.6 mm |
+| 로봇 앞면–박스 거리 | 15 mm | |
+| 박스 좌우 중심 | 0 mm | |
+| TCP 각도 허용 | 수직 아래 ±10° | |
+| 높이 여유 | 윗면 위 30 mm까지 | |
+
+다시 띄우려면 아래 명령을 쓴다. 링크 길이, 거리, 각도 허용은 창에서 위 값으로 맞춘다.
+
+```bash
+ros2 launch craft_description box_reach.launch.py stroke:=210 limits:="shoulder:0:45"
+```

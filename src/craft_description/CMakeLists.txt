@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.8)
 project(craft_description)
 find_package(ament_cmake REQUIRED)
-install(DIRECTORY urdf meshes DESTINATION share/${PROJECT_NAME})
+install(DIRECTORY urdf meshes launch rviz DESTINATION share/${PROJECT_NAME})
+install(PROGRAMS scripts/arm_sliders.py scripts/box_reach.py DESTINATION lib/${PROJECT_NAME})
 install(FILES README_KO.md VALIDATION.json LINKS.json DESTINATION share/${PROJECT_NAME})
 ament_package()
