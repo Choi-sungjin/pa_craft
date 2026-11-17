@@ -1,0 +1,18 @@
+{
+  "checked_date": "2026-11-17",
+  "source_url": "https://www.notion.so/82819e206c8083d7ba8c012bbfd6ee5f",
+  "team_name": "A팀 크래프트",
+  "access": "MCP returned 404; public read-only page and database requests succeeded",
+  "journal_count": 87,
+  "unattributed_count": 4,
+  "all_rows_returned": true,
+  "page_body_reads": 17,
+  "account_mapping_confirmed_by_user": {
+    "준명": "박준명",
+    "규진 심": "심규진",
+    "성진 최": "최성진",
+    "여훈 마": "한지훈"
+  },
+  "source_response_sha256": "fe4ddfd60c0aa0425fb5c4ecc4b3aab49c8116c944808a0f843950ee76f8c6a2",
+  "scope": "Read structured diary properties for 87 rows and bodies of 17 content-bearing rows without result properties; attachments not downloaded or independently validated."
+}

@@ -1,0 +1,11 @@
+# PDF/image artifacts must retain their original bytes and use binary diffs.
+*.pdf binary
+*.png binary
+
+# Supplied fixtures and raw execution logs are retained verbatim as evidence.
+problem/example-input.json -text -whitespace
+problem/field-layout.csv -text -whitespace
+problem/posts.csv -text -whitespace
+problem/walls.csv -text -whitespace
+problem/validate_problem.py -text -whitespace
+results/development/integ21_1116_1429/picks/*.log -text -whitespace

@@ -1,0 +1,85 @@
+date,authors,title,diary_status,source_url,artifact_url,evidence_level
+2026-09-29,박준명,realsense object detection,완료,https://www.notion.so/99319e206c8083cb96fa81f84cd2f9bb,,일지 기록; 원본 시험 전체 재실행 아님
+2026-09-30,박준명,Path Planning,완료,https://www.notion.so/0fb19e206c808246bc6d01b2a64e1296,,일지 기록; 원본 시험 전체 재실행 아님
+2026-09-30,심규진,realsense object detection,완료,https://www.notion.so/ac619e206c8082bfb2738107ad950e12,,일지 기록; 원본 시험 전체 재실행 아님
+2026-09-30,최성진,리얼센스 프로파일 설치와 화각 검토 — 접근 과정,완료,https://www.notion.so/22c19e206c8082cd9b2c01c66d3605d1,,일지 기록; 원본 시험 전체 재실행 아님
+2026-09-30,최성진,전방 라이다·리얼센스와 후방 라이다·매니퓰레이터 2D 센서 활용 검토,진행 중,https://www.notion.so/6f219e206c808397958f01e5de0d35d9,,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-01,심규진,realsense object detection,완료,https://www.notion.so/f7d19e206c8082d1bd9601f67b3b2771,,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-01,최성진,매니플레이터 가동범위·충돌 검토용 3D 프린팅 목업 제작,진행 중,https://www.notion.so/7a319e206c80839a9380819327e58eef,,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-08,최성진,"설계) V65–V68 후방 회피용 매니퓰레이터 카메라 거치대, 마스트",완료,https://www.notion.so/c0e19e206c8083f2910481c8061ba03a,,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-10,최성진,"설계) V69–V75 웹캠 교체, 머리받침 화각, 리브 보강",완료,https://www.notion.so/03a19e206c8082669fd48143d3db19f5,,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-14,박준명;심규진, 인지) ROS2 메시지 용량 축소,완료,https://www.notion.so/7fc19e206c8082eba9478146e1ea27d2,https://github.com/Choi-sungjin/pa_craft/tree/planning/src/craft_perception,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-14,한지훈,"2d 라이다 merge 장단점 검토, 가상환경 검증",완료,https://www.notion.so/1ef19e206c8082aabd4601ad34a9eeb5,,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-15,최성진,"설계) V76–V80 LM 구동부, 전완, 그리퍼 롤 재검토",완료,https://www.notion.so/64619e206c808271ba2881645ebcbad1,,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-15,심규진;박준명,인지) aruco_reader → apriltag_reader,완료,https://www.notion.so/fd319e206c808303a0eb812db423af24,https://github.com/Choi-sungjin/pa_craft/tree/planning/src/craft_perception,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-15,박준명;심규진,인지) knob 축 추출,완료,https://www.notion.so/8bd19e206c8082e4917b015cd848ffae,https://github.com/Choi-sungjin/pa_craft/tree/planning/src/craft_perception,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-15,박준명;심규진,인지) obstacle_detector (camera),진행 중,https://www.notion.so/07719e206c80839c902601bdd6fe3a22,https://github.com/Choi-sungjin/pa_craft/tree/planning/src/craft_perception,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-16,박준명;심규진,제어) arm control,완료,https://www.notion.so/6fa19e206c8082a9a32001813e3d21de,,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-16,박준명;심규진,제어) 로봇 팔 그리퍼 토크 확인,,https://www.notion.so/1e119e206c80826f96e0017bcf2af02a,,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-16,박준명;심규진,통합) USB 허브 사용 포트 고정,완료,https://www.notion.so/82319e206c8083edbb38019af08c0b39,,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-16,박준명;심규진,판단) path planner,완료,https://www.notion.so/9c419e206c80821db50581b0de88fa50,,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-18,최성진,"설계) V81–V85 팔–LM 조립, 벨트 보강, 55mm 기둥",완료,https://www.notion.so/2cb19e206c80834c96e28121bdd5f815,,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-18,박준명,쓰레기장,,https://www.notion.so/f6c19e206c80839c803a017436a06fb4,,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-19,한지훈,"2d 라이다 obstacle_detector 설계, 구현, 검증",진행 중,https://www.notion.so/06519e206c808393a35381fa9d195c38,https://github.com/Choi-sungjin/pa_craft/tree/feature/perception/lidar/obstacle_detector,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-21,최성진,"설계) V86–V90 전체 도면, 라이다 플랜지, 케이블 고정, Jetson 장착",완료,https://www.notion.so/32319e206c808203bbf30129aa72d372,,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-21,박준명;심규진,인지) D435 YOLO 일원화 (knob_sign + puck_blue → 모델 1개),,https://www.notion.so/8b119e206c8082cbb10381fd562d0d7c,https://github.com/Choi-sungjin/pa_craft/blob/planning/src/craft_perception/README.md#todo,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-21,박준명;심규진,인지) YOLO 추론 백엔드 (ncnn / TensorRT) 및 seg 모델 지원,완료,https://www.notion.so/86a19e206c80839a8bb5812b6f07a242,https://github.com/Choi-sungjin/pa_craft/tree/planning/src/craft_perception,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-21,박준명;심규진,인지) puck_axis C++ 이식 (D435),완료,https://www.notion.so/9d219e206c808366a0c701f0be198c54,https://github.com/Choi-sungjin/pa_craft/tree/planning/src/craft_perception,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-21,박준명;심규진,통합) PerceptionMaster — perception 단일 C++ 노드 통합,완료,https://www.notion.so/f8219e206c808386a7e681c5aff83066,https://github.com/Choi-sungjin/pa_craft/tree/planning/src/craft_perception,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-22,최성진,"검증) V96–V99 통합 모델, MuJoCo, Isaac 시뮬레이션",완료,https://www.notion.so/12319e206c8083ac989c81a61c3b11ed,,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-22,최성진,"설계) V100–V102 배터리 홀더, 프로파일 받침",완료,https://www.notion.so/71519e206c808385835d81ab4f39c6a0,,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-22,최성진,설계) V91–V95 Jetson 서랍식 장착,완료,https://www.notion.so/c0d19e206c8082748a0581533947a930,,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-22,박준명;심규진;한지훈,인지 시나리오,진행 중,https://www.notion.so/50119e206c80828b813701fbc3271b8f,,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-22,박준명;심규진,제어 시나리오,진행 중,https://www.notion.so/eb919e206c80837f841d015338e3d443,,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-22,박준명;심규진;최성진,판단 시나리오,시작 전,https://www.notion.so/e0519e206c8082a6a4420137fdc58cf5,,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-25,최성진,검증) V124 MuJoCo·Isaac Sim 제작 및 동작 시험,진행 중,https://www.notion.so/02e19e206c8082439d3a0148f751ee89,https://drive.google.com/drive/folders/1_ulKd3RHqCfl9YtTL_dBYZGCmirB6eTo,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-25,최성진,설계) V124 전완·리브 도면 수정 및 출력 자료 제작,진행 중,https://www.notion.so/60219e206c8083bf9bee011d2c06e1b3,https://drive.google.com/drive/folders/1_ulKd3RHqCfl9YtTL_dBYZGCmirB6eTo,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-25,최성진,"설계) V126, V130, V134, V136 전완, 손목 분할 재설계",완료,https://www.notion.so/8b919e206c808345b8bd01a106e1206d,,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-26,한지훈,검증)slam 1차 동작 시험,완료,https://www.notion.so/70e19e206c808316b1c7014539d8d8d0,,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-26,최성진,설계) V127–V141 C310 카메라 조절 마운트 (4턱 그리퍼 실패 포함),완료,https://www.notion.so/80719e206c80824db57c81c8b605709f,,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-26,최성진,설계) V137–V139 OpenCR 배터리 바스켓,완료,https://www.notion.so/ac519e206c8082e6960681f189eb6e75,,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-26,최성진,"실험) V128, V131, V132 압출 불량 진단 출력",완료,https://www.notion.so/9c719e206c8082b7b4c981c7b6fae826,,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-27,한지훈,검증)slam 2차 동작 시험,진행 중,https://www.notion.so/50919e206c8083b9823a817d05d6327b,,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-27,최성진,"설계) V142–V165 2턱 그리퍼 복원, 소형화",완료,https://www.notion.so/4ad19e206c80823ea5b401f5aac35cce,,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-27,최성진,"설계) V143–V146 바퀴, 캐스터 높이와 4륜 배치",완료,https://www.notion.so/b8d19e206c8082b1ab29812b66cd0db3,,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-27,최성진,"설계) V159–V163 손목 카메라 케이스, 방향",완료,https://www.notion.so/72e19e206c8083ff9796016b36a7070f,,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-28,최성진,"설계) V166–V174 웹캠 거치대, 케이블, 후방 라이다",완료,https://www.notion.so/cbb19e206c80829f969101e515008445,,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-28,최성진,"설계) V175 전체 조립, Isaac Lab 전달",완료,https://www.notion.so/97919e206c8083c2887c810ec3a15632,,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-30,최성진,"설계) V176–V184 타이어 트레드, 4륜 구동",진행 중,https://www.notion.so/5ef19e206c8082b2b1f681066f546db7,,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-30,최성진,"설계) V185 R1–R5 모터 플립, 바퀴 와플 아랫면 장착",완료,https://www.notion.so/de219e206c8083e6bc28811720a74480,,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-31,심규진;박준명,[실험] 휠 odom 회전 보정 · IMU 배율 검증,,https://www.notion.so/48c19e206c80822fa138015f165b741d,,일지 기록; 원본 시험 전체 재실행 아님
+2026-10-31,최성진,설계) V185 2층판 V1–V16 2층 와플 한 판 일체형,진행 중,https://www.notion.so/68219e206c8083d6a75c014111564b5d,,일지 기록; 원본 시험 전체 재실행 아님
+2026-11-01,최성진,"검증) V186 RL 3세트 모델(주행, 조작, 전체)",완료,https://www.notion.so/e0d19e206c8082e3a9fc01b313ba6f1f,,일지 기록; 원본 시험 전체 재실행 아님
+2026-11-01,심규진;박준명,작업 기록: LiDAR SLAM · 위치 추정 · Corner demo · 경로 계획,,https://www.notion.so/99719e206c8082e79ec481e41ad800e4,,일지 기록; 원본 시험 전체 재실행 아님
+2026-11-03,최성진,"개발) 음성 안내 노드 craft_voice 설계·구현, 주사위 미션 단계 이름 팀 합의",완료,https://www.notion.so/72519e206c80825387ab81f9bdb58c1f,https://github.com/Choi-sungjin/pa_craft/tree/main/src/craft_voice,일지 기록; 원본 시험 전체 재실행 아님
+2026-11-04,최성진,개발) 음성 안내가 상태머신과 같은 카메라 화면을 보고 말하기,완료,https://www.notion.so/91019e206c8082a880d481342081af37,https://github.com/Choi-sungjin/pa_craft/tree/main/src/craft_voice,일지 기록; 원본 시험 전체 재실행 아님
+2026-11-04,한지훈,인지) 퍽 인식 YOLO·CenterPose 합성·실물 데이터 학습,완료,https://www.notion.so/15c19e206c80821c89e201265a74e92f,,일지 기록; 원본 시험 전체 재실행 아님
+2026-11-04,한지훈,제어) 강화학습 퍽 집기 테스트 PickAny → PickStand → PickBox ,완료,https://www.notion.so/d7f19e206c808231be0b0174c786c789,,일지 기록; 원본 시험 전체 재실행 아님
+2026-11-05,박준명;심규진,Demo: 주사위 눈 배치,,https://www.notion.so/dad19e206c808348a1b8818f43c703ec,,일지 기록; 원본 시험 전체 재실행 아님
+2026-11-06,박준명;심규진;최성진,Demo: via pose + 주사위 눈 배치,,https://www.notion.so/4b619e206c808206bc4381784fb2f126,,일지 기록; 원본 시험 전체 재실행 아님
+2026-11-06,한지훈,"인지) 박스·누운 퍽 자세 측정(깊이 기반), 신호등 판정 통합",완료,https://www.notion.so/f6419e206c80827aae370129f6b7397f,,일지 기록; 원본 시험 전체 재실행 아님
+2026-11-07,미확인,"[실험] 적재 퍽 집기, 주사위 눈 배치",,https://www.notion.so/7db19e206c80832992ea01195e00f93a,,일지 기록; 원본 시험 전체 재실행 아님
+2026-11-07,최성진,"설계) V298–V307 배터리 회전 서랍 추가, 상단 리얼센스 위치 변경, 물리 문제 수정, URDF·USD",진행 중,https://www.notion.so/0a619e206c808208b2c1812c5e3f24e7,https://drive.google.com/drive/folders/1lrMOLNWhD-t5VgqqLV0FgI44GWo0Zm3E,일지 기록; 원본 시험 전체 재실행 아님
+2026-11-07,한지훈,"인지) 기울어진 카메라 영상 세우기 적용, 실물 데이터 추가 학습",완료,https://www.notion.so/b3c19e206c80822f804001cebffb5b51,,일지 기록; 원본 시험 전체 재실행 아님
+2026-11-08,한지훈,"인지) 퍽 모델 비교(v7tag vs v8b), 신호등 색 직접 판정, 기록 중 신호 우선 처리",완료,https://www.notion.so/79219e206c8083618541816ce0b87980,,일지 기록; 원본 시험 전체 재실행 아님
+2026-11-09,한지훈,"제어) 퍽 집기 RL 재설계(V307, 손끝 행동 + IK) 및 단계별 학습",완료,https://www.notion.so/e2019e206c80831f83ea018132db17fc,,일지 기록; 원본 시험 전체 재실행 아님
+2026-11-10,최성진,"설계) V310–V315 uppercam 정방향 수정, Isaac Lab 모델 준비·메시 경량화",진행 중,https://www.notion.so/37719e206c8082c89c820130d8126282,,일지 기록; 원본 시험 전체 재실행 아님
+2026-11-10,한지훈,"제어) V307 S4 학습 완료·평가, V311 이식과 학습 방식 비교(잔차 RL 추천)",완료,https://www.notion.so/cdb19e206c8082de9b02014201aee03f,,일지 기록; 원본 시험 전체 재실행 아님
+2026-11-11,한지훈,인지) 퍽·박스·신호등·바코드 최종 인식 통합 및 인수인계,완료,https://www.notion.so/09319e206c8082f29e0801b9e3158da7,,일지 기록; 원본 시험 전체 재실행 아님
+2026-11-11,최성진,"통합) 음성 노드 젯슨 실물 배포, 호출어 '크래프트' 대화, 블루투스 스피커·마이크 연결",완료,https://www.notion.so/55c19e206c808205bcfe0105a0b88b2f,https://github.com/Choi-sungjin/pa_craft/tree/main/src/craft_voice,일지 기록; 원본 시험 전체 재실행 아님
+2026-11-12,최성진,"개선) 음성 안내 문장 다양화, 멈춘 이유·고장 이유 안내, 상태머신 밖 신호 구독, 부팅 시계 문제 해결",완료,https://www.notion.so/feb19e206c8083bc8a4a01c50562334e,https://github.com/Choi-sungjin/pa_craft/tree/main/src/craft_voice,일지 기록; 원본 시험 전체 재실행 아님
+2026-11-12,한지훈,"제어) R3 잔차 정책 학습 반복, 밤샘 결과 정리, 시뮬 자산 정리",완료,https://www.notion.so/f2a19e206c8083d8b178815a4aba1497,,일지 기록; 원본 시험 전체 재실행 아님
+2026-11-13,심규진;박준명,Mission(mrun) 실험 기록,진행 중,https://www.notion.so/60d19e206c8083c1acb6813facd32cc4,,일지 기록; 원본 시험 전체 재실행 아님
+2026-11-13,최성진,"개선) 신호등·출발·상자 접근 음성 안내, 혼잣말, 한국어 발음 개선, 마이크 잡음 제거로 호출 인식 개선",진행 중,https://www.notion.so/deb19e206c8083788724814330058de6,https://github.com/Choi-sungjin/pa_craft/tree/voice/src/craft_voice,일지 기록; 원본 시험 전체 재실행 아님
+2026-11-13,한지훈,"제어) 누운 퍽 세우기 수정, R1 실물 연결 검토, 그립캠 자동 보정 패치, R3 추가 학습",완료,https://www.notion.so/d9219e206c80836e8273011fc5f44bb6,,일지 기록; 원본 시험 전체 재실행 아님
+2026-11-14,최성진,개선) 바퀴 휠 3D 프린팅으로 정차 시 쏠림 개선,완료,https://www.notion.so/7e019e206c8082c88fb881fd41c45606,,일지 기록; 원본 시험 전체 재실행 아님
+2026-11-14,한지훈,인지) 신호등·바코드·퍼셉션 마스터 수정 (밤~새벽),완료,https://www.notion.so/47a19e206c808304aa1b013349042360,,일지 기록; 원본 시험 전체 재실행 아님
+2026-11-14,한지훈,제어) 그리퍼·주사위 교시 설정 변경 후 사용자 결정으로 되돌림,완료,https://www.notion.so/01019e206c8082ee854f8185e3333b02,,일지 기록; 원본 시험 전체 재실행 아님
+2026-11-14,한지훈,제어) 그립캠 위치 보정과 원기둥 집기 실험,완료,https://www.notion.so/d7b19e206c808373bb1f81af71709bbf,,일지 기록; 원본 시험 전체 재실행 아님
+2026-11-14,한지훈,"제어) 미션 주행 디버깅, 박스 도킹·AMCL·모터 응답 결함 처리",완료,https://www.notion.so/f4b19e206c80826487ed0106f92a8630,,일지 기록; 원본 시험 전체 재실행 아님
+2026-11-15,한지훈,인지) 그립캠 yaw 측정 도구 제작과 보정값 갱신,완료,https://www.notion.so/54519e206c8082178cd28113b982e78c,,일지 기록; 원본 시험 전체 재실행 아님
+2026-11-15,한지훈,인지) 어퍼캠 YOLO C++ 이식과 카메라 자세 설정,완료,https://www.notion.so/7b819e206c8083acb8b881945ad30c66,,일지 기록; 원본 시험 전체 재실행 아님
+2026-11-15,한지훈,제어) 교시(teach) 안전장치와 주사위 자세 재작성,완료,https://www.notion.so/96f19e206c808318b7fc01e2abf4b22d,,일지 기록; 원본 시험 전체 재실행 아님
+2026-11-15,한지훈,제어) 사각 퍽 --find 실험과 stand 보정값 반영,완료,https://www.notion.so/52519e206c8082939502014a385abbd5,,일지 기록; 원본 시험 전체 재실행 아님
+2026-11-15,한지훈,제어) 야간 미션 주행 9회 실행과 bag 기록 (11-14 밤~11-15 새벽),완료,https://www.notion.so/c7b19e206c808215abe9819bdabddadc,,일지 기록; 원본 시험 전체 재실행 아님
+2026-11-15,한지훈,통합) 주행·인지·설계 설정 일괄 수정 (커밋 전 저장 상태),완료,https://www.notion.so/6f319e206c8082649f6e016c64278553,,일지 기록; 원본 시험 전체 재실행 아님

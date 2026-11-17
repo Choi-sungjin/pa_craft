@@ -1,0 +1,20 @@
+14:29:44 mission started
+14:29:45 action: reset_perception
+14:30:11 WatchSignal -> ReadBarcode
+14:30:14 action: approach_box S1
+14:30:14 ReadBarcode -> Collect
+14:30:48 action: observe_pucks S1
+14:30:48 action: pick_puck S1 #0 -> slot 1
+14:32:13 action: pick_puck S1 #1 -> slot 2
+14:33:31 action: leave_box S1
+14:33:35 action: approach_box S2
+14:34:14 action: observe_pucks S2
+14:34:14 action: pick_puck S2 #0 -> slot 3
+14:35:42 action: pick_puck S2 #1 -> slot 4
+14:37:08 action: leave_box S2
+14:37:13 action: approach_box S3
+14:38:05 action: observe_pucks S3
+14:38:06 action: pick_puck S3 #0 -> slot 5
+14:39:22 action: pick_puck S3 #1 -> slot 6
+14:39:31 Collect -> Fault
+14:39:31 FAULT Collect: pick_puck S3 #1 -> slot 6 failed:  exit=1, cancelled=False, log=/home/craft/craft_mission_logs/picks/pick_1794807562105598306.log

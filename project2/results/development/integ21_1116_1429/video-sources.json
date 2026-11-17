@@ -1,0 +1,391 @@
+{
+  "bag": "/home/craft/bags/integ21_1116_1429",
+  "time_basis": "Bag receive time; saved camera file modification time for snapshot availability. Photos and depth are adjacent captures, not synchronized video.",
+  "signal": {
+    "barcode": "P2-02",
+    "order": "descending",
+    "sequence": [
+      "R",
+      "G",
+      "G",
+      "Y",
+      "Y",
+      "G",
+      "G",
+      "Y",
+      "R",
+      "R",
+      "R",
+      "Y"
+    ],
+    "counts": {
+      "R": 4,
+      "Y": 4,
+      "G": 4
+    },
+    "locations": {
+      "L1": {
+        "group": "R",
+        "count": 4
+      },
+      "L2": {
+        "group": "Y",
+        "count": 4
+      },
+      "L3": {
+        "group": "G",
+        "count": 4
+      }
+    }
+  },
+  "pucks": [
+    {
+      "label": "S1 · 1번째 / 슬롯 1",
+      "log": "/home/craft/craft_mission_logs/picks/pick_1794807048755534720.log",
+      "upper": "/home/craft/craft/tools/realsense_check/out/survey_0_143050_color.png",
+      "upper_at": 1794807052.5953796,
+      "start": 1794807048.755535,
+      "end": 1794807133.3983672,
+      "detections": [
+        {
+          "cls": "red_prism",
+          "score": 0.93,
+          "ahead": 159.1,
+          "lateral": -55.2,
+          "px": [
+            778.0,
+            498.0
+          ],
+          "posture": "standing",
+          "height": 64.8
+        },
+        {
+          "cls": "red_cylinder",
+          "score": 0.87,
+          "ahead": 154.7,
+          "lateral": 23.3,
+          "px": [
+            671.0,
+            503.0
+          ],
+          "posture": "standing",
+          "height": 62.4
+        }
+      ],
+      "selected": "red_cylinder",
+      "photo": "/home/craft/craft/tools/realsense_check/out/grip_wait_143110_photo_color.png",
+      "stack": "/home/craft/craft/tools/realsense_check/out/grip_wait_143111",
+      "grip_at": 1794807072.5321288,
+      "photo_at": 1794807071.4000864,
+      "yaw": 0.0,
+      "centre": [
+        43.6,
+        -14.1,
+        220.6
+      ],
+      "floor": [
+        54.1,
+        13.5,
+        276.2
+      ],
+      "raw": 14.8,
+      "footprint": [
+        23.0,
+        29.0
+      ],
+      "top": 63.0,
+      "valid_frames": 9,
+      "frames": 10,
+      "sd": 4.6,
+      "lm": -6.7,
+      "ahead": 5.4,
+      "adjusted_yaw": 0.0
+    },
+    {
+      "label": "S1 · 2번째 / 슬롯 2",
+      "log": "/home/craft/craft_mission_logs/picks/pick_1794807133806530350.log",
+      "upper": "/home/craft/craft/tools/realsense_check/out/survey_0_143217_color.png",
+      "upper_at": 1794807139.56659,
+      "start": 1794807133.8065302,
+      "end": 1794807211.0971274,
+      "detections": [
+        {
+          "cls": "red_prism",
+          "score": 0.92,
+          "ahead": 156.8,
+          "lateral": -55.5,
+          "px": [
+            779.0,
+            497.0
+          ],
+          "posture": "standing",
+          "height": 63.6
+        }
+      ],
+      "selected": "red_prism",
+      "photo": "/home/craft/craft/tools/realsense_check/out/grip_wait_143237_photo_color.png",
+      "stack": "/home/craft/craft/tools/realsense_check/out/grip_wait_143239",
+      "grip_at": 1794807160.619346,
+      "photo_at": 1794807159.5113063,
+      "yaw": -22.7,
+      "centre": [
+        38.0,
+        -15.2,
+        219.8
+      ],
+      "floor": [
+        48.2,
+        12.1,
+        275.5
+      ],
+      "raw": 20.3,
+      "footprint": [
+        27.0,
+        31.0
+      ],
+      "top": 63.0,
+      "valid_frames": 9,
+      "frames": 10,
+      "sd": 0.4,
+      "lm": -4.6,
+      "ahead": 11.0,
+      "adjusted_yaw": -24.2
+    },
+    {
+      "label": "S2 · 1번째 / 슬롯 3",
+      "log": "/home/craft/craft_mission_logs/picks/pick_1794807254906576481.log",
+      "upper": "/home/craft/craft/tools/realsense_check/out/survey_0_143418_color.png",
+      "upper_at": 1794807260.4788318,
+      "start": 1794807254.9065764,
+      "end": 1794807342.0495727,
+      "detections": [
+        {
+          "cls": "red_cylinder",
+          "score": 0.89,
+          "ahead": 74.2,
+          "lateral": 24.1,
+          "px": [
+            669.0,
+            597.0
+          ],
+          "posture": "standing",
+          "height": 59.5
+        },
+        {
+          "cls": "green_cylinder",
+          "score": 0.88,
+          "ahead": 142.7,
+          "lateral": -28.1,
+          "px": [
+            742.0,
+            514.0
+          ],
+          "posture": "standing",
+          "height": 62.4
+        }
+      ],
+      "selected": "red_cylinder",
+      "photo": "/home/craft/craft/tools/realsense_check/out/grip_wait_143437_photo_color.png",
+      "stack": "/home/craft/craft/tools/realsense_check/out/grip_wait_143438",
+      "grip_at": 1794807279.979495,
+      "photo_at": 1794807278.7434533,
+      "yaw": 0.0,
+      "centre": [
+        46.5,
+        -12.0,
+        221.4
+      ],
+      "floor": [
+        50.2,
+        15.1,
+        277.8
+      ],
+      "raw": 6.5,
+      "footprint": [
+        26.0,
+        29.0
+      ],
+      "top": 63.0,
+      "valid_frames": 10,
+      "frames": 10,
+      "sd": 3.5,
+      "lm": -10.2,
+      "ahead": -4.9,
+      "adjusted_yaw": 0.0
+    },
+    {
+      "label": "S2 · 2번째 / 슬롯 4",
+      "log": "/home/craft/craft_mission_logs/picks/pick_1794807342505615407.log",
+      "upper": "/home/craft/craft/tools/realsense_check/out/survey_0_143545_color.png",
+      "upper_at": 1794807347.3057463,
+      "start": 1794807342.5056155,
+      "end": 1794807428.5003896,
+      "detections": [
+        {
+          "cls": "green_cylinder",
+          "score": 0.87,
+          "ahead": 143.5,
+          "lateral": -27.9,
+          "px": [
+            742.0,
+            514.0
+          ],
+          "posture": "standing",
+          "height": 63.9
+        }
+      ],
+      "selected": "green_cylinder",
+      "photo": "/home/craft/craft/tools/realsense_check/out/grip_wait_143605_photo_color.png",
+      "stack": "/home/craft/craft/tools/realsense_check/out/grip_wait_143607",
+      "grip_at": 1794807368.2304347,
+      "photo_at": 1794807367.0863972,
+      "yaw": 0.0,
+      "centre": [
+        42.4,
+        -13.4,
+        219.2
+      ],
+      "floor": [
+        52.1,
+        14.2,
+        275.6
+      ],
+      "raw": -0.6,
+      "footprint": [
+        22.0,
+        30.0
+      ],
+      "top": 64.0,
+      "valid_frames": 10,
+      "frames": 10,
+      "sd": 5.7,
+      "lm": -8.3,
+      "ahead": 8.0,
+      "adjusted_yaw": 0.0
+    },
+    {
+      "label": "S3 · 1번째 / 슬롯 5",
+      "log": "/home/craft/craft_mission_logs/picks/pick_1794807486406302509.log",
+      "upper": "/home/craft/craft/tools/realsense_check/out/survey_0_143810_color.png",
+      "upper_at": 1794807492.1744149,
+      "start": 1794807486.4063025,
+      "end": 1794807561.6365824,
+      "detections": [
+        {
+          "cls": "green_prism",
+          "score": 0.88,
+          "ahead": 74.2,
+          "lateral": -19.5,
+          "px": [
+            734.0,
+            598.0
+          ],
+          "posture": "standing",
+          "height": 58.3
+        },
+        {
+          "cls": "red_prism",
+          "score": 0.87,
+          "ahead": 121.7,
+          "lateral": 44.8,
+          "px": [
+            640.0,
+            534.0
+          ],
+          "posture": "standing",
+          "height": 60.5
+        }
+      ],
+      "selected": "green_prism",
+      "photo": "/home/craft/craft/tools/realsense_check/out/grip_wait_143829_photo_color.png",
+      "stack": "/home/craft/craft/tools/realsense_check/out/grip_wait_143830",
+      "grip_at": 1794807512.7350607,
+      "photo_at": 1794807510.2909842,
+      "yaw": 5.2,
+      "centre": [
+        46.3,
+        -11.5,
+        221.5
+      ],
+      "floor": [
+        49.0,
+        16.6,
+        277.9
+      ],
+      "raw": -7.6,
+      "footprint": [
+        26.0,
+        32.0
+      ],
+      "top": 63.0,
+      "valid_frames": 9,
+      "frames": 10,
+      "sd": 2.1,
+      "lm": -10.8,
+      "ahead": -4.7,
+      "adjusted_yaw": 8.9
+    },
+    {
+      "label": "S3 · 2번째 / 슬롯 6",
+      "log": "/home/craft/craft_mission_logs/picks/pick_1794807562105598306.log",
+      "upper": "/home/craft/craft/tools/realsense_check/out/survey_0_143925_color.png",
+      "upper_at": 1794807567.024749,
+      "start": 1794807562.1055982,
+      "end": 1794807570.6488607,
+      "detections": [
+        {
+          "cls": "red_prism",
+          "score": 0.85,
+          "ahead": 121.7,
+          "lateral": 44.8,
+          "px": [
+            640.0,
+            534.0
+          ],
+          "posture": "standing",
+          "height": 60.6
+        }
+      ],
+      "selected": "red_prism",
+      "failure": "LM 레일 범위 밖 → 집기 중단"
+    }
+  ],
+  "highlight_windows_seconds": [
+    [
+      0,
+      40.0
+    ],
+    [
+      71.20249819755554,
+      102.13924741744995
+    ],
+    [
+      158.17370867729187,
+      190.226464509964
+    ],
+    [
+      279.08595037460327,
+      309.58661365509033
+    ],
+    [
+      365.9128649234772,
+      397.83755326271057
+    ],
+    [
+      510.78153347969055,
+      542.3421792984009
+    ],
+    [
+      585.631867647171,
+      600.2559792995453
+    ]
+  ],
+  "notes": [
+    "YOLO traffic boxes are recorded detections matched by camera header timestamp.",
+    "Puck crosses and labels are recorded detector centers on saved uppercam photos; no continuous puck tracking is invented.",
+    "Gripper depth display is median of saved depth stack. Center/axis are approximate projections of rounded recorded log values.",
+    "Gripper still photos and depth are not continuous recordings.",
+    "Barcode P2-02 is from the same execution signal.json, not an inferred decode.",
+    "Source bag has no audio stream."
+  ]
+}

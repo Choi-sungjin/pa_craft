@@ -1,0 +1,77 @@
+{
+  "tolerance_seconds": 0.3,
+  "rows": [
+    {
+      "number": 1,
+      "target_seconds": 9,
+      "selected_seconds": 9.216,
+      "offset_seconds": 0.216,
+      "sharpness": 156.015,
+      "label": "신호등 초록 인식",
+      "candidate_count": 6,
+      "report_label": "신호등 초록 인식",
+      "original_individual_file": "01_signal_green_009.216s.png"
+    },
+    {
+      "number": 2,
+      "target_seconds": 35,
+      "selected_seconds": 35.136,
+      "offset_seconds": 0.136,
+      "sharpness": 522.69,
+      "label": "바코드 인식",
+      "candidate_count": 3,
+      "report_label": "바코드 인식",
+      "original_individual_file": "02_barcode_035.136s.png"
+    },
+    {
+      "number": 3,
+      "target_seconds": 89,
+      "selected_seconds": 89.219,
+      "offset_seconds": 0.219,
+      "sharpness": 904.828,
+      "label": "어퍼캠 퍽 인식·선택",
+      "candidate_count": 5,
+      "report_label": "어퍼캠 퍽 인식·선택",
+      "original_individual_file": "03_uppercam_puck_089.219s.png"
+    },
+    {
+      "number": 4,
+      "target_seconds": 106,
+      "selected_seconds": 105.996,
+      "offset_seconds": -0.004,
+      "sharpness": 107.194,
+      "label": "그리퍼캠 Depth 기반 인식",
+      "candidate_count": 5,
+      "report_label": "그리퍼캠 Depth 기반 중심 인식",
+      "original_individual_file": "04_gripper_depth_105.996s.png"
+    },
+    {
+      "number": 5,
+      "target_seconds": 115,
+      "selected_seconds": 115.167,
+      "offset_seconds": 0.167,
+      "sharpness": 191.795,
+      "label": "퍽 적재",
+      "candidate_count": 6,
+      "report_label": "퍽 적재",
+      "original_individual_file": "05_puck_loading_115.167s.png"
+    },
+    {
+      "number": 6,
+      "target_seconds": 593,
+      "selected_seconds": 593.19,
+      "offset_seconds": 0.19,
+      "sharpness": 109.399,
+      "label": "LM 레일 범위 밖 — 집기 실패",
+      "candidate_count": 1,
+      "report_label": "LM 레일 범위 밖 — 집기 실패",
+      "original_individual_file": "06_lm_rail_failure_593.190s.png"
+    }
+  ],
+  "source_original_path": "/home/craft/Videos/integ21_1116_1429/uppercam_with_perception_full.mp4",
+  "video_manifest": "../../results/development/integ21_1116_1429/video-manifest.json",
+  "layout": {
+    "columns": 3,
+    "rows": 2
+  }
+}

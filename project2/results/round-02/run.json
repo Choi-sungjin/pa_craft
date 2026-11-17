@@ -1,0 +1,16 @@
+{
+  "round": 2,
+  "record_type": "missing_evidence_notice",
+  "status": "unconfirmed",
+  "date": null,
+  "operator": null,
+  "code_commit": null,
+  "parameters": null,
+  "problem_version": null,
+  "video_url": null,
+  "log_url": null,
+  "autonomous_completion": null,
+  "raw_score_100": null,
+  "integrated_score_25": null,
+  "failure_cause": null
+}

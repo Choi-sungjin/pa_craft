@@ -1,0 +1,9 @@
+{
+  "record_type": "missing_evidence_notice",
+  "status": "not_reached_in_this_run",
+  "new_observations": null,
+  "per_location_ids_positions": null,
+  "duplicate_check": null,
+  "missing_check": null,
+  "note": "Collect에서 중단됨. 계획이나 집기 완료 로그를 새 관측 결과로 사용하지 않음."
+}

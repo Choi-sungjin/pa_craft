@@ -1,0 +1,54 @@
+  standfind 0: upper-cam shot (arm at the nominal pose)  upper cam (upper_puck C++) -> wait pose 
+  standfind 1: to the nominal via pose  [0.0087,0.4573,0.7838,-0.5342,-1.5935] 
+  standfind 2: wait pose over the puck (upper cam)  [0.0122,0.5805,1.4521,2.3168,-0.0157] 
+  standfind 3: gripper-cam shot (yaw, centre)  gripper cam (grip_yaw C++) -> corrected poses 
+  standfind 4: approach pose over the puck (corrected, jaws turned)  [0.0122,0.5805,1.4521,2.3168,-0.0157] 
+  stand pick: descend onto the puck, one move (standfind)  [0.0122,0.5805,1.4521,2.3168,-0.0157] 2 s
+  standfind 5: photo at the grasp pose, jaws open (record)  gripper cam (grip_yaw C++) -> corrected poses 
+  stand pick: close gripper (grasp)  close 
+  standfind 6: photo, jaws closed (record)  gripper cam (grip_yaw C++) -> corrected poses 
+  stand pick: up to 75 mm, one move  [0.0122,0.5805,1.4521,2.3168,-0.0157] 
+  stand load 1: clock to slot 6 (loading guide; arm over the box)  slot 6 
+  stand load 2: to the carry via pose with the puck (wrist folded, tool_roll 90)  [0.0087,0.4433,0.8763,-1.29,-0.0157] 
+  stand load 3: over clock slot 6 (sis2 over pose, 40 mm)  [0.0052,0.5453,0.1352,-2.0436,-0.0157] 
+  stand load 4: down into the slot to sis2 grasp + 10 mm  [0.0052,0.2637,0.0671,-2.0211,-0.0157] 
+  stand load 5: open gripper to 147.9 deg (release in the slot)  open to 147.9 deg 
+  stand load 6: up to 40 mm over the slot  [0.0052,0.5453,0.1352,-2.0436,-0.0157] 
+  stand load 7: to the carry via pose, shoulder out first  [0.0087,0.4433,0.8763,-1.29,-0.0157,"2 moves"] 
+  stand load 8: to the nominal via pose  [0.0087,0.4573,0.7838,-0.5342,-1.5935] 
+  stand load 9: to the nominal pose  [0.0087,-0.2304,0.7908,-0.4836,-1.5865,1.2758] 
+  stand end: hold the nominal pose, shoulder I off  [0.0087,-0.2304,0.7908,-0.4836,-1.5865,1.2758] 
+control: ready=1 fault=0 held=1 reason=""
+LM now: slide 0.00864341 m (nominal pose 0.00865794)
+PUCK red_prism 0.85 ahead 121.7 lateral +44.8 top 126 px 640 534 depth 0.617 posture standing height 60.6
+# 1 pucks, 1768 ms
+
+PICK POLICY: red_prism standing, distance 363.7 mm (ahead 101.6, lateral +56.8); 1 detected
+  standfind 0: upper-cam shot (arm at the nominal pose)  upper cam (upper_puck C++) -> wait pose 
+  standfind 1: to the nominal via pose  [0.0087,0.4573,0.7838,-0.5342,-1.5935] 3.0 s
+  standfind 2: wait pose over the puck (upper cam)  [0.0122,0.5805,1.4521,2.3168,-0.0157] 
+  standfind 3: gripper-cam shot (yaw, centre)  gripper cam (grip_yaw C++) -> corrected poses 
+  standfind 4: approach pose over the puck (corrected, jaws turned)  [0.0122,0.5805,1.4521,2.3168,-0.0157] 
+  stand pick: descend onto the puck, one move (standfind)  [0.0122,0.5805,1.4521,2.3168,-0.0157] 2 s
+  standfind 5: photo at the grasp pose, jaws open (record)  gripper cam (grip_yaw C++) -> corrected poses 
+  stand pick: close gripper (grasp)  close 
+  standfind 6: photo, jaws closed (record)  gripper cam (grip_yaw C++) -> corrected poses 
+  stand pick: up to 75 mm, one move  [0.0122,0.5805,1.4521,2.3168,-0.0157] 
+  stand load 1: clock to slot 6 (loading guide; arm over the box)  slot 6 
+  stand load 2: to the carry via pose with the puck (wrist folded, tool_roll 90)  [0.0087,0.4433,0.8763,-1.29,-0.0157] 5.2 s
+  stand load 3: over clock slot 6 (sis2 over pose, 40 mm)  [0.0052,0.5453,0.1352,-2.0436,-0.0157] 
+  stand load 4: down into the slot to sis2 grasp + 10 mm  [0.0052,0.2637,0.0671,-2.0211,-0.0157] 
+  stand load 5: open gripper to 147.9 deg (release in the slot)  open to 147.9 deg 
+  stand load 6: up to 40 mm over the slot  [0.0052,0.5453,0.1352,-2.0436,-0.0157] 
+  stand load 7: to the carry via pose, shoulder out first  [0.0087,0.4433,0.8763,-1.29,-0.0157,"2 moves"] 3.0 + 3.0 s
+  stand load 8: to the nominal via pose  [0.0087,0.4573,0.7838,-0.5342,-1.5935] 3.0 s
+  stand load 9: to the nominal pose  [0.0087,-0.2304,0.7908,-0.4836,-1.5865,1.2758,"2 moves"] 3.5 + 2.7 s
+  stand end: hold the nominal pose, shoulder I off  [0.0087,-0.2304,0.7908,-0.4836,-1.5865,1.2758] 3.0 s
+
+AUTO (choi): every step runs without asking. Keep a hand on the 12 V power; Ctrl+C = STOP + hold.
+  starting in 3 s ...
+  starting in 2 s ...
+  starting in 1 s ...
+>> standfind 0: upper-cam shot (arm at the nominal pose)
+   -> FAILED upper cam: puck is past the LM rail
+sending STOP + hold

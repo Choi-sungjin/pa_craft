@@ -1,0 +1,9 @@
+criterion,max_points,awarded_points,status,rule,evidence,failure_cause
+signal_sequence,12,,미확인,12개 시점별 일치 각 1점,,
+signal_counts,9,,미확인,색상별 횟수 각 3점,,
+barcode,4,,미확인,실물 코드와 정렬 방향,,
+location_groups,9,,미확인,장소별 각 3점,,
+color_shape,18,,미확인,장소별 개수·속성 각 6점,,
+dice_placement,30,,미확인,장소별 눈·위치·안정 각 10점,,
+fresh_verification,8,,미확인,장소별 2점 및 전체 중복누락 2점,,
+return,10,,미확인,차체 전체 진입 및 3초 정지,,

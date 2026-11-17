@@ -1,0 +1,10 @@
+{
+  "record_type": "missing_evidence_notice",
+  "status": "unconfirmed",
+  "locations": null,
+  "puck_ids": null,
+  "color_shape_constraints": null,
+  "coordinates": null,
+  "duplicate_check": null,
+  "missing_check": null
+}
