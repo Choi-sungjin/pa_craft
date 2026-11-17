@@ -72,3 +72,7 @@ ros2 launch craft_bringup craft.launch.py
 대시보드는 `ros2 run craft_bringup craft_dashboard.sh`로 실행합니다. `group:=perception|planning|control|infra`로 launch 그룹을 나누어 실행할 수도 있습니다.
 
 자세한 설정과 실행 절차는 [계획 패키지](src/craft_planning/README.md), [인지 패키지](src/craft_perception/README.md), [제어 패키지](src/craft_control/README.md), [LiDAR 패키지](src/lidar_processor/README.md), [펌웨어](firmware/README.md)를 참조해 주십시오. 집기의 실물 확인 범위와 미완료 항목은 [인수인계](demo/puck_pick/HANDOFF_20261115.md)에 기록되어 있습니다.
+
+## home 복귀 명령
+
+Jetson의 `.bashrc`에서 사용하는 `home` 등록 파일과 설정 방법은 [home 안내](docs/HOME.md)를 참조해 주십시오. 기존 `tools/go_home.py`를 호출하는 소스 작업용 명령이며, 등록 파일을 source하는 것만으로는 로봇이 움직이지 않습니다.
