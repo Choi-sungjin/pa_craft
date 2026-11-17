@@ -1,0 +1,9 @@
+{
+  "record_type": "missing_evidence_notice",
+  "status": "unconfirmed",
+  "sensor_timestamps": null,
+  "per_location_ids_positions": null,
+  "duplicate_check": null,
+  "missing_check": null,
+  "evidence": null
+}

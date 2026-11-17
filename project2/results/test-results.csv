@@ -1,0 +1,12 @@
+test_id,date_kst,test_type,run_id,target,equipment_input,expected,actual,status,execution_status,attempts,error,evidence,code_commit,limitations
+P2-Q1,2026-11-17,오프라인 계산,Q1-example,12개 전체 할당,제공 example-input.json; Python3,R4 Y2 G6 조건 및 중복누락 없는 해,Y0/1 R2/3/8/9 G4/5/6/7/10/11,성공,수행,1,,../problem/validation.json,,실물 도달·배치 성공은 검증하지 않음
+P2-BUILD,2026-11-17,기존 빌드 기록 확인,runtime-package,9개 패키지 빌드,aarch64; 기존 build_runtime colcon_build.rc,모든 패키지 rc=0,9개 rc=0 기록 확인,성공,기존 결과 확인,1,,build/build-results.csv;build/runtime-manifest.json,5794d640ec75854fde1848a3d7663505ad2c0a90,이번 자료 작성에서 빌드 재실행하지 않음; 실물 성공 아님
+P2-DEV-SIGNAL,2026-11-16,실물 기록 분석,integ21_1116_1429,12회 신호 출력·종료 처리,어퍼캠; 배그 TrafficLight,12회 순서·횟수·종료 이벤트 저장,RGGYYGGYRRRY; R4 Y4 G4; complete,성공,기존 결과 확인,1,,development/integ21_1116_1429/signal.json;development/integ21_1116_1429/signal-events.csv,,출력 처리 확인임. 운영자 정답과 비교한 인식 정확도는 미확인
+P2-DEV-ACCURACY,2026-11-16,실물 기록 분석,integ21_1116_1429,신호·바코드 정답 일치,실제 제시 정답 미확보,독립 정답과 일치,정답 없음; 실제 정확도 산출하지 않음,미확인,대조 미수행,0,,development/integ21_1116_1429/original-signal.json,,Q1 예제를 이 실행의 정답으로 사용하지 않음
+P2-DEV-BARCODE,2026-11-16,실물 기록 분석,integ21_1116_1429,바코드 결과 저장·상태 전이,어퍼캠 화면; 미션 로그,등록 코드 해석 후 Collect 진입,P2-02 descending 저장 및 Collect 진입,성공,기존 결과 확인,1,,development/integ21_1116_1429/original-signal.json;development/integ21_1116_1429/mission.log,,raw barcode String 토픽 없음; 독립 인식 정확도 미확인
+P2-DEV-PICK,2026-11-16,실물 기록 분석,integ21_1116_1429,수집 집기 6시도,S1 2회 S2 2회 S3 2회; upper/grip,요청한 집기·적재 단계 완료,5회 완료 로그; 6번째 LM 레일 범위 초과,실패,수행 기록,6,S3 두 번째 퍽 범위 초과,development/integ21_1116_1429/pick-results.csv;development/integ21_1116_1429/picks/,,5개 슬롯의 새 관측 결과는 없음
+P2-DEV-FULL,2026-11-16,실물 기록 분석,integ21_1116_1429,전체 미션,실물 개발 시험; 설정 사본 미확보,12개 할당·배치·새 관측·복귀 완료,Collect에서 Fault; 미완주,실패,중단,1,LM 레일 범위 초과,development/integ21_1116_1429/mission.log,,공식 경기 여부·당시 커밋 미확인
+P2-DEV-VERIFY,2026-11-16,실물 기록 분석,integ21_1116_1429,목적지 배치·새 관측·복귀,수집 중단 실행,실제 배치·ID위치 재검증·복귀,해당 단계 도달 근거 없음,미확인,미수행,0,,development/integ21_1116_1429/verification.json,,현재 PlacePuck VerifyLocation skeleton
+P2-ROUND-01,,공식 실물 경기,round-01,공식 1회차,증빙 없음,회차별 전체 영상·로그·점수,공식 자료 미확보,미확인,확인 불가,,,round-01/run.json,,개발 시험과 혼합하지 않음
+P2-ROUND-02,,공식 실물 경기,round-02,공식 2회차,증빙 없음,회차별 전체 영상·로그·점수,공식 자료 미확보,미확인,확인 불가,,,round-02/run.json,,점수를 0으로 추정하지 않음
+P2-REPRO,,다른 팀원 재현,,재현 실행,실행자·환경 기록 없음,동일 환경 실행과 원본 근거,기록 미확보,미확인,확인 불가,,,reproduction.md,,빌드와 재현 성공을 구분함

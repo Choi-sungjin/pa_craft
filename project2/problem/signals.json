@@ -1,0 +1,39 @@
+{
+  "problem_id": "Q1-example",
+  "status": "reference_example_team_submission_not_confirmed",
+  "sequence": [
+    "R",
+    "G",
+    "R",
+    "R",
+    "G",
+    "R",
+    "G",
+    "G",
+    "Y",
+    "G",
+    "Y",
+    "G"
+  ],
+  "counts": {
+    "R": 4,
+    "Y": 2,
+    "G": 6
+  },
+  "barcode": {
+    "symbology": "Code128",
+    "value": "P2-01",
+    "sort": "ascending",
+    "tie_order": [
+      "R",
+      "Y",
+      "G"
+    ]
+  },
+  "timing_seconds": {
+    "on": 1,
+    "off_between_blinks": 1,
+    "end_continuous_off": 3
+  },
+  "source": "reference/mission.pdf"
+}

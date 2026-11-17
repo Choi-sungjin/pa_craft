@@ -19,6 +19,8 @@
 
 ## 함께 제공되는 자료
 
+프로젝트 2의 문제·설계·시험·개인별 기여와 보고서 이미지는 [프로젝트 2 제출 자료](project2/README.md)에 정리했습니다. 공식 회차 등 미확인 증빙은 별도로 표시했습니다.
+
 - `firmware/`: OpenCR 펌웨어와 공통 모터 라이브러리입니다.
 - `demo/puck_pick/`: 티칭·집기 설정, Python 참조 구현 및 인수인계 자료입니다.
 - `tools/realsense_check/`: `grip_yaw`, `upper_puck` 카메라 실행파일과 보정 파일입니다. 카메라 도구는 `craft_sensors`에서 함께 빌드·설치하며, 독립 CMake 빌드는 소스 실험용으로 유지합니다.

@@ -1,0 +1,22 @@
+{
+  "videos": [
+    {
+      "name": "uppercam_with_perception_full.mp4",
+      "bytes": 818190930,
+      "sha256": "7fdf150dd61452a479ef4c10f761698ad824d6c20655b41ebc58eaaa344a9dea",
+      "original_local_path": "/home/craft/Videos/integ21_1116_1429/uppercam_with_perception_full.mp4",
+      "public_url": null,
+      "access": "local_only_not_shared"
+    },
+    {
+      "name": "perception_highlights.mp4",
+      "bytes": 53984187,
+      "sha256": "51b3aeeb926f83a77c7e32badfe9ed7f379711680e3d502936aa7fbd8f2029c3",
+      "original_local_path": "/home/craft/Videos/integ21_1116_1429/perception_highlights.mp4",
+      "public_url": null,
+      "access": "local_only_not_shared"
+    }
+  ],
+  "description": "배그 어퍼캠에 실제 로그와 인접 시각의 저장된 카메라 사진·깊이를 합성한 설명 영상임. 동기화된 그리퍼캠 연속 영상이 아님.",
+  "report_image": "../../../docs/assets/integ21_6screens_3x2.png"
+}

@@ -1,0 +1,129 @@
+{
+  "pucks": [
+    {
+      "id": 0,
+      "color": "R",
+      "shape": "원기둥",
+      "initial_xy": [
+        1428,
+        950
+      ],
+      "source_box": "시작 1"
+    },
+    {
+      "id": 1,
+      "color": "R",
+      "shape": "원기둥",
+      "initial_xy": [
+        2896,
+        5354
+      ],
+      "source_box": "시작 3"
+    },
+    {
+      "id": 2,
+      "color": "R",
+      "shape": "원기둥",
+      "initial_xy": [
+        2162,
+        5354
+      ],
+      "source_box": "시작 5"
+    },
+    {
+      "id": 3,
+      "color": "R",
+      "shape": "직육면체",
+      "initial_xy": [
+        3630,
+        3886
+      ],
+      "source_box": "시작 6"
+    },
+    {
+      "id": 4,
+      "color": "G",
+      "shape": "원기둥",
+      "initial_xy": [
+        1508,
+        950
+      ],
+      "source_box": "시작 1"
+    },
+    {
+      "id": 5,
+      "color": "G",
+      "shape": "원기둥",
+      "initial_xy": [
+        3710,
+        3152
+      ],
+      "source_box": "시작 2"
+    },
+    {
+      "id": 6,
+      "color": "G",
+      "shape": "원기둥",
+      "initial_xy": [
+        774,
+        5354
+      ],
+      "source_box": "시작 4"
+    },
+    {
+      "id": 7,
+      "color": "G",
+      "shape": "직육면체",
+      "initial_xy": [
+        2242,
+        5354
+      ],
+      "source_box": "시작 5"
+    },
+    {
+      "id": 8,
+      "color": "R",
+      "shape": "직육면체",
+      "initial_xy": [
+        3630,
+        3152
+      ],
+      "source_box": "시작 2"
+    },
+    {
+      "id": 9,
+      "color": "R",
+      "shape": "직육면체",
+      "initial_xy": [
+        694,
+        5354
+      ],
+      "source_box": "시작 4"
+    },
+    {
+      "id": 10,
+      "color": "G",
+      "shape": "직육면체",
+      "initial_xy": [
+        2976,
+        5354
+      ],
+      "source_box": "시작 3"
+    },
+    {
+      "id": 11,
+      "color": "G",
+      "shape": "직육면체",
+      "initial_xy": [
+        3710,
+        3886
+      ],
+      "source_box": "시작 6"
+    }
+  ],
+  "counts": {
+    "R": 4,
+    "Y": 2,
+    "G": 6
+  }
+}

@@ -1,0 +1,173 @@
+{
+  "problem_id": "Q1-example",
+  "record_type": "expected_answer_not_observation",
+  "coordinate_frame": "brief_map",
+  "units": "mm",
+  "grid_spacing_mm": 60,
+  "allocation": {
+    "Y": [
+      0,
+      1
+    ],
+    "R": [
+      2,
+      3,
+      8,
+      9
+    ],
+    "G": [
+      4,
+      5,
+      6,
+      7,
+      10,
+      11
+    ]
+  },
+  "placements": [
+    {
+      "location": "L1",
+      "group": "Y",
+      "puck_id": 0,
+      "grid_x": -1,
+      "grid_y": 1,
+      "offset_x_mm": -60,
+      "offset_y_mm": 60,
+      "x_mm": 3610,
+      "y_mm": 1010,
+      "puck_bottom_z_mm": 70
+    },
+    {
+      "location": "L1",
+      "group": "Y",
+      "puck_id": 1,
+      "grid_x": 1,
+      "grid_y": -1,
+      "offset_x_mm": 60,
+      "offset_y_mm": -60,
+      "x_mm": 3730,
+      "y_mm": 890,
+      "puck_bottom_z_mm": 70
+    },
+    {
+      "location": "L2",
+      "group": "R",
+      "puck_id": 2,
+      "grid_x": -1,
+      "grid_y": 1,
+      "offset_x_mm": -60,
+      "offset_y_mm": 60,
+      "x_mm": 2142,
+      "y_mm": 3760,
+      "puck_bottom_z_mm": 70
+    },
+    {
+      "location": "L2",
+      "group": "R",
+      "puck_id": 3,
+      "grid_x": 1,
+      "grid_y": 1,
+      "offset_x_mm": 60,
+      "offset_y_mm": 60,
+      "x_mm": 2262,
+      "y_mm": 3760,
+      "puck_bottom_z_mm": 70
+    },
+    {
+      "location": "L2",
+      "group": "R",
+      "puck_id": 8,
+      "grid_x": -1,
+      "grid_y": -1,
+      "offset_x_mm": -60,
+      "offset_y_mm": -60,
+      "x_mm": 2142,
+      "y_mm": 3640,
+      "puck_bottom_z_mm": 70
+    },
+    {
+      "location": "L2",
+      "group": "R",
+      "puck_id": 9,
+      "grid_x": 1,
+      "grid_y": -1,
+      "offset_x_mm": 60,
+      "offset_y_mm": -60,
+      "x_mm": 2262,
+      "y_mm": 3640,
+      "puck_bottom_z_mm": 70
+    },
+    {
+      "location": "L3",
+      "group": "G",
+      "puck_id": 4,
+      "grid_x": -1,
+      "grid_y": 1,
+      "offset_x_mm": -60,
+      "offset_y_mm": 60,
+      "x_mm": 3610,
+      "y_mm": 5414,
+      "puck_bottom_z_mm": 70
+    },
+    {
+      "location": "L3",
+      "group": "G",
+      "puck_id": 5,
+      "grid_x": 1,
+      "grid_y": 1,
+      "offset_x_mm": 60,
+      "offset_y_mm": 60,
+      "x_mm": 3730,
+      "y_mm": 5414,
+      "puck_bottom_z_mm": 70
+    },
+    {
+      "location": "L3",
+      "group": "G",
+      "puck_id": 6,
+      "grid_x": -1,
+      "grid_y": 0,
+      "offset_x_mm": -60,
+      "offset_y_mm": 0,
+      "x_mm": 3610,
+      "y_mm": 5354,
+      "puck_bottom_z_mm": 70
+    },
+    {
+      "location": "L3",
+      "group": "G",
+      "puck_id": 7,
+      "grid_x": 1,
+      "grid_y": 0,
+      "offset_x_mm": 60,
+      "offset_y_mm": 0,
+      "x_mm": 3730,
+      "y_mm": 5354,
+      "puck_bottom_z_mm": 70
+    },
+    {
+      "location": "L3",
+      "group": "G",
+      "puck_id": 10,
+      "grid_x": -1,
+      "grid_y": -1,
+      "offset_x_mm": -60,
+      "offset_y_mm": -60,
+      "x_mm": 3610,
+      "y_mm": 5294,
+      "puck_bottom_z_mm": 70
+    },
+    {
+      "location": "L3",
+      "group": "G",
+      "puck_id": 11,
+      "grid_x": 1,
+      "grid_y": -1,
+      "offset_x_mm": 60,
+      "offset_y_mm": -60,
+      "x_mm": 3730,
+      "y_mm": 5294,
+      "puck_bottom_z_mm": 70
+    }
+  ]
+}

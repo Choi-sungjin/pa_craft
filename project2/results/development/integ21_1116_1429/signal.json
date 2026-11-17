@@ -1,0 +1,131 @@
+{
+  "record_type": "observed_development_signal",
+  "source_topic": "/perception/vision/uppercam/traffic_light",
+  "sequence": [
+    "R",
+    "G",
+    "G",
+    "Y",
+    "Y",
+    "G",
+    "G",
+    "Y",
+    "R",
+    "R",
+    "R",
+    "Y"
+  ],
+  "counts": {
+    "R": 4,
+    "Y": 4,
+    "G": 4
+  },
+  "barcode": {
+    "value": "P2-02",
+    "order": "descending",
+    "source": "original-signal.json; barcode String topic not recorded"
+  },
+  "accepted_blink_events": [
+    {
+      "accepted_color": "R",
+      "sequence_index": 1,
+      "closed_frame_stamp_ns": 1794806986760718592,
+      "received_ns": 1794806986851651907,
+      "received_kst": "2026-11-16T14:29:46.851652+09:00"
+    },
+    {
+      "accepted_color": "G",
+      "sequence_index": 2,
+      "closed_frame_stamp_ns": 1794806988828621568,
+      "received_ns": 1794806988901981401,
+      "received_kst": "2026-11-16T14:29:48.901981+09:00"
+    },
+    {
+      "accepted_color": "G",
+      "sequence_index": 3,
+      "closed_frame_stamp_ns": 1794806990763248896,
+      "received_ns": 1794806990847761191,
+      "received_kst": "2026-11-16T14:29:50.847761+09:00"
+    },
+    {
+      "accepted_color": "Y",
+      "sequence_index": 4,
+      "closed_frame_stamp_ns": 1794806992765059072,
+      "received_ns": 1794806992840112665,
+      "received_kst": "2026-11-16T14:29:52.840113+09:00"
+    },
+    {
+      "accepted_color": "Y",
+      "sequence_index": 5,
+      "closed_frame_stamp_ns": 1794806994699633408,
+      "received_ns": 1794806994813349761,
+      "received_kst": "2026-11-16T14:29:54.813350+09:00"
+    },
+    {
+      "accepted_color": "G",
+      "sequence_index": 6,
+      "closed_frame_stamp_ns": 1794806996767685376,
+      "received_ns": 1794806996850723797,
+      "received_kst": "2026-11-16T14:29:56.850724+09:00"
+    },
+    {
+      "accepted_color": "G",
+      "sequence_index": 7,
+      "closed_frame_stamp_ns": 1794806998769267712,
+      "received_ns": 1794806998844598310,
+      "received_kst": "2026-11-16T14:29:58.844598+09:00"
+    },
+    {
+      "accepted_color": "Y",
+      "sequence_index": 8,
+      "closed_frame_stamp_ns": 1794807000770684160,
+      "received_ns": 1794807000846787548,
+      "received_kst": "2026-11-16T14:30:00.846788+09:00"
+    },
+    {
+      "accepted_color": "R",
+      "sequence_index": 9,
+      "closed_frame_stamp_ns": 1794807002738961408,
+      "received_ns": 1794807002847233040,
+      "received_kst": "2026-11-16T14:30:02.847233+09:00"
+    },
+    {
+      "accepted_color": "R",
+      "sequence_index": 10,
+      "closed_frame_stamp_ns": 1794807004740212992,
+      "received_ns": 1794807004849080861,
+      "received_kst": "2026-11-16T14:30:04.849081+09:00"
+    },
+    {
+      "accepted_color": "R",
+      "sequence_index": 11,
+      "closed_frame_stamp_ns": 1794807006808587008,
+      "received_ns": 1794807006898202198,
+      "received_kst": "2026-11-16T14:30:06.898202+09:00"
+    },
+    {
+      "accepted_color": "Y",
+      "sequence_index": 12,
+      "closed_frame_stamp_ns": 1794807008710144512,
+      "received_ns": 1794807008810822818,
+      "received_kst": "2026-11-16T14:30:08.810823+09:00"
+    }
+  ],
+  "completion_event": {
+    "received_ns": 1794807011241318763,
+    "received_kst": "2026-11-16T14:30:11.241319+09:00",
+    "video_offset_seconds": 32.848437,
+    "header_ns": 1794807011144904960,
+    "header_kst": "2026-11-16T14:30:11.144905+09:00",
+    "sequence": "RGGYYGGYRRRY",
+    "red": 4,
+    "yellow": 4,
+    "green": 4,
+    "complete": true,
+    "valid": true,
+    "discarded_cycles": 0
+  },
+  "time_semantics": "Header stamp is frame closing the blink, not independently measured physical LED onset. received_ns is bag receipt.",
+  "operator_ground_truth": null,
+  "recognition_accuracy": "unconfirmed"
+}

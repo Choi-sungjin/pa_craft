@@ -1,0 +1,17 @@
+{
+  "source_revision": "5794d640ec75854fde1848a3d7663505ad2c0a90",
+  "source_dirty": false,
+  "architecture": "aarch64",
+  "packages": [
+    "coin_d4_driver",
+    "craft_interfaces",
+    "craft_description",
+    "lidar_processor",
+    "craft_control",
+    "craft_perception",
+    "craft_sensors",
+    "craft_planning",
+    "craft_bringup"
+  ],
+  "scope": "Existing implementation; ObservePucks/PlacePuck/VerifyLocation remain unimplemented"
+}

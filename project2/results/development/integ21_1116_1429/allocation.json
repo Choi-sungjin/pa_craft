@@ -1,0 +1,24 @@
+{
+  "record_type": "missing_evidence_notice",
+  "status": "not_recorded",
+  "source": "original-signal.json",
+  "group_counts_only": {
+    "L1": {
+      "group": "R",
+      "count": 4
+    },
+    "L2": {
+      "group": "Y",
+      "count": 4
+    },
+    "L3": {
+      "group": "G",
+      "count": 4
+    }
+  },
+  "puck_id_allocations": null,
+  "target_coordinates": null,
+  "duplicate_check": null,
+  "missing_check": null,
+  "note": "그룹 정렬 기록만 있음. 원본 allocation.json 및 12개 ID 전체 할당 결과 없음."
+}

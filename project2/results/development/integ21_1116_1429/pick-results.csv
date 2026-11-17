@@ -1,0 +1,7 @@
+attempt,box,slot,selected,execution_status,yaw_deg,adjusted_yaw_deg,lm_correction_mm,ahead_correction_mm,valid_depth_frames,depth_frames,failure,log,fresh_slot_verification
+1,S1,1,red_cylinder,completed_in_log,0.0,0.0,-6.7,5.4,9,10,,picks/pick_1794807048755534720.log,not_recorded
+2,S1,2,red_prism,completed_in_log,-22.7,-24.2,-4.6,11.0,9,10,,picks/pick_1794807133806530350.log,not_recorded
+3,S2,3,red_cylinder,completed_in_log,0.0,0.0,-10.2,-4.9,10,10,,picks/pick_1794807254906576481.log,not_recorded
+4,S2,4,green_cylinder,completed_in_log,0.0,0.0,-8.3,8.0,10,10,,picks/pick_1794807342505615407.log,not_recorded
+5,S3,5,green_prism,completed_in_log,5.2,8.9,-10.8,-4.7,9,10,,picks/pick_1794807486406302509.log,not_recorded
+6,S3,6,red_prism,failed,,,,,,,LM 레일 범위 밖 → 집기 중단,picks/pick_1794807562105598306.log,not_recorded

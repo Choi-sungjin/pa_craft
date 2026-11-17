@@ -1,0 +1,110 @@
+  standfind 0: upper-cam shot (arm at the nominal pose)  upper cam (upper_puck C++) -> wait pose 
+  standfind 1: to the nominal via pose  [0.0087,0.4573,0.7838,-0.5342,-1.5935] 
+  standfind 2: wait pose over the puck (upper cam)  [0.0122,0.5805,1.4521,2.3168,-0.0157] 
+  standfind 3: gripper-cam shot (yaw, centre)  gripper cam (grip_yaw C++) -> corrected poses 
+  standfind 4: approach pose over the puck (corrected, jaws turned)  [0.0122,0.5805,1.4521,2.3168,-0.0157] 
+  stand pick: descend onto the puck, one move (standfind)  [0.0122,0.5805,1.4521,2.3168,-0.0157] 2 s
+  standfind 5: photo at the grasp pose, jaws open (record)  gripper cam (grip_yaw C++) -> corrected poses 
+  stand pick: close gripper (grasp)  close 
+  standfind 6: photo, jaws closed (record)  gripper cam (grip_yaw C++) -> corrected poses 
+  stand pick: up to 75 mm, one move  [0.0122,0.5805,1.4521,2.3168,-0.0157] 
+  stand load 1: clock to slot 3 (loading guide; arm over the box)  slot 3 
+  stand load 2: to the carry via pose with the puck (wrist folded, tool_roll 90)  [0.0087,0.4433,0.8763,-1.29,-0.0157] 
+  stand load 3: over clock slot 3 (sis2 over pose, 40 mm)  [0.0052,0.5453,0.1352,-2.0436,-0.0157] 
+  stand load 4: down into the slot to sis2 grasp + 10 mm  [0.0052,0.2637,0.0671,-2.0211,-0.0157] 
+  stand load 5: open gripper to 147.9 deg (release in the slot)  open to 147.9 deg 
+  stand load 6: up to 40 mm over the slot  [0.0052,0.5453,0.1352,-2.0436,-0.0157] 
+  stand load 7: to the carry via pose, shoulder out first  [0.0087,0.4433,0.8763,-1.29,-0.0157,"2 moves"] 
+  stand load 8: to the nominal via pose  [0.0087,0.4573,0.7838,-0.5342,-1.5935] 
+  stand load 9: to the nominal pose  [0.0087,-0.2304,0.7908,-0.4836,-1.5865,1.2758] 
+  stand end: hold the nominal pose, shoulder I off  [0.0087,-0.2304,0.7908,-0.4836,-1.5865,1.2758] 
+control: ready=1 fault=0 held=1 reason=""
+LM now: slide 0.00864341 m (nominal pose 0.00865794)
+PUCK red_cylinder 0.89 ahead 74.2 lateral +24.1 top 123 px 669 597 depth 0.584 posture standing height 59.5
+PUCK green_cylinder 0.88 ahead 142.7 lateral -28.1 top 123 px 742 514 depth 0.633 posture standing height 62.4
+# 2 pucks, 1865 ms
+
+PICK POLICY: red_cylinder standing, distance 313.9 mm (ahead 54.1, lateral +36.1); 2 detected
+  standfind 0: upper-cam shot (arm at the nominal pose)  upper cam (upper_puck C++) -> wait pose 
+  standfind 1: to the nominal via pose  [0.0087,0.4573,0.7838,-0.5342,-1.5935] 3.0 s
+  standfind 2: wait pose over the puck (upper cam)  [0.0122,0.5805,1.4521,2.3168,-0.0157] 
+  standfind 3: gripper-cam shot (yaw, centre)  gripper cam (grip_yaw C++) -> corrected poses 
+  standfind 4: approach pose over the puck (corrected, jaws turned)  [0.0122,0.5805,1.4521,2.3168,-0.0157] 
+  stand pick: descend onto the puck, one move (standfind)  [0.0122,0.5805,1.4521,2.3168,-0.0157] 2 s
+  standfind 5: photo at the grasp pose, jaws open (record)  gripper cam (grip_yaw C++) -> corrected poses 
+  stand pick: close gripper (grasp)  close 
+  standfind 6: photo, jaws closed (record)  gripper cam (grip_yaw C++) -> corrected poses 
+  stand pick: up to 75 mm, one move  [0.0122,0.5805,1.4521,2.3168,-0.0157] 
+  stand load 1: clock to slot 3 (loading guide; arm over the box)  slot 3 
+  stand load 2: to the carry via pose with the puck (wrist folded, tool_roll 90)  [0.0087,0.4433,0.8763,-1.29,-0.0157] 5.2 s
+  stand load 3: over clock slot 3 (sis2 over pose, 40 mm)  [0.0052,0.5453,0.1352,-2.0436,-0.0157] 
+  stand load 4: down into the slot to sis2 grasp + 10 mm  [0.0052,0.2637,0.0671,-2.0211,-0.0157] 
+  stand load 5: open gripper to 147.9 deg (release in the slot)  open to 147.9 deg 
+  stand load 6: up to 40 mm over the slot  [0.0052,0.5453,0.1352,-2.0436,-0.0157] 
+  stand load 7: to the carry via pose, shoulder out first  [0.0087,0.4433,0.8763,-1.29,-0.0157,"2 moves"] 3.0 + 3.0 s
+  stand load 8: to the nominal via pose  [0.0087,0.4573,0.7838,-0.5342,-1.5935] 3.0 s
+  stand load 9: to the nominal pose  [0.0087,-0.2304,0.7908,-0.4836,-1.5865,1.2758,"2 moves"] 3.5 + 2.7 s
+  stand end: hold the nominal pose, shoulder I off  [0.0087,-0.2304,0.7908,-0.4836,-1.5865,1.2758] 3.0 s
+
+AUTO (choi): every step runs without asking. Keep a hand on the 12 V power; Ctrl+C = STOP + hold.
+  starting in 3 s ...
+  starting in 2 s ...
+  starting in 1 s ...
+>> standfind 0: upper-cam shot (arm at the nominal pose)
+   -> SUCCEEDED red_cylinder 0.89: 54.1 mm ahead, +36.1 mm sideways (bias taken off) -> LM -23.9 mm
+>> standfind 1: to the nominal via pose
+   -> SUCCEEDED pick step complete
+>> standfind 2: wait pose over the puck (upper cam)
+   -> SUCCEEDED pick step complete
+   -> SUCCEEDED pick step complete
+>> standfind 3: gripper-cam shot (yaw, centre)
+   wait-pose photo: saved
+   YAW +0.0 deg CENTRE +46.5 -12.0 221.4 mm FLOOR +50.2 +15.1 277.8 mm (depth: raw +6.5, footprint 26 x 29 mm, top 63 mm, 10/10 frames, sd 3.5 deg, tilt 25.9, cal, 1340 ms)
+   -> SUCCEEDED puck off by LM -10.2 mm, ahead -4.9 mm -> 49.2 mm ahead, LM -34.1 mm !! 40.2 mm is outside the taught rows (52.5-172.5): poses of the end row; yaw +0.0 - zero -3.7 = +0.0 deg (cylinder: no turn)
+>> standfind 4: approach pose over the puck (corrected, jaws turned)
+   -> SUCCEEDED pick step complete
+   -> SUCCEEDED pick step complete
+>> stand pick: descend onto the puck (one move from the approach +3 mm)
+   -> SUCCEEDED pick step complete
+   -> SUCCEEDED pick step complete
+>> standfind 5: photo at the grasp pose, jaws open (record)
+   -> SUCCEEDED saved -> /home/craft/craft/tools/realsense_check/out
+>> stand pick: close gripper (grasp)
+   -> SUCCEEDED pick step complete
+>> standfind 6: photo, jaws closed (record)
+   -> SUCCEEDED saved -> /home/craft/craft/tools/realsense_check/out
+>> stand pick: up to 75 mm, one move
+   shoulder-last skipped: held puck envelope intersects box
+   -> SUCCEEDED pick step complete
+>> stand load 1: clock to slot 3 (loading guide; arm over the box)
+   -> SUCCEEDED pick step complete
+>> stand load 2: to the carry via pose with the puck (wrist folded, tool_roll 90)
+   -> SUCCEEDED pick step complete
+   -> SUCCEEDED pick step complete
+>> stand load 3: over clock slot 3 (sis2 over pose, 40 mm)
+   shoulder-last skipped: held puck envelope intersects base_link_vis_orange
+   -> SUCCEEDED pick step complete
+>> stand load 4: down into the slot to sis2 grasp + 10 mm
+   shoulder-last skipped: held puck envelope intersects base_link
+   -> SUCCEEDED pick step complete
+>> stand load 5: open gripper to 147.9 deg (release in the slot)
+   -> SUCCEEDED pick step complete
+>> stand load 6: up to 40 mm over the slot
+   shoulder-last skipped: shoulder_link intersects jaw_lower_link
+   -> SUCCEEDED pick step complete
+>> stand load 7: to the carry via pose, shoulder out first
+   shoulder-last skipped: shoulder_link intersects jaw_lower_link
+   -> SUCCEEDED pick step complete
+   shoulder-last skipped: single-axis group
+   -> SUCCEEDED pick step complete
+>> stand load 8: to the nominal via pose
+   -> SUCCEEDED pick step complete
+   -> SUCCEEDED pick step complete
+>> stand load 9: to the nominal pose
+   -> SUCCEEDED pick step complete
+   -> SUCCEEDED pick step complete
+   -> SUCCEEDED pick step complete
+   -> SUCCEEDED pick step complete
+>> stand end: hold the nominal pose, shoulder I off
+   -> SUCCEEDED pick step complete
+done: control keeps holding the last pose.

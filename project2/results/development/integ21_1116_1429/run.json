@@ -1,0 +1,16 @@
+{
+  "run_id": "integ21_1116_1429",
+  "date_kst": "2026-11-16",
+  "record_type": "physical_development_run_review",
+  "official_round": null,
+  "code_commit": null,
+  "parameter_snapshot": null,
+  "operator": null,
+  "status": "failed",
+  "failure": "Collect S3 second pick: puck is past the LM rail",
+  "pick_attempts": 6,
+  "completed_pick_logs": 5,
+  "completed_full_mission": false,
+  "operator_ground_truth": null,
+  "review_date": "2026-11-17"
+}

@@ -1,0 +1,39 @@
+{
+  "checked_date": "2026-11-17",
+  "test_type": "offline_software",
+  "command": "python3 project2/problem/validate_problem.py project2/problem/example-input.json",
+  "exit_code": 0,
+  "solver_output": {
+    "solvable": true,
+    "allocation": {
+      "Y": [
+        0,
+        1
+      ],
+      "R": [
+        2,
+        3,
+        8,
+        9
+      ],
+      "G": [
+        4,
+        5,
+        6,
+        7,
+        10,
+        11
+      ]
+    }
+  },
+  "additional_artifact_checks": {
+    "sequence_counts_match": true,
+    "all_ids_once": true,
+    "source_boxes_six_with_two_each": true,
+    "coordinates_generated_from_60mm_grid": true
+  },
+  "physical_test": "not_performed",
+  "peer_review": "not_performed",
+  "input_sha256": "b059752f2b5af893be45f5cc3f1f08ba983a6a5958d8b81b131ce483c42e7561",
+  "validator_sha256": "ab6b0f2a87dea7bd6b748d1407dc4f2a6c3b169f58a2f654c9a416fc7ab58d68"
+}
