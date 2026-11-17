@@ -1,112 +1,79 @@
-# pa_craft
+# CRAFT 로봇 ROS 2 워크스페이스
 
-CRAFT 로봇의 ROS 2 워크스페이스입니다. 센서 입력부터 인지, 미션, 계획, 제어까지 기능별 패키지로 나눈 기본 구조를 담고 있습니다. 각 기능의 세부 구현은 별도 브랜치에서 작업한 뒤 통합할 예정입니다.
+본 저장소는 CRAFT 로봇의 센서, 인지, 미션, 계획, 제어 및 시각화 코드를 노드의 역할에 따라 구성한 소스 배포본입니다. 현재 운영 환경은 ROS 2 Lyrical 기반 Jetson입니다. 로봇별 티칭값과 보정값을 포함하며, 전체 미션의 실물 검증 완료를 의미하지는 않습니다.
 
-## 폴더 구조
+## 패키지 및 노드 구성
 
-```text
-pa_craft/
-├── .gitignore
-├── README.md
-├── requirements.txt
-├── firmware/
-│   ├── wheel_clock/            # wheel x2 + clock OpenCR
-│   ├── lm_arm/                 # LM + arm x4 + gripper OpenCR
-│   └── libraries/CraftMotorFirmware/  # 공통 통신·모터 제어
-└── src/
-    ├── craft_bringup/
-    │   ├── CMakeLists.txt
-    │   ├── package.xml
-    │   └── launch/
-    │       └── craft.launch.py
-    ├── craft_control/
-    │   ├── CMakeLists.txt
-    │   ├── package.xml
-    │   ├── config/
-    │   │   └── control.yaml
-    │   ├── include/
-    │   │   └── craft_control/
-    │   │       ├── arm_controller.hpp
-    │   │       ├── clock_controller.hpp
-    │   │       ├── lateral_controller.hpp
-    │   │       └── longitudinal_controller.hpp
-    │   └── src/
-    │       ├── arm_controller.cpp
-    │       ├── clock_controller.cpp
-    │       ├── control_master.cpp
-    │       ├── lateral_controller.cpp
-    │       └── longitudinal_controller.cpp
-    ├── craft_perception/
-    │   ├── CMakeLists.txt
-    │   ├── package.xml
-    │   ├── config/
-    │   │   ├── perception.yaml   # 모든 perception 설정 (master configure()가 읽음)
-    │   │   └── slam.yaml
-    │   ├── include/craft_perception/ # 일반 C++ 모듈 인터페이스
-    │   ├── msg/                  # 검출·손잡이·puck 관측 메시지
-    │   ├── models/               # knob_sign ncnn 모델 (puck는 AprilTag ID로 구분)
-    │   └── src/
-    │       ├── perception_master.cpp # 연결·configure·타이머 (control_master 형식)
-    │       ├── d435_perception.cpp   # D435 클래스: yolo → knob_depth/object/obstacle, apriltag, puck_axis
-    │       ├── c310_perception.cpp   # C310 클래스: knob_lever (자체 YOLO)
-    │       ├── lidar_perception.cpp  # LiDAR 클래스: 전·후방 스캔 병합 → 장애물
-    │       ├── yolo_detector.cpp     # ncnn YOLO
-    │       ├── apriltag_reader.cpp
-    │       ├── knob_depth.cpp
-    │       ├── knob_lever.cpp
-    │       ├── object_detector.cpp   # YOLO 박스 + depth → 3D 위치
-    │       ├── obstacle_detector.cpp # YOLO 박스 + depth → 가까운 장애물 면
-    │       ├── puck_axis.cpp         # puck 축 (puck_axis_live.py 이식)
-    │       ├── shared_frame.cpp
-    │       ├── lidar_obstacle_detector.cpp
-    │       └── state_estimator.cpp
-    ├── craft_planning/
-    │   ├── CMakeLists.txt
-    │   ├── package.xml
-    │   ├── config/
-    │   │   └── planning.yaml
-    │   ├── scripts/
-    │   │   └── planning_master.py
-    │   ├── src/
-    │   │   ├── __init__.py
-    │   │   ├── astar_arc.py
-    │   │   └── path_planner.py
-    │   ├── maps/maze.stl          # 기본 경로 계획 맵 (Gazebo 월드 좌표)
-    │   ├── maps/astar_arc/            # 원본 예제 맵
-    │   ├── test/
-    │   └── third_party/           # 원본 저장소 및 커밋 기록
-    ├── lidar_processor/          # 전·후방 LDS-03 드라이버 launch, TF, 360도 병합
-    ├── craft_voice/              # 카메라 + 상태머신 → GPT → 음성 발화 (Python)
-    └── craft_sensors/
-        ├── CMakeLists.txt
-        ├── package.xml
-        └── src/
-            ├── c310_processor.cpp
-            └── realsense_processor.cpp
+| 패키지 | 주요 실행파일 및 역할 |
+| --- | --- |
+| `craft_interfaces` | 계획·제어 간 작업 명령, 결과 및 상태 메시지를 제공합니다. |
+| `craft_sensors` | `realsense_processor`: 그리퍼 카메라 입력, `uppercam_bridge`: 어퍼캠·LiDAR 박스 관측을 제공합니다. |
+| `lidar_processor` | `lidar_processor`: 전후방 스캔을 처리합니다. `coin_d4_driver`는 외부 소스 의존성입니다. |
+| `craft_perception` | `perception_master`: 물체·퍽·신호등·바코드 및 LiDAR 인지를 담당합니다. |
+| `craft_planning` | `planning_master`: 주행·팔 작업 계획, `mission_master`: 미션 진행, `puck_picker`: 집기 요청 연결, `puck_execute`: 보정된 집기 단계 실행을 담당합니다. `dice_demo`도 포함합니다. |
+| `craft_control` | `control_master`: 주행·팔·그리퍼·클락 제어 및 펌웨어 통신을 담당합니다. |
+| `craft_description` | 로봇 URDF 및 메시를 제공합니다. |
+| `craft_bringup` | 통합 launch, 대시보드, `global_localize`, `odom_trail`, `box_marker`, `puck_marker`를 제공합니다. |
+
+`src/craft_planning/v75_ws`는 팔 모델과 참조 구현을 보관하는 디렉터리입니다. 별도 운영 워크스페이스로 빌드하지 않습니다.
+
+## 함께 제공되는 자료
+
+- `firmware/`: OpenCR 펌웨어와 공통 모터 라이브러리입니다.
+- `demo/puck_pick/`: 티칭·집기 설정, Python 참조 구현 및 인수인계 자료입니다.
+- `tools/realsense_check/`: `grip_yaw`, `upper_puck` 카메라 실행파일과 보정 파일입니다. 카메라 도구는 `craft_sensors`에서 함께 빌드·설치하며, 독립 CMake 빌드는 소스 실험용으로 유지합니다.
+- `src/craft_perception/models/`: ncnn·ONNX 모델 및 현재 장치용 TensorRT 엔진입니다. 다른 GPU 또는 TensorRT 버전에서는 ONNX로 엔진을 다시 생성해야 합니다.
+- `demo/driving_sim/`, `demo/mission_sim/`, `test/`: 시뮬레이션 및 검증 자료입니다.
+
+빌드 산출물, 촬영 데이터, 실행 기록, 로컬 환경 파일 및 백업 사본은 배포 대상에서 제외합니다. 티칭 및 보정 원본은 포함합니다.
+
+## 설치 및 전체 빌드
+
+통합 실행본은 설치된 패키지에서 노드·모델·티칭·보정값을 찾습니다. `demo/`·`tools/` 소스 경로는 실행 시 필요하지 않습니다. 설치본 아카이브 생성과 사용자 데이터 관리는 [배포 안내](docs/DEPLOYMENT.md)를 참조해 주십시오.
+
+```bash
+bash tools/build_runtime.sh
 ```
 
-## 주요 디렉터리
+배포 산출물은 `dist/craft-runtime.tar.gz`이며, 원본 저장소와 별도로 실행에 필요한 설치 패키지를 묶습니다. 미션의 ObservePucks·PlacePuck·VerifyLocation은 아직 미구현이고 `drive_only: true`를 유지합니다.
 
-| 경로 | 역할 |
-| --- | --- |
-| `src/craft_bringup` | ROS 2 노드를 함께 실행하는 launch 파일 |
-| `src/craft_sensors` | D435·C310 카메라 입력 처리 (IMU·엔코더는 control 쪽에서 발행) |
-| `src/lidar_processor` | 전·후방 LiDAR 구동·TF·병합 → `/lidar/merged` ([실행 안내](src/lidar_processor/README.md)) |
-| `src/craft_perception` | C++ PerceptionMaster + D435/C310 클래스 (ncnn·AprilTag·깊이·레버·puck 인지) ([실행·주기 설정](src/craft_perception/README.md)) |
-| `src/craft_planning` | 주행 경로 계획 |
-| `src/craft_control` | 로봇 팔·시계 조작 계획, 주행 및 조작 목표를 제어 입력으로 연결 |
-| `src/craft_voice` | 지금 하는 일(`/planning/state`)과 주변 상황(카메라·인식 결과)을 GPT(OpenAI API)로 문장화해 스피커로 말함 ([실행 안내](src/craft_voice/README.md)) |
-| `firmware/wheel_clock`, `firmware/lm_arm` | OpenCR 두 대의 모터 펌웨어 ([설정·빌드 안내](firmware/README.md)) |
+새 환경에서는 ROS 2 Lyrical, colcon, rosdep, vcstool 및 C++ 개발 환경을 준비해 주십시오. 주요 네이티브 의존성은 OpenCV, librealsense2, ncnn, Pinocchio, coal, urdfdom, yaml-cpp, PNG, ZXing입니다. TensorRT·CUDA는 현재 Jetson 설정에 사용됩니다. `requirements.txt`는 Python 실험·모델 도구용이며 ROS 패키지 의존성을 대신하지 않습니다.
+
+```bash
+git clone --branch arm-teached https://github.com/Choi-sungjin/pa_craft.git ~/craft
+cd ~/craft
+source /opt/ros/lyrical/setup.bash
+vcs import src < craft.repos
+rosdep install --from-paths src --ignore-src -r -y
+bash tools/build_workspace.sh
+```
+
+`craft.repos`는 LiDAR 드라이버의 확인된 커밋을 고정합니다. rosdep에서 해결되지 않는 네이티브 라이브러리는 설치 후 CMake 검색 경로를 지정해 주십시오. 예를 들어 ncnn을 별도 설치한 경우 다음과 같이 실행합니다.
+
+```bash
+cd ~/craft
+bash tools/build_workspace.sh -Dncnn_DIR="$HOME/.local/lib/cmake/ncnn"
+```
+
+전체 빌드 스크립트는 ROS 패키지와 집기에 필요한 두 카메라 도구를 빌드하며, 로봇 노드를 실행하지 않습니다. ZXing이 없으면 바코드 인식이 비활성화되므로 실제 미션 환경에는 설치가 필요합니다.
 
 ## 실행
 
+다음 명령은 실제 장치를 사용하는 실행 명령입니다. 장치 연결과 작업 공간을 확인한 사용자가 직접 실행해 주십시오.
+
 ```bash
+cd ~/craft
 source install/setup.bash
-ros2 launch craft_bringup craft.launch.py                  # 전체를 한 터미널에서
-ros2 run craft_bringup craft_dashboard.sh                  # terminator 4분할: 인지 / 판단 / 제어 / 인프라
-ros2 run craft_bringup craft_dashboard.sh start_lidar:=false   # launch 인자는 모든 창에 그대로 전달
+ros2 launch craft_bringup craft.launch.py
 ```
+| `craft_voice` | 상태·인지 결과를 바탕으로 음성 안내와 질문 응답을 제공합니다. [실행 안내](src/craft_voice/README.md) |
 
-대시보드는 `craft.launch.py`를 `group:=perception|planning|control|infra`로 나눠 창마다 하나씩 띄웁니다. 한 창에서 Ctrl+C를 누르면 그 그룹만 종료됩니다.
+미션 실행은 launch에 `mission:=true`를 추가합니다. `config/mission.yaml`의 `drive_only` 등 미션 설정을 먼저 확인해 주십시오. 어퍼캠 박스 관측 브리지와 robot_state_publisher도 통합 launch에서 실행합니다. 기존 별도 실행 프로세스와 중복 실행하지 않도록 해 주십시오.
 
-`requirements.txt`는 Python 의존성 목록입니다. `build/`, `install/`, `log/`, `venv-craft/` 같은 로컬 생성물은 `.gitignore`로 제외합니다.
+대시보드는 `ros2 run craft_bringup craft_dashboard.sh`로 실행합니다. `group:=perception|planning|control|infra`로 launch 그룹을 나누어 실행할 수도 있습니다.
+
+자세한 설정과 실행 절차는 [계획 패키지](src/craft_planning/README.md), [인지 패키지](src/craft_perception/README.md), [제어 패키지](src/craft_control/README.md), [LiDAR 패키지](src/lidar_processor/README.md), [펌웨어](firmware/README.md)를 참조해 주십시오. 집기의 실물 확인 범위와 미완료 항목은 [인수인계](demo/puck_pick/HANDOFF_20261115.md)에 기록되어 있습니다.
+
+## home 복귀 명령
+
+Jetson의 `.bashrc`에서 사용하는 `home` 등록 파일과 설정 방법은 [home 안내](docs/HOME.md)를 참조해 주십시오. 기존 `tools/go_home.py`를 호출하는 소스 작업용 명령이며, 등록 파일을 source하는 것만으로는 로봇이 움직이지 않습니다.

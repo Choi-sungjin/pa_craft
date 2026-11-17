@@ -78,9 +78,9 @@ These arm signs were inferred from the reported physical motions at the referenc
 pose and still require hardware validation with calibrated offsets. Arm firmware
 preserves raw motor signs; apply the URDF sign correction only in host YAML.
 Wheel signs are applied in firmware: left `+1`, right `-1`. Clock uses firmware
-`+1`, host `clock_direction: +1`, and host zero angle 165.5 degrees (slot 12, at the loading guide; 2026-11-03 after reassembly, was 210.0, 314.6).
+`+1`, host `clock_direction: +1`, and host zero angle 166.4 degrees (slot 12, at the loading guide; 2026-11-03 after reassembly, was 165.5, 210.0, 314.6).
 Gripper closes toward 229 degrees (5 degrees inside the 234-degree hard stop) from its
-94-degree open pose; its opposite closed endpoint is -53.1 degrees (limit -48.1).
+94-degree open pose (an open task may name a smaller opening: joints {gripper: motor rad}); its opposite closed endpoint is -53.1 degrees (limit -48.1).
 Grasp is detected by current (0.1 A for 0.1 s), not by reaching the close target. It uses open/close targets rather than an IK sign.
 
 Arm zero offsets and wrist pitch limits remain uncalibrated. Mapping confirmation
@@ -90,6 +90,17 @@ or physical motion validation has been performed for these settings.
 `TaskCommand.joints` carries the five-joint IK result: slide [m], then shoulder,
 elbow, wrist_pitch and tool_roll [rad]. ControlMaster validates the complete manipulator
 command before setting Arm and LM targets; invalid or uncalibrated requests are rejected.
+
+Per MANIPULATOR task (2026-11-06/07), sent to the arm board before the task's targets:
+
+| TaskCommand field | Meaning | Board line |
+| --- | --- | --- |
+| `duration_s` | travel time of the LM and arm joints (time-based profile, all axes start and arrive together); 0 = the firmware speed caps; at most 32.767 s. A GRIPPER task sends `TIME,0` | `TIME,<ms>` |
+| `tolerance_rad` | arrival tolerance of the LM and the four arm motors [motor rad] for this task; 0 = `control.yaml` (0.5 deg); at most 5 deg. Used by ArmController/LmController (`set_task_tolerance`) and by the board's state 0, so both agree | `TOL,<0.01 deg>` |
+| `position_i_gains` | shoulder, elbow, wrist_pitch, tool_roll Position I gain from this task on (0..16383). Empty: the board's power-up gains (`IGAIN,BOOT`, sent once after a task that set some, and at the first task) | `IGAIN,<axis>,<gain>` |
+| `speed` (MANIPULATOR) | stop on contact, 0 = off. 0 < speed < 1: `ContactDetector` (2026-11-07) ends the move where the arm is when the shoulder current falls under speed x its level over 30-65 % of the move time (twice in a row; off under 0.10 A), or when, after 75 % of the move time and not arrived, no arm motor moved more than 0.15 deg in 0.25 s. The arm target becomes the measured pose (goal = present, `TIME,0`), the task succeeds with reason `contact (shoulder current)` / `contact (stall)`. Needs `duration_s` > 0 | (target rewrite) |
+
+The demo runner sets them per step: `demo/puck_pick/README.md` (dice demo).
 The callback queues commands and the control loop applies them once. ControlMaster aggregates
 independent controller results; Planning owns mission ordering. Legacy controller-specific
 planning target subscriptions have been removed to prevent bypassing the task protocol.
@@ -128,11 +139,19 @@ vertices and avoiding spline overshoot outside the checked path. `/control/track
 remains a visualization output. Path endpoint position and optional requested goal yaw are
 checked in LateralController; `wheel_heading_tolerance` is configured in control YAML.
 
-The longitudinal controller limits `target_v`. "My node" is the path sample the robot is at:
+A NAVIGATE task may set its own arrival distance (`goal_tolerance`) and fine alignment (`tolerance_rad`: turning in
+place before moving off and at the goal heading until within half of it; 0 = control.yaml); a finely aligned turn
+slows down within 0.3 rad, an in-place turn keeps its direction unless within 0.3 rad of the target heading, and with
+a fine arrival distance the arrival counts along the last segment (a robot to the side or just past the end has
+arrived; no turn back). Near the end the Pure Pursuit target stays lookahead ahead on the last segment extended past
+the goal (it used to shrink onto the goal, and a goal a few cm away spun the robot in place). A NAVIGATE task with `speed < 0` drives its path in reverse (planning's correction parking backs out straight from a box; the
+robot keeps its heading). The longitudinal controller limits `target_v`: min(task speed, the planning speed profile
+`TaskCommand.speed_limit` at my node, last forward command + `max_accel` x 20 ms). "My node" is the path sample the robot is at:
 the nearest within +-3 samples of the previous one (ties go ahead), searched over the whole path
-only when that window is more than `lookahead_distance` away, so a path that overlaps itself
+only when that window is more than the lookahead away, so a path that overlaps itself
 (U-turn) never switches branches. Pure Pursuit targets the first sample at least
-`lookahead_distance` along the path from my node (or the last one). When that target is more
+the lookahead along the path from my node; the lookahead is interpolated at the driven wheel speed from
+`lookahead_speeds` -> `lookahead_distances` (held at the ends), tuned per speed (or the last one). When that target is more
 than `wheel_heading_tolerance` off the heading (behind or beside the robot), the robot first
 turns in place until it is within half of it. Arrival needs the endpoint within tolerance and
 my node near the end of the path. Path updates may change the endpoint (Planning sends one A*+arc
@@ -165,11 +184,12 @@ Pure Pursuit does not generate an in-place turn at zero linear speed or when no
 point lies in the requested direction of travel.
 
 The host owns path tracking, differential-drive conversion, and `max_v` /
-`max_wheel` limits. OpenCR firmware owns DYNAMIXEL configuration and must set a
-nonzero `Profile Acceleration(108)` in Velocity Control Mode. The DYNAMIXEL then
-owns the acceleration profile, velocity PID, feedforward, and motor-level
-tracking. Keeping an additional host acceleration ramp would duplicate that
-profile and make the resulting acceleration depend on two independent layers.
+`max_wheel` limits. OpenCR firmware owns DYNAMIXEL configuration; the wheels run
+`Profile Acceleration(108)` at its maximum (2026-11-08, was 10 = 0.124 m/s^2), so they
+follow steps at once and the DYNAMIXEL owns only the velocity PID, feedforward, and
+motor-level tracking. The driving ramp is planning's speed profile (`a_lon_max`, also slowing
+down before tight curves and the goal); `max_accel` caps speeding up where the profile cannot
+see it (resume after a pause, the end of an in-place turn). In-place turns start and stop as steps.
 
 ## Clock storage
 

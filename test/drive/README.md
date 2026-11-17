@@ -314,7 +314,7 @@ Jetson은 아무것도 바꾸지 않는다(도메인 0 기본값, 와이파이 `
 ```bash
 # 노트북 (Ubuntu 24.04 + ROS 2 Lyrical 권장; 다른 배포판은 표준 메시지라 대개 되지만 보장되지 않음)
 source /opt/ros/lyrical/setup.bash
-export ROS_DOMAIN_ID=0 ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET ROS_STATIC_PEERS=10.2.17.163
+export ROS_DOMAIN_ID=61 ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET ROS_STATIC_PEERS=10.2.17.163
 scp craft@10.2.17.163:~/craft/src/craft_bringup/rviz/slam.rviz ~/craft_slam.rviz
 ros2 topic list | grep perception/lidar     # Jetson 토픽이 보이면 연결됨
 rviz2 -d ~/craft_slam.rviz

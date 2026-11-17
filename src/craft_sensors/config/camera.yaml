@@ -1,16 +1,15 @@
 # Camera resolution / fps for the sensor processors.
 # ros2 run craft_sensors <node> --ros-args --params-file $(ros2 pkg prefix craft_sensors)/share/craft_sensors/config/camera.yaml
 # Perception readers take width/height from the */frame_meta message, so nothing else changes.
-
-c310_processor:
-  ros__parameters:
-    camera: auto  # auto = first C310 (046d:081b) in /dev/v4l/by-id, or a /dev/videoN path
-    width: 640    # C310 YUYV: 160x120 ~ 1280x720 (30 fps up to 640x480)
-    height: 480
-    fps: 30
+#
+# Two D435 on the robot (2026-11-11, C310 removed):
+#   gripper cam 261622073363 -> realsense_processor (this file) -> /dev/shm/craft_vision, perception "d435"
+#   upper cam   261322075477 -> demo/corner/run_uppercam_bridge.sh (--serial), not on shared memory
+# Both are plugged in at once, so the serial must be set: with "" librealsense opens whichever comes first.
 
 realsense_processor:
   ros__parameters:
+    serial: "261622073363"  # gripper D435
     width: 640          # color; aligned depth comes out at this size too
     height: 360
     depth_width: 424    # depth sensor mode before alignment

@@ -68,7 +68,7 @@ def main():
         t, end = t - t0, done.get(c.task_id, (ts[-1], None, 'no result'))
         s = dict(kind=KIND.get(c.kind, c.kind), t0=t, t1=end[0], status=end[1], reason=end[2])
         if c.kind == 1:
-            target = np.array(c.joints.position)
+            target = np.array(c.joints.position[:5])  # move 1 may carry a 6th, the gripper
             m = (ts >= t) & (ts <= end[0])
             e = (pos[m] - target) * scale
             s['near'] = last_out(ts[m], e / NEAR, 1.0)

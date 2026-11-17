@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.8)
+project(craft_description)
+find_package(ament_cmake REQUIRED)
+install(DIRECTORY urdf meshes DESTINATION share/${PROJECT_NAME})
+install(FILES README_KO.md VALIDATION.json LINKS.json DESTINATION share/${PROJECT_NAME})
+ament_package()

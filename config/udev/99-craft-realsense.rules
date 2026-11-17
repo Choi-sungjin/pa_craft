@@ -1,0 +1,13 @@
+# RealSense D435 by serial (ID_SERIAL_SHORT), so the names survive any USB port. 2026-11-09.
+# One D435 = several video nodes: interface 00 index 0 depth (Z16), index 2 IR (Y8); interface 03 index 0 colour
+# (YUYV); odd indexes are metadata. realsense-ros picks the camera by serial_no, not by these names.
+# Names start with video so they match /dev/video* like the nodes they point at.
+# ENV (set by 60-persistent-v4l), not ATTRS: every ATTRS of one rule must match the same parent device, and the
+# serial sits on the USB device while bInterfaceNumber sits on its interface, so ATTRS never matched.
+#   sudo cp ~/craft/config/udev/99-craft-realsense.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger && ls -l /dev/video*
+# Another D435: copy the two lines with its serial (udevadm info -q property -n /dev/videoN | grep SERIAL_SHORT).
+SUBSYSTEM=="video4linux", ENV{ID_VENDOR_ID}=="8086", ENV{ID_SERIAL_SHORT}=="352423024319", ENV{ID_USB_INTERFACE_NUM}=="03", ATTR{index}=="0", SYMLINK+="video_cam_gripper", MODE="0666"
+SUBSYSTEM=="video4linux", ENV{ID_VENDOR_ID}=="8086", ENV{ID_SERIAL_SHORT}=="352423024319", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", SYMLINK+="video_cam_gripper_depth", MODE="0666"
+SUBSYSTEM=="video4linux", ENV{ID_VENDOR_ID}=="8086", ENV{ID_SERIAL_SHORT}=="308643020789", ENV{ID_USB_INTERFACE_NUM}=="03", ATTR{index}=="0", SYMLINK+="video_cam_upper", MODE="0666"
+SUBSYSTEM=="video4linux", ENV{ID_VENDOR_ID}=="8086", ENV{ID_SERIAL_SHORT}=="308643020789", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", SYMLINK+="video_cam_upper_depth", MODE="0666"

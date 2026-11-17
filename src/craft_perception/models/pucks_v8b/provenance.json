@@ -1,0 +1,13 @@
+{
+  "source_weights": "perception-v2-puck-box-signal-barcode-20261108/runs/detect/pucks_v8b/weights/best.pt (custom_yolo26/weights/pucks_v8b.pt)",
+  "source_sha256": "4a7a70e375a8c2c10851524c584c34d8b4743756860deb82350ac58dee8d2501",
+  "exported": "2026-11-11 on the PC (pa19), ultralytics export format=ncnn and format=onnx (opset 12, static 640)",
+  "input": [1, 3, 640, 640],
+  "output": [8, 8400],
+  "input_blob": "in0",
+  "output_blob": "out0",
+  "class_names": ["red_cylinder", "red_prism", "green_cylinder", "green_prism"],
+  "output_contract": "decoded cxcywh + probabilities; class-aware NMS",
+  "tensorrt": "model.onnx -> on the Jetson: /usr/src/tensorrt/bin/trtexec --onnx=model.onnx --saveEngine=model.engine (blobs images/output0)",
+  "verified": "ncnn_smoke load + decode only; not yet checked on real puck images in C++"
+}

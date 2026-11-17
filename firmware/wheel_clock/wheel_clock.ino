@@ -6,7 +6,7 @@
 #include "config.h"
 
 Dynamixel2Arduino motor_bus(Serial3, 84);
-craft::MotorBoard<3> motor_board(motor_bus, kAxes, kHardwareConfirmed, kDxlBaud);
+craft::MotorBoard<3> motor_board(motor_bus, kAxes, kHardwareConfirmed, kDxlBaud, kCurrentAPerTick);
 cIMU imu;
 craft::ImuFeedback imu_feedback;
 

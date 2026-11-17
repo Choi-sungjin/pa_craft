@@ -59,3 +59,16 @@ TEST(StateMachine, RouteRetryRefreshesOnlyTheComputeDeadline) {
   EXPECT_EQ(f.phase(), RunPhase::Compute);
   f.tick({}, 6.2); EXPECT_EQ(f.state(), SystemState::Run);
 }
+
+TEST(StateMachine, LongTourHasAnExplicitDeadlineAndOrdinaryTasksKeepTheirDefault) {
+  for (double deadline : {0.0,600.0}) {
+    StateMachine f; ready(f); f.start(StepKind::Navigate,.3);
+    FsmInput i; i.ready=true; f.tick(i,.4); i.compute_done=i.compute_ok=true; f.tick(i,.5);
+    i.execution_timeout_s=deadline; f.tick(i,181.0);
+    if (deadline==0) EXPECT_EQ(f.state(),SystemState::Fault);
+    else {
+      EXPECT_EQ(f.phase(),RunPhase::Execute);
+      f.tick(i,600.6); EXPECT_EQ(f.state(),SystemState::Fault);
+    }
+  }
+}

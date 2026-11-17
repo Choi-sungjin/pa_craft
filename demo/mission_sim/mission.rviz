@@ -1,0 +1,129 @@
+Panels:
+- Class: rviz_common/Displays
+  Name: Displays
+Visualization Manager:
+  Class: ''
+  Displays:
+  - Class: rviz_default_plugins/Map
+    Name: planning map (1 cm)
+    Enabled: true
+    Topic:
+      Value: /planning/map
+      Durability Policy: Transient Local
+      Reliability Policy: Reliable
+      Depth: 1
+    Alpha: 0.8
+    Color Scheme: map
+  - Class: rviz_default_plugins/Map
+    Name: planning padding
+    Enabled: true
+    Topic:
+      Value: /planning/padding
+      Reliability Policy: Reliable
+      Depth: 1
+    Alpha: 0.5
+    Color Scheme: costmap
+  - Class: rviz_default_plugins/LaserScan
+    Name: merged scan
+    Enabled: true
+    Topic:
+      Value: /lidar/merged
+      Reliability Policy: Best Effort
+      Depth: 5
+    Size (m): 0.03
+    Style: Flat Squares
+    Color Transformer: FlatColor
+    Color: 255; 60; 60
+    Decay Time: 0
+  - Class: rviz_default_plugins/PoseArray
+    Name: planning obstacles (filtered)
+    Enabled: true
+    Topic:
+      Value: /perception/lidar/obstacle
+      Reliability Policy: Reliable
+      Depth: 5
+    Shape: Arrow (Flat)
+    Color: 0; 220; 220
+    Alpha: 1
+    Arrow Length: 0.06
+  - Class: rviz_default_plugins/MarkerArray
+    Name: box detection
+    Enabled: true
+    Topic:
+      Value: /perception/box/markers
+      Reliability Policy: Reliable
+      Depth: 10
+  - Class: rviz_default_plugins/RobotModel
+    Name: V307 actual estimated pose
+    Enabled: true
+    Description Source: Topic
+    Description Topic:
+      Value: /robot_description
+      Durability Policy: Transient Local
+      Reliability Policy: Reliable
+      Depth: 1
+  - Class: rviz_default_plugins/Path
+    Name: Actual planner issued path
+    Enabled: true
+    Topic:
+      Value: /mission_sim/planned_path
+      Reliability Policy: Reliable
+      Depth: 1
+    Color: 0; 230; 255
+    Line Style: Lines
+    Line Width: 0.02
+  - Class: rviz_default_plugins/Path
+    Name: Actual control tracking path
+    Enabled: true
+    Topic:
+      Value: /control/tracking_path
+      Reliability Policy: Reliable
+      Depth: 1
+    Color: 255; 80; 255
+    Line Style: Lines
+    Line Width: 0.02
+  - Class: rviz_default_plugins/Path
+    Name: Estimated trajectory
+    Enabled: true
+    Topic:
+      Value: /mission_sim/estimated_trail
+      Reliability Policy: Reliable
+      Depth: 1
+    Color: 255; 210; 0
+    Line Style: Lines
+    Line Width: 0.02
+  - Class: rviz_default_plugins/Path
+    Name: Private simulation truth (comparison)
+    Enabled: true
+    Topic:
+      Value: /mission_sim/truth_trail
+      Reliability Policy: Reliable
+      Depth: 1
+    Color: 100; 160; 255
+    Line Style: Lines
+    Line Width: 0.02
+  - Class: rviz_default_plugins/MarkerArray
+    Name: Actual mission state and S1-S6 L1-L3
+    Enabled: true
+    Topic:
+      Value: /mission_sim/markers
+      Reliability Policy: Reliable
+      Depth: 1
+  Global Options:
+    Fixed Frame: map
+    Background Color: 48; 48; 48
+    Frame Rate: 15
+  Tools:
+  - Class: rviz_default_plugins/MoveCamera
+  - Class: rviz_default_plugins/Measure
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Name: Current View
+      Scale: 110
+      X: 2.2
+      Y: 3.3
+    Saved: null
+Window Geometry:
+  Width: 1600
+  Height: 1000

@@ -16,7 +16,7 @@ import time
 
 import serial
 
-BOARDS = [('wheel', '/dev/opencr_wheel_clock', 12), ('arm', '/dev/opencr_arm_lm', 15)]  # CSV line length
+BOARDS = [('wheel', '/dev/opencr_wheel_clock', 12), ('arm', '/dev/opencr_arm_lm', 20)]  # CSV line length
 
 
 def open_port(path):

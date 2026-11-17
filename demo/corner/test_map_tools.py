@@ -3,7 +3,7 @@
 
 Each LiDAR keeps +-90 deg around its outward axis (front at +0.155 m, rear at -0.1295 m), like
 /lidar/merged with the 180 deg FOV; 1 cm range noise.
-  test_map_tools.py [~/maps/arena3_clean.yaml] [--trials 10]
+  test_map_tools.py [~/maps/arena5_legend_arena.yaml] [--trials 10]
 """
 import argparse
 import math
@@ -42,7 +42,7 @@ def synthetic_scan(grid, pose, rng, n=400, max_range=8.0):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('map', nargs='?', default=str(Path.home() / 'maps/arena3_clean.yaml'))
+    ap.add_argument('map', nargs='?', default=str(Path.home() / 'maps/arena5_legend_arena.yaml'))
     ap.add_argument('--trials', type=int, default=8)
     args = ap.parse_args()
     grid = MapGrid(args.map)

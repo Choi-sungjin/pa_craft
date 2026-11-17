@@ -7,6 +7,14 @@ Visualization Manager:
     Fixed Frame: base_link
     Background Color: 235; 238; 242
   Displays:
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Pucks 2D (posture color shape)
+      Enabled: true
+      Topic:
+        Value: /perception/pucks/markers
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+        Depth: 1
     - Class: rviz_default_plugins/Grid
       Name: Grid
       Enabled: true

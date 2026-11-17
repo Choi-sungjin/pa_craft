@@ -80,7 +80,10 @@ FsmOutput StateMachine::tick(const FsmInput &i, double now) {
       }
       break;
     case RunPhase::Execute:
-      if (elapsed >= config_.execution_timeout_s) fail("execution timeout", now);
+      if (!std::isfinite(i.execution_timeout_s) || i.execution_timeout_s < 0 || i.execution_timeout_s > 3600)
+        fail("invalid execution deadline", now);
+      else if (elapsed >= (i.execution_timeout_s > 0 ? i.execution_timeout_s : config_.execution_timeout_s))
+        fail("execution timeout", now);
       else if (i.completed) enter(RunPhase::Complete, now);
       break;
     case RunPhase::Complete: enter(RunPhase::AwaitRequest, now); break;

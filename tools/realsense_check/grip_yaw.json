@@ -1,0 +1,16 @@
+{
+ "offset_deg": -2.395,
+ "sign": -1,
+ "rms_deg": 2.866,
+ "by": "depth",
+ "dirs": [
+  "/home/craft/bags/gripyaw_1115_1351",
+  "/home/craft/bags/gripyaw_1115_1353",
+  "/home/craft/bags/gripyaw_1115_1354"
+ ],
+ "stamp": "2026-11-15 14:13",
+ "note": "yaw = sign * (raw - offset) folded to [-45, 45); raw from the camera x axis in the surface plane, CCW from above",
+ "lying_offset_deg": 87.03,
+ "lying_sign": -1,
+ "lying_note": "lying prism (2026-11-15 bags gripyaw_1115_2131/2137/2142, cells 2/5/8): yaw = long axis, 0 = along the LM (robot y), 180 period; per-frame rms 5.4 deg"
+}

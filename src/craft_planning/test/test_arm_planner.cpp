@@ -29,7 +29,7 @@ TEST_F(ArmPlannerTest, ForwardUsesTheUrdfTcpInBaseCoordinates) {
   const auto pose = planner.forward(seed);
   EXPECT_EQ(pose.header.frame_id, "base_link");
   EXPECT_NEAR(pose.pose.position.x, 0.12765, 1e-9);
-  EXPECT_NEAR(pose.pose.position.y, 0.415477, 1e-9);  // TCP 0.118 (mid usable grip)
+  EXPECT_NEAR(pose.pose.position.y, 0.402477, 1e-9);  // TCP 0.105 (mid usable grip)
   EXPECT_NEAR(pose.pose.position.z, 0.306837, 1e-9);  // shoulder axis 114 mm
 }
 

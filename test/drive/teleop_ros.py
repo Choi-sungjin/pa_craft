@@ -8,7 +8,7 @@ odometry and the IMUs, and stops the wheels when the input goes stale (teleop_ti
 ramp as teleop.py. Shows the EKF odometry and the SLAM pose live.
 
   w/s   faster forward / backward (v step)      a/d   turn left / right (omega step)
-  space stop (targets 0, ramps down)            x     zero omega only (drive straight)
+  x/space stop (targets 0, ramps down; x = stop since 2026-11-16, was zero omega only)
   q     quit (Ctrl+C too; both send zero first)
 
   teleop_ros.py [--max-speed 0.15] [--max-omega 0.6] [--v-step 0.02] [--w-step 0.1] [--accel 0.1] [--alpha 1.0]
@@ -84,10 +84,8 @@ def main():
             for c in k:
                 tv += {'w': args.v_step, 's': -args.v_step}.get(c, 0.0)
                 tw += {'a': args.w_step, 'd': -args.w_step}.get(c, 0.0)
-                if c == ' ':
+                if c in ' x':   # x / space: stop
                     tv = tw = 0.0
-                elif c == 'x':
-                    tw = 0.0
             tv = round(max(-args.max_speed, min(args.max_speed, tv)), 4)
             tw = round(max(-args.max_omega, min(args.max_omega, tw)), 4)
             v = toward(v, tv, args.accel / HZ)

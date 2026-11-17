@@ -1,0 +1,62 @@
+assume:
+  lidar_center_x: 0.128
+  puck_x_offset: 0.071
+  lidar_center_y: 0.0525
+  lidar_front_y: 0.034
+  lidar_z:
+  - 0.02
+  - 0.053
+  floor_z: 0.0
+  hw_z_correction: -0.01
+  shelf_size:
+  - 0.205
+  - 0.208
+  shelf_height: 0.074
+  puck_ahead: 0.1034
+  puck_size:
+  - 0.03
+  - 0.03
+  - 0.06
+  puck_height: 0.06
+  finger_beyond_tcp: 0.027
+  finger_clearance: 0.003
+  approach_above: 0.056
+  grasp_coverage: 0.5666666666666668
+  max_tilt_deg: 30.0
+  limit_margin_deg: 3.0
+  tool_roll: 0.0
+  jaw_open: -0.021
+  jaw_grip: -0.0018
+  lying: false
+  tool_tilt_deg: null
+  shelf_ahead: null
+puck_grasp_urdf:
+- 0.199
+- -0.0694
+- 0.117
+waypoints:
+- name: approach
+  joints:
+    slide_joint: -0.07135
+    shoulder_joint: 0.6770026680061589
+    elbow_joint: 1.5309286380483849
+    wrist_pitch_joint: 2.504457674330146
+    tool_roll_joint: 0.0
+    jaw_upper_joint: -0.021
+- name: grasp
+  joints:
+    slide_joint: -0.07135
+    shoulder_joint: 0.5551432663590967
+    elbow_joint: 2.344987828701871
+    wrist_pitch_joint: 1.8122578853237226
+    tool_roll_joint: 0.0
+    jaw_upper_joint: -0.021
+- name: close
+  joints:
+    slide_joint: -0.07135
+    shoulder_joint: 0.5551432663590967
+    elbow_joint: 2.344987828701871
+    wrist_pitch_joint: 1.8122578853237226
+    tool_roll_joint: 0.0
+    jaw_upper_joint: -0.0018
+frames: []

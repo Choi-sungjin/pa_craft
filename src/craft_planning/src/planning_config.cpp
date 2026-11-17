@@ -74,7 +74,7 @@ PlanningStep parse_step(const YAML::Node &node, const std::string &map_frame,
     require(step.goal.header.frame_id == expected_frame, type + " frame must be " + expected_frame);
     if (node["source"]) step.source = text_value(node["source"], "source");
     const std::set<std::string> sources = {
-      "fixed", "d435_knob", "d435_puck", "object_pose", "object_detection"};
+      "fixed", "d435_puck", "object_pose", "object_detection"};
     require(sources.count(step.source) != 0, "unknown observation source: " + step.source);
     if (node["class_id"]) step.class_id = scalar<int>(node["class_id"], "class_id");
     require(step.class_id >= -1, "class_id must be -1 or nonnegative");
@@ -173,6 +173,14 @@ std::string file_path(const std::string &value, const std::string &share, const 
 
 }  // namespace
 
+std::array<double, 3> box_dock_goal(const BoxTarget &box, double normal, double lateral_offset) {
+  const double heading = normal + M_PI;
+  const double reach = box.side / 2 + box.standoff;
+  // Robot forward=(cos heading,sin heading), left=(-sin heading,cos heading).
+  return {box.x + reach * std::cos(normal) - lateral_offset * std::sin(heading),
+          box.y + reach * std::sin(normal) + lateral_offset * std::cos(heading), heading};
+}
+
 std::map<std::string, std::vector<PlanningStep>> parse_missions(
   const std::string &filename, const std::string &map_frame, const std::string &base_frame)
 {
@@ -218,6 +226,7 @@ PlanningConfig load_planning_config(rclcpp::Node &node, const std::string &share
   config.path.res = p.positive_param("path_planner.res");
   config.path.block_size = p.positive_param("path_planner.block_size");
   config.path.r_robot = p.positive_param("path_planner.r_robot");
+  config.path.r_approach = p.positive_param("path_planner.r_approach");
   config.path.margin = p.nonnegative("path_planner.margin");
   config.path.lam = p.nonnegative("path_planner.lam");
   config.path.w_prox = p.nonnegative("path_planner.w_prox");
@@ -250,6 +259,17 @@ PlanningConfig load_planning_config(rclcpp::Node &node, const std::string &share
   config.path.a_lat_max = p.positive_param("path_planner.a_lat_max");
   config.path.a_lon_max = p.positive_param("path_planner.a_lon_max");
   config.path.approach_len = p.positive_param("path_planner.approach_len");
+  config.path.mode = p.nonempty("path_planner.mode");
+  require(config.path.mode == "arc" || config.path.mode == "global_local", "path_planner.mode must be arc or global_local");
+  config.path.local_behind = p.nonnegative("path_planner.local_behind");
+  config.path.local_ahead = p.positive_param("path_planner.local_ahead");
+  config.path.local_update = p.positive_param("path_planner.local_update");
+  config.path.local_max_dev = p.nonnegative("path_planner.local_max_dev");
+  config.path.wheel_radius = p.positive_param("path_planner.wheel_radius");
+  config.path.wheel_separation = p.positive_param("path_planner.wheel_separation");
+  config.path.max_wheel = p.positive_param("path_planner.max_wheel");
+  config.path.v_min = p.positive_param("path_planner.v_min");
+  require(config.path.local_update < config.path.local_ahead, "path_planner.local_update must be below local_ahead");
   require(config.path.r_min <= config.path.r_hi_global, "path_planner.r_min must not exceed r_hi_global");
   config.arm.urdf = file_path(p.nonempty("ik.urdf"), share_dir, "ik.urdf");
   config.arm.base_frame = p.nonempty("ik.base_frame");
@@ -268,13 +288,18 @@ PlanningConfig load_planning_config(rclcpp::Node &node, const std::string &share
   config.loop_hz = p.positive_param("loop_hz");
   config.replan_period_s = p.positive_param("replan_period_s");
   config.block_wait_s = p.nonnegative("block_wait_s");
+  config.dock_block_wait_s = p.nonnegative("dock_block_wait_s");
+  config.block_stop_distance = p.nonnegative("block_stop_distance");
   config.min_segment_m = p.nonnegative("min_segment_m");
   config.odom_timeout_s = p.positive_param("odom_timeout_s");
+  config.localization_observation_timeout_s = p.positive_param("localization_observation_timeout_s");
+  config.require_lidar_localization = p.param<bool>("require_lidar_localization");
   config.joint_timeout_s = p.positive_param("joint_timeout_s");
   config.observation_timeout_s = p.positive_param("observation_timeout_s");
   config.obstacle_timeout_s = p.positive_param("obstacle_timeout_s");
   config.cruise_speed = p.positive_param("cruise_speed");
   config.goal_tolerance = p.positive_param("goal_tolerance");
+  config.path.stop_distance = config.goal_tolerance;  // the speed profile creeps at v_min where control stops
   config.observation_min_confidence = p.nonnegative("observation_min_confidence");
   require(config.observation_min_confidence <= 1.0, "observation_min_confidence must be in [0,1]");
   config.require_lidar = p.param<bool>("require_lidar");
@@ -282,6 +307,110 @@ PlanningConfig load_planning_config(rclcpp::Node &node, const std::string &share
   config.joint_state_topic = p.nonempty("joint_state_topic");
   const auto mission_file = file_path(p.nonempty("mission_file"), share_dir, "mission_file");
   config.missions = parse_missions(mission_file, config.path.map_frame, config.arm.base_frame);
+  config.box.camera_enabled = p.param<bool>("box_approach.camera_enabled");
+  config.box.camera_only_longitudinal = p.param<bool>("box_approach.camera_only_longitudinal");
+  config.box.yaw_from_map = p.param<bool>("box_approach.yaw_from_map");
+  config.box.dock_wheel_odometry = p.param<bool>("box_approach.dock_wheel_odometry");
+  config.box.square_boxes = p.param<std::vector<std::string>>("box_approach.square_boxes");
+  config.box.lidar_window_s = p.positive_param("box_approach.lidar_window_s");
+  config.box.camera_slow_gap = p.positive_param("box_approach.camera_slow_gap");
+  config.box.camera_fast_speed = p.positive_param("box_approach.camera_fast_speed");
+  config.box.dock_straight = p.positive_param("box_approach.dock_straight");
+  config.box.dock_extend = p.positive_param("box_approach.dock_extend");
+  config.box.dock_overrun = p.positive_param("box_approach.dock_overrun");
+  require(!config.box.camera_only_longitudinal || config.box.camera_enabled,
+          "box_approach.camera_only_longitudinal needs camera_enabled");
+  config.box.camera_final_gap = p.positive_param("box_approach.camera_final_gap");
+  config.box.camera_gap_tolerance = p.positive_param("box_approach.camera_gap_tolerance");
+  config.box.handoff_gap = p.positive_param("box_approach.handoff_gap");
+  config.box.source_gap_diff = p.positive_param("box_approach.source_gap_diff");
+  config.box.camera_timeout = p.positive_param("box_approach.camera_timeout");
+  config.box.lidar_observation_timeout = p.positive_param("box_approach.lidar_observation_timeout");
+  config.box.camera_speed = p.positive_param("box_approach.camera_speed");
+  config.box.camera_uncertainty_max = p.positive_param("box_approach.camera_uncertainty_max");
+  config.box.camera_far_uncertainty_max = p.positive_param("box_approach.camera_far_uncertainty_max");
+  config.box.camera_near_gap = p.positive_param("box_approach.camera_near_gap");
+  config.box.lidar_uncertainty_max = p.positive_param("box_approach.lidar_uncertainty_max");
+  config.box.observation_initial_timeout = p.positive_param("box_approach.observation_initial_timeout");
+  config.box.camera_confirm_count = p.integer("box_approach.camera_confirm_count", 1);
+  config.box.dock_final_yaw_tolerance_deg = p.param<double>("box_approach.dock_final_yaw_tolerance_deg");
+  config.box.dock_final_yaw_max_deg = p.param<double>("box_approach.dock_final_yaw_max_deg");
+  require(std::isfinite(config.box.dock_final_yaw_tolerance_deg) && config.box.dock_final_yaw_tolerance_deg >= 0.0 &&
+          std::isfinite(config.box.dock_final_yaw_max_deg) && config.box.dock_final_yaw_max_deg >= config.box.dock_final_yaw_tolerance_deg,
+          "box_approach.dock_final_yaw_* must be finite, 0 <= tolerance <= max");
+  config.box.camera_calibrated_gap_min = p.positive_param("box_approach.camera_calibrated_gap_min");
+  config.box.camera_calibrated_gap_max = p.positive_param("box_approach.camera_calibrated_gap_max");
+  config.box.camera_operational_gap_max = p.positive_param("box_approach.camera_operational_gap_max");
+  config.box.front_lidar_x = p.nonnegative("box_approach.front_lidar_x");
+  config.box.front_lidar_fov_deg = p.positive_param("box_approach.front_lidar_fov_deg");
+  require(config.box.front_lidar_fov_deg <= 180.0, "front LiDAR FOV must not exceed 180 degrees");
+  require(config.box.camera_calibrated_gap_min >= 0.010 && config.box.camera_calibrated_gap_max <= 0.080,
+          "box camera gap limits must stay within the calibrated 0.010 to 0.080 m range");
+  require(config.box.camera_final_gap < config.box.handoff_gap &&
+          config.box.handoff_gap <= config.box.camera_operational_gap_max &&
+          config.box.camera_operational_gap_max <= 0.200,
+          "box camera operational gap must include handoff and not exceed 0.200 m");
+  require(config.box.camera_final_gap + config.box.camera_gap_tolerance < config.box.handoff_gap,
+          "box camera final gap must be below handoff gap");
+  config.box.speed = p.positive_param("box_approach.speed");
+  config.box.gap = p.nonnegative("box_approach.gap");
+  config.box.front_face_x = p.positive_param("box_approach.front_face_x");
+  config.box.side = p.positive_param("box_approach.side");
+  config.box.max_offset = p.positive_param("box_approach.max_offset");
+  config.box.settle_s = p.nonnegative("box_approach.settle_s");
+  config.box.lateral_tolerance = p.positive_param("box_approach.lateral_tolerance");
+  config.box.lateral_offset = p.param<double>("box_approach.lateral_offset");
+  require(std::isfinite(config.box.lateral_offset), "box_approach.lateral_offset must be finite");
+  config.box.yaw_tolerance = p.positive_param("box_approach.yaw_tolerance_deg") * M_PI / 180.0;
+  config.box.max_corrections = static_cast<int>(p.integer("box_approach.max_corrections", 0));
+  config.box.reverse_distance = p.positive_param("box_approach.reverse_distance");
+  config.box.reverse_min_distance = p.positive_param("box_approach.reverse_min_distance");
+  config.box.stage_lead = p.nonnegative("box_approach.stage_lead");
+  config.box.stage_goal_tolerance = p.positive_param("box_approach.stage_goal_tolerance");
+  config.box.dock_speed = p.positive_param("box_approach.dock_speed");
+  config.box.dock_lookahead = p.positive_param("box_approach.dock_lookahead");
+  config.box.dock_reference_x = p.nonnegative("box_approach.dock_reference_x");
+  config.box.reorient_deg = p.positive_param("box_approach.reorient_deg");
+  config.box.restage_lateral_m = p.positive_param("box_approach.restage_lateral_m");
+  config.box.one_shot = p.param<bool>("box_approach.one_shot");
+  config.box.splice_samples = p.integer("box_approach.splice_samples", 1);
+  config.box.dock_update_period_s = p.positive_param("box_approach.dock_update_period_s");
+  config.box.lidar_track_until_m = p.nonnegative("box_approach.lidar_track_until_m");
+  config.box.dock_corner_radius = p.positive_param("box_approach.dock_corner_radius");
+  config.box.camera_lateral = p.param<bool>("box_approach.camera_lateral");
+  config.box.camera_track_samples = p.integer("box_approach.camera_track_samples", 1);
+  config.box.camera_track_max_yaw_deg = p.positive_param("box_approach.camera_track_max_yaw_deg");
+  config.box.camera_track_max_jump = p.positive_param("box_approach.camera_track_max_jump");
+  config.box.restage_yaw_deg = p.positive_param("box_approach.restage_yaw_deg");
+  config.box.ignore_radius = p.positive_param("box_approach.ignore_radius");
+  config.box.stage_final_m = p.positive_param("box_approach.stage_final_m");
+  config.box.stage_final_speed = p.positive_param("box_approach.stage_final_speed");
+  config.box.stage_final_lookahead = p.positive_param("box_approach.stage_final_lookahead");
+  config.box.stage_capture_m = p.positive_param("box_approach.stage_capture_m");
+  config.box.stage_capture_s = p.positive_param("box_approach.stage_capture_s");
+  config.box.stage_still_s = p.positive_param("box_approach.stage_still_s");
+  config.box.final_yaw_tolerance = p.positive_param("box_approach.final_yaw_tolerance_deg") * M_PI / 180.0;
+  config.box.dock_goal_tolerance = p.positive_param("box_approach.dock_goal_tolerance");
+  require(config.box.reverse_min_distance <= config.box.reverse_distance,
+          "box_approach.reverse_min_distance must not exceed reverse_distance");
+  config.box.reverse_speed = p.positive_param("box_approach.reverse_speed");
+  config.box_detection_timeout_s = p.positive_param("box_detection_timeout_s");
+  for (const auto &name : p.param<std::vector<std::string>>("box_approach.names")) {
+    const auto v = p.param<std::vector<double>>("box_approach." + name);
+    require(!name.empty() && v.size() == 3 && std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]),
+            "box_approach." + name + " must be [x, y, yaw_deg]");
+    config.box.boxes[name] = {v[0], v[1], v[2] * M_PI / 180.0};
+    // <name>_faces: the sides of the map (E, N, W, S) the box can be approached from.
+    const auto faces = p.param<std::vector<std::string>>("box_approach." + name + "_faces");
+    require(!faces.empty(), "box_approach." + name + "_faces must not be empty");
+    for (const auto &f : faces) {
+      static const std::map<std::string, double> compass{{"E", 0.0}, {"N", 90.0}, {"W", 180.0}, {"S", 270.0}};
+      require(compass.count(f) != 0, "box_approach." + name + "_faces: E, N, W or S, not " + f);
+      config.box.box_faces[name].push_back(compass.at(f) * M_PI / 180.0);
+    }
+  }
+  for (const auto &name : config.box.square_boxes)
+    require(config.box.boxes.count(name) != 0, "box_approach.square_boxes: unknown box " + name);
   auto tag_file = std::filesystem::path(p.nonempty("tag_registry_file"));
   if (!tag_file.is_absolute()) {
     tag_file = ament_index_cpp::get_package_share_path("craft_perception") / tag_file;

@@ -9,7 +9,7 @@ integrated from the start and shown live; every run is logged to logs/<stamp>_te
 Stop control_master first; run through _craft_locked wheel (board lock).
 
   w/s   faster forward / backward (v step)      a/d   turn left / right (omega step)
-  space stop (targets 0, ramps down)            x     zero omega only (drive straight)
+  x/space stop (targets 0, ramps down; x = stop since 2026-11-16, was zero omega only)
   r     reset odometry and yaw                  q     quit (Ctrl+C too; both stop the wheels first)
 
   teleop.py [--max-speed 0.2] [--max-omega 1.0] [--v-step 0.02] [--w-step 0.1] [--accel 0.1] [--alpha 1.0]
@@ -96,10 +96,8 @@ def main():
                     tw += args.w_step
                 elif k == 'd':
                     tw -= args.w_step
-                elif k == ' ':
+                elif k in ' x':   # x / space: stop
                     tv = tw = 0.0
-                elif k == 'x':
-                    tw = 0.0
                 elif k == 'r':
                     s = yaw_w = yaw_i = 0.0
                 elif k == 'q':

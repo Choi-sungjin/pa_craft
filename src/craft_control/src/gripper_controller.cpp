@@ -40,15 +40,20 @@ bool GripperController::configure(
 }
 
 // set gripper open/close target; reset grasp detection when the direction changes
-void GripperController::set_target(bool close)
+void GripperController::set_target(bool close, std::optional<double> open_angle)
 {
   if (!has_target_ || closing_ != close) {
     overcurrent_time_ = 0.0;
     grasped_ = false;
   }
-  target_angle_ = close ? close_angle_ : open_angle_;
+  target_angle_ = close ? close_angle_ : open_angle.value_or(open_angle_);
   closing_ = close;
   has_target_ = true;
+}
+
+bool GripperController::is_valid_open_angle(double angle) const
+{
+  return std::isfinite(angle) && angle >= min_angle_ && angle <= max_angle_;
 }
 
 void GripperController::clear_target()
@@ -56,7 +61,6 @@ void GripperController::clear_target()
   has_target_ = false;
   closing_ = false;
   overcurrent_time_ = 0.0;
-  grasped_ = false;
 }
 
 double GripperController::compute_command(double current_angle) const
@@ -77,24 +81,50 @@ bool GripperController::is_target_reached(double current_angle) const
 
 void GripperController::update_current_feedback(double motor_current_a, double dt, double current_angle)
 {
-  if (!has_target_ || !closing_ || grasped_ || !grasp_detection_configured_ ||
+  if (!has_target_ || !closing_ || !grasp_detection_configured_ ||
     !std::isfinite(motor_current_a) || !std::isfinite(dt) || dt <= 0.0 ||
     !std::isfinite(current_angle))
   {
+    return;
+  }
+  const double toward_close = close_angle_ >= open_angle_ ? 1.0 : -1.0;
+  if (grasped_) {
+    if (hold_current_a_ <= 0.0) return;
+    hold_timer_ += dt;
+    if (hold_timer_ < hold_period_) return;
+    hold_timer_ = 0.0;
+    const double i = std::abs(motor_current_a);
+    double step = 0.0;
+    if (i < hold_current_a_ - hold_band_a_) step = hold_step_;
+    else if (i > hold_current_a_ + hold_band_a_) step = -hold_step_;
+    if (step == 0.0) return;
+    // Never back past the contact angle by more than the squeeze (the puck stays between the jaws) nor past close.
+    const double lo = std::min(grasp_angle_ - toward_close * grasp_squeeze_angle_, close_angle_);
+    const double hi = std::max(grasp_angle_ - toward_close * grasp_squeeze_angle_, close_angle_);
+    grasp_hold_angle_ = std::clamp(grasp_hold_angle_ + toward_close * step, std::max(lo, min_angle_), std::min(hi, max_angle_));
     return;
   }
   if (std::abs(motor_current_a) >= grasp_current_threshold_a_) {
     overcurrent_time_ += dt;
     if (overcurrent_time_ >= grasp_current_debounce_) {
       grasped_ = true;
+      grasp_angle_ = current_angle;
+      hold_timer_ = 0.0;
       // Squeeze toward close_angle only (the motor + direction closes per gripper_close_angle).
-      const double toward_close = close_angle_ >= open_angle_ ? 1.0 : -1.0;
       grasp_hold_angle_ = std::clamp(
         current_angle + toward_close * grasp_squeeze_angle_, min_angle_, max_angle_);
     }
   } else {
     overcurrent_time_ = 0.0;
   }
+}
+
+void GripperController::set_hold_current(double hold_current_a, double band_a, double step_angle, double period_s)
+{
+  const bool ok = std::isfinite(hold_current_a) && hold_current_a > 0.0 && std::isfinite(band_a) && band_a >= 0.0 &&
+    std::isfinite(step_angle) && step_angle > 0.0 && std::isfinite(period_s) && period_s > 0.0;
+  hold_current_a_ = ok ? hold_current_a : 0.0;
+  hold_band_a_ = band_a; hold_step_ = step_angle; hold_period_ = period_s;
 }
 
 bool GripperController::is_grasped() const

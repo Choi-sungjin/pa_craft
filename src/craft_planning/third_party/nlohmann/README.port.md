@@ -1,0 +1,1 @@
+nlohmann/json 3.12.0, MIT licensed. Copied from the robot's existing librealsense build third-party/json distribution. Used for faithful runtime calibration and per-pick JSON serialization in puck_execute; bundled to avoid a new system package requirement.

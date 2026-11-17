@@ -24,6 +24,7 @@
 #include "sensor_msgs/msg/image.hpp"
 #include "sensor_msgs/msg/laser_scan.hpp"
 #include "std_msgs/msg/u_int64_multi_array.hpp"
+#include "std_msgs/msg/bool.hpp"
 
 using namespace std::chrono_literals;
 
@@ -56,6 +57,7 @@ public:
     }
     cfg.enable_stream(RS2_STREAM_COLOR, w_, h_, RS2_FORMAT_BGR8, fps);
     cfg.enable_stream(RS2_STREAM_DEPTH, depth_w, depth_h, RS2_FORMAT_Z16, fps);
+    config_ = cfg;
     rs2::pipeline_profile profile = pipe_.start(cfg);  // throws rs2::error if no camera
     auto depth_sensor = profile.get_device().first<rs2::depth_sensor>();
     if (depth_sensor.supports(RS2_OPTION_DEPTH_UNITS)) {
@@ -93,12 +95,17 @@ public:
     vision_frame_meta_pub_ = create_publisher<std_msgs::msg::UInt64MultiArray>("/vision/d435/frame_meta", 1);
     camera_info_pub_ = create_publisher<sensor_msgs::msg::CameraInfo>("/vision/d435/camera_info", 10);
     lidar_merged_pub_ = create_publisher<sensor_msgs::msg::LaserScan>("/lidar/merged", 10);
+    pause_pub_ = create_publisher<std_msgs::msg::Bool>("/vision/d435/pick_paused", 10);
+    pause_sub_ = create_subscription<std_msgs::msg::Bool>("/vision/d435/pick_pause", 10,
+      [this](const std_msgs::msg::Bool &m) {
+        pause_until_ = m.data ? std::chrono::steady_clock::now() + 2s : std::chrono::steady_clock::time_point{};
+      });
     timer_ = create_wall_timer(5ms, [this]() {realsense_loop();});
   }
 
   ~RealsenseProcessor() override
   {
-    pipe_.stop();
+    if (!paused_) pipe_.stop();
     if (shm_fd_ >= 0) close(shm_fd_);
     shm_unlink(kShmName);
   }
@@ -106,6 +113,23 @@ public:
 private:
   void realsense_loop()
   {
+    const bool pause = std::chrono::steady_clock::now() < pause_until_;
+    if (pause != paused_) {
+      try {
+        if (pause) pipe_.stop();
+        else {
+          auto profile = pipe_.start(config_);
+          depth_unit_nm_ = static_cast<uint64_t>(std::llround(
+            profile.get_device().first<rs2::depth_sensor>().get_depth_scale() * 1e9));
+        }
+        paused_ = pause;
+      } catch (const std::exception &e) {
+        RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 2000, "camera lease: %s", e.what());
+        return;
+      }
+    }
+    std_msgs::msg::Bool ack; ack.data = paused_; pause_pub_->publish(ack);
+    if (paused_) return;
     rs2::frameset frames;
     if (!pipe_.poll_for_frames(&frames)) {
       return;
@@ -138,6 +162,11 @@ private:
     // TODO: depth frame -> /lidar/merged
   }
 
+  rs2::config config_;
+  bool paused_ = false;
+  std::chrono::steady_clock::time_point pause_until_{};
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr pause_pub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr pause_sub_;
   rs2::pipeline pipe_;
   rs2::align align_;
   int w_{0}, h_{0};

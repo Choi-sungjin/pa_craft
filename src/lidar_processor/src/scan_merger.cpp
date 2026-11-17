@@ -1,4 +1,5 @@
 #include "lidar_processor/scan_merger.hpp"
+#include <algorithm>
 #include <cmath>
 #include <limits>
 
@@ -10,7 +11,8 @@ bool ScanMerger::configure(const MergerConfig &c) {
       !std::isfinite(c.front_fov_deg) || c.front_fov_deg < 0 || c.front_fov_deg > 360 ||
       !std::isfinite(c.rear_fov_deg) || c.rear_fov_deg < 0 || c.rear_fov_deg > 360 ||
       !std::isfinite(c.fov_near_m) || c.fov_near_m < 0 || !std::isfinite(c.body_center_x) ||
-      !std::isfinite(c.body_radius_m) || c.body_radius_m < 0 || c.body_radius_m >= c.range_max) return false;
+      !std::isfinite(c.body_radius_m) || c.body_radius_m < 0 || c.body_radius_m >= c.range_max ||
+      !std::isfinite(c.pose_time_offset) || std::fabs(c.pose_time_offset) > 1.0) return false;
   if (c.floor_roi.enabled) {
     if (!std::isfinite(c.floor_roi.step_deg) || c.floor_roi.step_deg <= 0) return false;
     for (const auto *s : {&c.floor_roi.front_left, &c.floor_roi.front_right, &c.floor_roi.rear_left, &c.floor_roi.rear_right}) {
@@ -28,7 +30,7 @@ bool ScanMerger::is_valid_input(const LaserScan &s) {
     s.range_min >= 0 && s.range_max >= s.range_min;
 }
 std::optional<LaserScan> ScanMerger::merge(const LaserScan &front, const Pose2D &fp,
-  const LaserScan *rear, const Pose2D *rp) const {
+  const LaserScan *rear, const Pose2D *rp, const Motion *motion) const {
   const auto valid_pose = [](const Pose2D &p) {
     return std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.yaw);
   };
@@ -44,22 +46,28 @@ std::optional<LaserScan> ScanMerger::merge(const LaserScan &front, const Pose2D 
   out.range_max = config_.range_max;
   out.ranges.assign(config_.bins, std::numeric_limits<float>::quiet_NaN());
   const auto &roi = config_.floor_roi;
+  if (motion && (!std::isfinite(motion->v) || !std::isfinite(motion->w))) motion = nullptr;
   add_scan(front, fp, config_.front_fov_deg, roi.enabled ? &roi.front_left : nullptr,
-           roi.enabled ? &roi.front_right : nullptr, out);
+           roi.enabled ? &roi.front_right : nullptr, out, motion, -config_.pose_time_offset);
   if (rear && rp && is_valid_input(*rear) && valid_pose(*rp)) {
-    const double age = std::fabs((double(front.header.stamp.sec) - rear->header.stamp.sec) +
-      (double(front.header.stamp.nanosec) - rear->header.stamp.nanosec) * 1e-9);
+    const double front_after_rear = (double(front.header.stamp.sec) - rear->header.stamp.sec) +
+      (double(front.header.stamp.nanosec) - rear->header.stamp.nanosec) * 1e-9;
+    const double age = std::fabs(front_after_rear);
     if (age <= config_.max_age) {
       add_scan(*rear, *rp, config_.rear_fov_deg, roi.enabled ? &roi.rear_left : nullptr,
-               roi.enabled ? &roi.rear_right : nullptr, out);
+               roi.enabled ? &roi.rear_right : nullptr, out, motion, front_after_rear - config_.pose_time_offset);
     }
   }
   return out;
 }
 // 한 LiDAR 의 점을 FOV 로 거른 뒤 base_link 기준 bin 에 넣음
 void ScanMerger::add_scan(const LaserScan & s, const Pose2D & p, double fov_deg,
-  const FloorRoiSide * left, const FloorRoiSide * right, LaserScan & out) const
+  const FloorRoiSide * left, const FloorRoiSide * right, LaserScan & out,
+  const Motion * motion, double reference_after_stamp) const
 {
+  // Time between two beams: the driver's, else the sweep time over the beams, else 0 (all at the stamp).
+  const double beam_dt = s.time_increment > 0 ? s.time_increment :
+    (s.scan_time > 0 && s.ranges.size() > 1 ? s.scan_time / (s.ranges.size() - 1) : 0.0);
   const double half_fov = fov_deg * M_PI / 360.0;
   // FOV 중심 = 몸체 중앙(LiDAR 가운데) → LiDAR 방향(바깥쪽)을 LiDAR 자기 좌표 각도로 바꾼 값
   const double bx = config_.body_center_x;
@@ -93,10 +101,23 @@ void ScanMerger::add_scan(const LaserScan & s, const Pose2D & p, double fov_deg,
         if (bin >= side.max_range_m.size() || r > side.max_range_m[bin]) {continue;}
       }
     }
-    int k = static_cast<int>(std::floor((std::atan2(y, x) - out.angle_min) / out.angle_increment));
+    // Where the point lies seen from the robot at the reference time. The beam was measured before_stamp before
+    // the scan stamp; from then to the reference time (dt later) the robot went v * dt forward and turned w * dt,
+    // so the point is that much further back and turned the other way. The filters above use it as measured.
+    double mx = x, my = y, md = d;
+    if (motion) {
+      const double before_stamp = beam_dt * (config_.first_beam_latest ? i : s.ranges.size() - 1 - i);
+      const double dt = std::clamp(reference_after_stamp + before_stamp, -0.5, 0.5);
+      const double th = -motion->w * dt, ct = std::cos(th), st = std::sin(th);
+      mx = ct * x - st * y - motion->v * dt;
+      my = st * x + ct * y;
+      md = std::hypot(mx, my);
+      if (md > range_max) {continue;}
+    }
+    int k = static_cast<int>(std::floor((std::atan2(my, mx) - out.angle_min) / out.angle_increment));
     if (k < 0) {k = 0;}
     if (k >= config_.bins) {k = config_.bins - 1;}
-    if (!(out.ranges[k] <= d)) {out.ranges[k] = static_cast<float>(d);}  // 비었거나 더 멀면 교체
+    if (!(out.ranges[k] <= md)) {out.ranges[k] = static_cast<float>(md);}  // 비었거나 더 멀면 교체
   }
 }
 

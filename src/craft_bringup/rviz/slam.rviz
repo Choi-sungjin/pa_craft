@@ -4,6 +4,14 @@ Panels:
 Visualization Manager:
   Class: ""
   Displays:
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Pucks 2D (posture color shape)
+      Enabled: true
+      Topic:
+        Value: /perception/pucks/markers
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+        Depth: 1
     - Class: rviz_default_plugins/Grid
       Name: Grid
       Enabled: true
@@ -12,7 +20,7 @@ Visualization Manager:
       Reference Frame: map
     - Class: rviz_default_plugins/Map
       Name: SLAM map
-      Enabled: true
+      Enabled: false
       Topic:
         Value: /perception/lidar/map
         Durability Policy: Transient Local
@@ -20,6 +28,26 @@ Visualization Manager:
         Depth: 1
       Alpha: 0.8
       Color Scheme: map
+    - Class: rviz_default_plugins/Map
+      Name: planning map (1 cm)
+      Enabled: true
+      Topic:
+        Value: /planning/map
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+        Depth: 1
+      Alpha: 0.8
+      Color Scheme: map
+    # planning_master: the map and obstacles padded as planning plans with them (1 Hz; costmap colours).
+    - Class: rviz_default_plugins/Map
+      Name: planning padding
+      Enabled: true
+      Topic:
+        Value: /planning/padding
+        Reliability Policy: Reliable
+        Depth: 1
+      Alpha: 0.5
+      Color Scheme: costmap
     - Class: rviz_default_plugins/LaserScan
       Name: merged scan
       Enabled: true
@@ -52,6 +80,14 @@ Visualization Manager:
         Value: /perception/lidar/slam_toolbox/graph_visualization
         Reliability Policy: Reliable
         Depth: 5
+    # box_marker.py: grey = box asked for, green = LiDAR detection, blue = upper cam, dots = every detection centre.
+    - Class: rviz_default_plugins/MarkerArray
+      Name: box detection
+      Enabled: true
+      Topic:
+        Value: /perception/box/markers
+        Reliability Policy: Reliable
+        Depth: 10
     - Class: rviz_default_plugins/Marker
       Name: EKF odometry
       Enabled: true
@@ -122,6 +158,18 @@ Visualization Manager:
       Line Width: 0.03
       Color: 255; 210; 40
       Alpha: 1
+    - Class: rviz_default_plugins/PointStamped
+      Name: lookahead point
+      Enabled: true
+      Topic:
+        Value: /control/lookahead_point
+        Durability Policy: Volatile
+        Reliability Policy: Reliable
+        Depth: 5
+      Color: 0; 255; 255
+      Alpha: 1
+      Radius: 0.04
+      History Length: 1
     - Class: rviz_default_plugins/Pose
       Name: corner goal
       Enabled: true

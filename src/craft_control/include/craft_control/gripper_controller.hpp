@@ -1,5 +1,7 @@
 #pragma once
 
+#include <optional>
+
 namespace craft_control
 {
 
@@ -11,7 +13,10 @@ public:
     double grasp_current_threshold_a, double grasp_current_debounce, double tolerance,
     double grasp_squeeze_angle = 0.0);
   // Store open/close after ControlMaster validation; configure() must have succeeded.
-  void set_target(bool close);
+  // open_angle: open only this far (e.g. a short release inside the clock) instead of the configured open angle.
+  void set_target(bool close, std::optional<double> open_angle = std::nullopt);
+  // A partial open angle must be finite and inside the gripper limits.
+  bool is_valid_open_angle(double angle) const;
   // Release the target and current-based grasp estimate; commands hold current feedback.
   void clear_target();
   double compute_command(double current_angle) const;
@@ -22,6 +27,10 @@ public:
   // is not driven at stall current toward close_angle (DYNAMIXEL overload error -> board fault).
   void update_current_feedback(double motor_current_a, double dt, double current_angle);
   bool is_grasped() const;
+  // Hold by current (2026-11-14 user): after the grasp the hold angle is stepped toward close while the current is
+  // under hold_current_a - band, and back toward open while it is over + band, one step per period. 0 = off (the
+  // fixed squeeze angle only).
+  void set_hold_current(double hold_current_a, double band_a, double step_angle, double period_s);
   bool grasp_detection_configured() const;
 
 private:
@@ -36,6 +45,8 @@ private:
   double overcurrent_time_ = 0.0;
   double grasp_squeeze_angle_ = 0.0;
   double grasp_hold_angle_ = 0.0;
+  double grasp_angle_ = 0.0;
+  double hold_current_a_ = 0.0, hold_band_a_ = 0.0, hold_step_ = 0.0, hold_period_ = 0.0, hold_timer_ = 0.0;
   bool grasp_detection_configured_ = false;
   bool has_target_ = false;
   bool closing_ = false;

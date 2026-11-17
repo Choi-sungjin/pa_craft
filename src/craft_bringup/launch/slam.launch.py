@@ -28,7 +28,8 @@ def _setup(context):
     craft = str(Path(share) / 'launch' / 'craft.launch.py')
     common = {'localization': 'slam', 'start_cameras': 'false',
               'lidar_odom': LaunchConfiguration('lidar_odom').perform(context),
-              'slam_resolution': LaunchConfiguration('slam_resolution').perform(context)}
+              'slam_resolution': LaunchConfiguration('slam_resolution').perform(context),
+              'arm': LaunchConfiguration('arm').perform(context)}
     # One scoped include per group, so each keeps its own group:= (craft.launch.py runs one group or all).
     actions = [GroupAction([IncludeLaunchDescription(craft, launch_arguments={**common, 'group': g}.items())])
                for g in ('control', 'infra', 'perception')]
@@ -53,6 +54,8 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('lidar_odom', default_value='true', choices=['true', 'false'],
                               description='LiDAR odometry as the EKF x/y source'),
+        DeclareLaunchArgument('arm', default_value='true', choices=['true', 'false'],
+                              description='false: control without the arm board (arm battery out)'),
         DeclareLaunchArgument('slam_resolution', default_value='0.02', description='map cell [m] (slaminfra uses 0.02)'),
         DeclareLaunchArgument('record', default_value='true', choices=['true', 'false'],
                               description='record the mapping topics to <ws>/test/drive/logs'),

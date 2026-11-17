@@ -1,0 +1,11 @@
+[
+ {
+  "plan": "plan_cam.yaml",
+  "open_deg": null,
+  "yaw_deg": null,
+  "class": "red_cylinder",
+  "score": 0.86,
+  "x_mm": 396,
+  "y_mm": 18
+ }
+]

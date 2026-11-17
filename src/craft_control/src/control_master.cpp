@@ -28,11 +28,14 @@
 #include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/float64.hpp"
 #include "std_msgs/msg/int32.hpp"
+#include "std_msgs/msg/string.hpp"
+#include "geometry_msgs/msg/point_stamped.hpp"
 #include "geometry_msgs/msg/transform_stamped.hpp"
 #include "geometry_msgs/msg/twist.hpp"
 #include "tf2_ros/transform_broadcaster.h"
 
 #include "craft_control/arm_controller.hpp"
+#include "craft_control/contact_detector.hpp"
 #include "craft_control/clock_controller.hpp"
 #include "craft_control/gripper_controller.hpp"
 #include "craft_control/lateral_controller.hpp"
@@ -45,7 +48,6 @@ using TaskCommand = craft_interfaces::msg::TaskCommand;
 using TaskResult = craft_interfaces::msg::TaskResult;
 using ControlStatus = craft_interfaces::msg::ControlStatus;
 
-constexpr double kDt = 0.02;  // control period [s], TODO: check computing time and OpenCR serial latency
 
 class OpencrSerial
 {
@@ -86,6 +88,13 @@ public:
     return lines;
   }
 
+  // A keyword line for the firmware (e.g. "TIME,1500").
+  bool write_line(const std::string & text)
+  {
+    const std::string line = text + "\n";
+    return ::write(fd_, line.data(), line.size()) == static_cast<ssize_t>(line.size());
+  }
+
   bool write_values(const std::vector<double> & values)
   {
     std::string line;
@@ -102,6 +111,32 @@ private:
   int fd_ = -1;
   std::string rx_buf_;
 };
+
+// Firmware diagnostic line "D,reason,motor id,code,lowest V,V per motor..." (CraftMotorFirmware.h FaultReason).
+struct BoardDiag
+{
+  int reason = 0;
+  std::string text;  // the latched fault cause in words, empty when none
+};
+
+static std::string describe_board_fault(int reason, int id, int code)
+{
+  const std::string m = "motor " + std::to_string(id);
+  switch (reason) {
+    case 1: {
+      char bits[8];
+      std::snprintf(bits, sizeof bits, "0x%02x", code & 0xff);
+      return m + " hardware error " + bits + " (1 input voltage, 4 overheating, 8 encoder, 16 electrical shock, " +
+             "32 overload)";
+    }
+    case 2: return m + " torque found off: it rebooted (power dip / loose power or bus cable?)";
+    case 3: return m + " did not answer (bus cable / power?)";
+    case 4: return m + " write failed";
+    case 5: return "startup failed at " + m;
+    case 6: return "invalid axis configuration or hardware not confirmed";
+    default: return "unknown cause " + std::to_string(reason);
+  }
+}
 
 // "1.0,2,3\r" -> {1, 2, 3}; false on junk
 static bool parse_csv(const std::string & line, std::vector<double> & v)
@@ -180,6 +215,9 @@ public:
     {
       throw std::runtime_error("invalid gripper angle limits or open/close targets");
     }
+    gripper_controller_.set_hold_current(
+      declare_parameter("gripper_hold_current_a", 0.0), declare_parameter("gripper_hold_current_band_a", 0.05),
+      declare_parameter("gripper_hold_step_angle", 0.0087), declare_parameter("gripper_hold_period_s", 0.2));
     if (!arm_ik_mapping_confirmed_) {
       RCLCPP_WARN(get_logger(), "arm IK-to-motor mapping is unconfirmed; rotational arm targets will be ignored");
     }
@@ -201,7 +239,19 @@ public:
     max_v_ = positive_param("max_v");
     const auto max_v = max_v_;
     max_wheel_ = positive_param("max_wheel");
-    const auto lookahead_distance = positive_param("lookahead_distance");
+    const auto lookahead_speeds = declare_parameter<std::vector<double>>("lookahead_speeds");
+    const auto lookahead_distances = declare_parameter<std::vector<double>>("lookahead_distances");
+    if (lookahead_speeds.empty() || lookahead_speeds.size() != lookahead_distances.size()) {
+      throw std::runtime_error("lookahead_speeds and lookahead_distances must be nonempty and the same length");
+    }
+    for (std::size_t i = 0; i < lookahead_speeds.size(); ++i) {
+      if (!std::isfinite(lookahead_speeds[i]) || lookahead_speeds[i] < 0.0 || !std::isfinite(lookahead_distances[i]) ||
+        lookahead_distances[i] <= 0.0 || (i > 0 && lookahead_speeds[i] <= lookahead_speeds[i - 1]))
+      {
+        throw std::runtime_error("lookahead_speeds must increase from >= 0 and lookahead_distances be positive");
+      }
+    }
+    max_accel_ = positive_param("max_accel");
     const auto wheel_goal_tolerance = positive_param("wheel_goal_tolerance");
     const auto path_spacing = positive_param("path_spacing");
     clock_slot_count_ = declare_parameter<int>("clock_slot_count");
@@ -216,17 +266,19 @@ public:
       throw std::runtime_error("skid_steer_factor must be 0 (geometric estimate) or >= 1");
     }
     lateral_.configure(
-      wheel_radius_, wheel_track, wheelbase, skid_steer_factor, lookahead_distance, wheel_goal_tolerance,
+      wheel_radius_, wheel_track, wheelbase, skid_steer_factor, lookahead_speeds, lookahead_distances, wheel_goal_tolerance,
       path_spacing,
       positive_param("wheel_heading_tolerance"), positive_param("wheel_rotate_angular_speed"),
       positive_param("wheel_tracking_gain"));
+    lateral_.set_goal_rotate_angular_speed(positive_param("wheel_goal_rotate_angular_speed"),
+                                           positive_param("wheel_goal_rotate_min_speed"));
     if (!clock_controller_.configure(
       clock_slot_count_, clock_slot_angle, clock_zero_angle, clock_direction, clock_angle_tolerance))
     {
       throw std::runtime_error("invalid clock geometry or angle tolerance in config/control.yaml");
     }
     if (!planning_watchdog_.configure(
-        declare_parameter("planning_watchdog_timeout_s", 0.5),
+        positive_param("planning_watchdog_timeout_s"),
         declare_parameter("require_planning_heartbeat", true)))
     {
       throw std::runtime_error("planning_watchdog_timeout_s must be finite and positive");
@@ -263,7 +315,7 @@ public:
     publish_odom_tf_ = declare_parameter<bool>("publish_odom_tf");
     wheel_vx_variance_ = positive_param("wheel_vx_variance");
     wheel_vyaw_variance_ = positive_param("wheel_vyaw_variance");
-    const double serial_timeout = declare_parameter("serial_feedback_timeout_s", 0.5);
+    const double serial_timeout = positive_param("serial_feedback_timeout_s");
     serial_timeout_s_ = serial_timeout;
     if (!arm_feedback_watchdog_.configure(serial_timeout) ||
       !clock_wheel_feedback_watchdog_.configure(serial_timeout))
@@ -282,6 +334,8 @@ public:
 
     // ROS2 publishers and subscribers
     arm_lm_state_pub_ = create_publisher<std_msgs::msg::Int32>("/control/arm_lm_state", 10);
+    arm_diag_pub_ = create_publisher<std_msgs::msg::String>("/control/arm_diag", 10);
+    wheel_diag_pub_ = create_publisher<std_msgs::msg::String>("/control/wheel_clock_diag", 10);
     gripper_grasped_pub_ = create_publisher<std_msgs::msg::Bool>("/control/gripper_grasped", 10);
     wheel_state_pub_ = create_publisher<std_msgs::msg::Int32>("/control/wheel_state", 10);
     clock_state_pub_ = create_publisher<std_msgs::msg::Int32>("/control/clock_state", 10);
@@ -292,6 +346,8 @@ public:
     gripper_target_reached_pub_ = create_publisher<std_msgs::msg::Bool>("/control/gripper_target_reached", 10);
     wheel_target_reached_pub_ = create_publisher<std_msgs::msg::Bool>("/control/wheel_target_reached", 10);
     tracking_path_pub_ = create_publisher<nav_msgs::msg::Path>("/control/tracking_path", 10);
+    // RViz: publish the actual Pure Pursuit target at 20 Hz; control stays at 50 Hz.
+    lookahead_pub_ = create_publisher<geometry_msgs::msg::PointStamped>("/control/lookahead_point", 10);
     planning_held_pub_ = create_publisher<std_msgs::msg::Bool>("/control/planning_held", 10);
     arm_joint_feedback_pub_ = create_publisher<sensor_msgs::msg::JointState>("/control/arm_joints", 10);
     wheel_odom_pub_ = create_publisher<nav_msgs::msg::Odometry>("/control/wheel/odom", rclcpp::SensorDataQoS());
@@ -315,7 +371,7 @@ public:
     // Manual driving (test/drive/teleop_ros.py): body v [m/s] / omega [rad/s] while no task runs.
     // Only the wheel/clock board has to be healthy, and the planning hold does not apply, so mapping
     // runs without planning or the arm board. Stale input (teleop_timeout_s) stops the wheels.
-    teleop_timeout_s_ = declare_parameter("teleop_timeout_s", 0.3);
+    teleop_timeout_s_ = positive_param("teleop_timeout_s");
     teleop_sub_ = create_subscription<geometry_msgs::msg::Twist>("/control/teleop/cmd_vel", 10,
       [this](const geometry_msgs::msg::Twist &msg) {
         if (!std::isfinite(msg.linear.x) || !std::isfinite(msg.angular.z)) return;
@@ -329,13 +385,75 @@ public:
         } else {lateral_.clear_odom(); odom_at_.reset();}
       });
     settle_s_ = positive_param("settle_time_s");
+    // Acceleration caps of the arm moves (2026-11-14 user: the work steps started and stopped too hard). 0 = off.
+    arm_max_accel_ = declare_parameter("arm_max_accel_rad_s2", 0.0);
+    lm_max_accel_ = declare_parameter("lm_max_accel_m_s2", 0.0);
+    arm_max_speed_ = declare_parameter("arm_max_speed_rad_s", 0.0);
+    lm_max_speed_ = declare_parameter("lm_max_speed_m_s", 0.0);
+    lm_m_per_rad_ = get_parameter("lm_meters_per_rad").as_double();
     stop_tolerance_ = positive_param("stop_position_tolerance_rad");
     wheel_stop_tolerance_ = positive_param("wheel_stop_tolerance_rad_s");
+    clock_stop_tolerance_ = positive_param("clock_stop_tolerance_rad");
     task_timeout_s_ = positive_param("task_timeout_s");
     odom_timeout_s_ = positive_param("odom_timeout_s");
+    camera_timeout_s_ = declare_parameter("camera_distance_timeout_s", 0.5);
+    camera_kp_ = declare_parameter("camera_distance_kp", 0.5);
+    camera_tolerance_ = declare_parameter("camera_distance_tolerance_m", 0.003);
+    camera_max_speed_ = declare_parameter("camera_distance_max_speed", 0.005);
+    if (!std::isfinite(camera_timeout_s_) || camera_timeout_s_ <= 0 || !std::isfinite(camera_kp_) ||
+        camera_kp_ <= 0 || !std::isfinite(camera_tolerance_) || camera_tolerance_ <= 0 ||
+        !std::isfinite(camera_max_speed_) || camera_max_speed_ <= 0)
+      throw std::runtime_error("camera distance parameters must be finite and positive");
 
-    // Control loop timer
-    timer_ = create_wall_timer(std::chrono::duration<double>(kDt), [this]() {control_loop();});
+    // Control loop timer (craft_bringup/config/rates.yaml). TODO: check computing time and OpenCR serial latency.
+    dt_ = 1.0 / positive_param("control_hz");
+    const double integral_gain = declare_parameter<double>("wheel_lateral_integral_gain");
+    const double integral_limit = declare_parameter<double>("wheel_lateral_integral_limit");
+    if (!std::isfinite(integral_gain) || integral_gain < 0.0 || !std::isfinite(integral_limit) || integral_limit < 0.0) {
+      throw std::runtime_error("wheel_lateral_integral_gain and wheel_lateral_integral_limit must be >= 0");
+    }
+    lateral_.set_lateral_integral(integral_gain, integral_limit, dt_);
+    const double heading_offset = declare_parameter<double>("wheel_heading_offset_deg");
+    const auto gain_errors = declare_parameter<std::vector<double>>("wheel_tracking_gain_errors_deg");
+    auto gain_scales = declare_parameter<std::vector<double>>("wheel_tracking_gain_scales");
+    bool schedule_ok = std::isfinite(heading_offset) && std::abs(heading_offset) <= 15.0 && !gain_errors.empty() &&
+      gain_errors.size() == gain_scales.size();
+    std::vector<double> gain_errors_rad;
+    for (std::size_t i = 0; schedule_ok && i < gain_errors.size(); ++i) {
+      schedule_ok = std::isfinite(gain_errors[i]) && gain_errors[i] >= 0.0 && std::isfinite(gain_scales[i]) &&
+        gain_scales[i] > 0.0 && gain_scales[i] <= 3.0 && (i == 0 || gain_errors[i] > gain_errors[i - 1]);
+      gain_errors_rad.push_back(gain_errors[i] * M_PI / 180.0);
+    }
+    if (!schedule_ok) {
+      throw std::runtime_error("wheel_heading_offset_deg must be within +-15; wheel_tracking_gain_errors_deg must "
+                               "increase from >= 0 with as many wheel_tracking_gain_scales in (0, 3]");
+    }
+    lateral_.set_heading_offset(heading_offset * M_PI / 180.0);
+    lateral_.set_gain_schedule(gain_errors_rad, gain_scales);
+    const double slow_speed = declare_parameter<double>("wheel_slow_speed");
+    const double slow_gain = declare_parameter<double>("wheel_slow_tracking_gain");
+    if (!std::isfinite(slow_speed) || slow_speed < 0.0 || !std::isfinite(slow_gain) || slow_gain <= 0.0 || slow_gain > 3.0) {
+      throw std::runtime_error("wheel_slow_speed must be >= 0 and wheel_slow_tracking_gain in (0, 3]");
+    }
+    lateral_.set_slow_tracking_gain(slow_speed, slow_gain);
+    const double dock_straight_speed = declare_parameter<double>("wheel_dock_straight_speed");
+    const double dock_heading_gain = declare_parameter<double>("wheel_dock_heading_gain");
+    if (!std::isfinite(dock_straight_speed) || dock_straight_speed < 0.0 || !std::isfinite(dock_heading_gain) ||
+        dock_heading_gain <= 0.0) {
+      throw std::runtime_error("wheel_dock_straight_speed must be >= 0 and wheel_dock_heading_gain > 0");
+    }
+    lateral_.set_dock_straight(dock_straight_speed, dock_heading_gain);
+    timer_ = create_wall_timer(std::chrono::duration<double>(dt_), [this]() {control_loop();});
+    lookahead_timer_ = create_wall_timer(std::chrono::milliseconds(50), [this]() {
+      if (!have_clock_wheel_feedback_) {return;}
+      if (const auto point = lateral_.lookahead_point()) {
+        geometry_msgs::msg::PointStamped m;
+        m.header.frame_id = lateral_.target_path().header.frame_id;
+        m.header.stamp = now();
+        m.point = *point;
+        lookahead_pub_->publish(m);
+      }
+    });
   }
 
 private:
@@ -367,18 +485,47 @@ private:
     return value;
   }
 
+  // A firmware diagnostic line: published raw, logged when the latched cause changes, warns on a low supply.
+  bool take_diag(const std::string & line, const char * board, BoardDiag & diag,
+    const rclcpp::Publisher<std_msgs::msg::String>::SharedPtr & pub)
+  {
+    if (line.rfind("D,", 0) != 0) return false;
+    std::vector<double> v;
+    if (!parse_csv(line.substr(2), v) || v.size() < 4) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "bad %s diagnostic line: %s", board, line.c_str());
+      return true;
+    }
+    std_msgs::msg::String msg;
+    msg.data = line.back() == '\r' ? line.substr(0, line.size() - 1) : line;
+    pub->publish(msg);
+    const int reason = static_cast<int>(v[0]);
+    if (reason != diag.reason) {
+      diag.reason = reason;
+      diag.text = reason ? describe_board_fault(reason, static_cast<int>(v[1]), static_cast<int>(v[2])) : "";
+      if (reason) RCLCPP_ERROR(get_logger(), "%s board fault: %s", board, diag.text.c_str());
+    }
+    if (v[3] > 0.0 && v[3] < low_supply_voltage_) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "%s motors: supply dipped to %.1f V", board, v[3]);
+    }
+    return true;
+  }
+
   bool read_arm_lm_feedback()
   {
     if (!arm_lm_serial_) return false;
     const auto lines = arm_lm_serial_->read_lines();
+    std::vector<std::string> feedback;
+    for (const auto & line : lines) {
+      if (!take_diag(line, "arm", arm_diag_, arm_diag_pub_)) feedback.push_back(line);
+    }
 
-    for (auto it = lines.rbegin(); it != lines.rend(); ++it) { // reverse order: newest first
+    for (auto it = feedback.rbegin(); it != feedback.rend(); ++it) { // reverse order: newest first
       const auto & line = *it;
       std::vector<double> v;
 
       // Validate the line: must be CSV, correct number of values, all finite
-      // LM + four arm motors + gripper + state + current + imu_ok, gx, gy, gz, ax, ay, az
-      if (!parse_csv(line, v) || v.size() != 15)
+      // LM + four arm motors + gripper + state + the six motor currents [A] + imu_ok, gx, gy, gz, ax, ay, az
+      if (!parse_csv(line, v) || v.size() != 20)
       {
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 1000, "bad arm+LM OpenCR line: %s", line.c_str());
         continue;
@@ -391,7 +538,8 @@ private:
         continue;
       }
 
-      // Parse the line: slide, shoulder, elbow, wrist_pitch, tool_roll, gripper, arm_lm_state, gripper_current_a
+      // Parse the line: slide, shoulder, elbow, wrist_pitch, tool_roll, gripper, arm_lm_state, then the currents [A]
+      // in the same order (LM .. gripper)
       lm_angle_ = v[0];
       arm_joints_[0] = v[1];  // shoulder
       arm_joints_[1] = v[2];  // elbow
@@ -399,8 +547,9 @@ private:
       arm_joints_[3] = v[4];  // tool roll
       gripper_angle_ = v[5];
       arm_lm_state_ = static_cast<int>(v[6]);
-      gripper_current_a_ = v[7];
-      publish_board_imu(arm_imu_pub_, v, 8, "lm_arm_imu");
+      for (std::size_t i = 0; i < motor_current_a_.size(); ++i) {motor_current_a_[i] = v[7 + i];}
+      gripper_current_a_ = v[12];
+      publish_board_imu(arm_imu_pub_, v, 13, "lm_arm_imu");
 
       have_arm_lm_feedback_ = true; // 정상 arm+LM 피드백을 한 번이라도 받은 적이 있는가
       return true;
@@ -411,8 +560,12 @@ private:
   bool read_clock_wheel_feedback()
   {
     const auto lines = clock_wheel_serial_->read_lines();
+    std::vector<std::string> feedback;
+    for (const auto & line : lines) {
+      if (!take_diag(line, "clock+wheel", wheel_diag_, wheel_diag_pub_)) feedback.push_back(line);
+    }
 
-    for (auto it = lines.rbegin(); it != lines.rend(); ++it) { // reverse order: newest first
+    for (auto it = feedback.rbegin(); it != feedback.rend(); ++it) { // reverse order: newest first
       const auto & line = *it;
       std::vector<double> v;
 
@@ -471,8 +624,8 @@ private:
 
   void clear_arm_target()
   {
-    // Invalid target: stop at the current position until planning sends a new target.
-    arm_controller_.clear_target();
+    // No target: hold the pose measured now until planning sends a new target (not the live measurement each cycle).
+    if (have_arm_lm_feedback_) arm_controller_.hold(arm_joints_); else arm_controller_.clear_target();
     publish_bool(arm_target_reached_pub_, false);
   }
 
@@ -503,16 +656,26 @@ private:
     publish_bool(lm_target_reached_pub_, false);
   }
 
-  bool validate_gripper_target()
+  // An open task may carry joints {gripper: motor rad} to open only that far (a short release); none = full open.
+  static std::optional<double> gripper_open_angle_of(const TaskCommand &c)
   {
-    // Open/close is always well-formed; configure() succeeded in the constructor.
-    return gripper_mapping_confirmed_;
+    if (c.joints.name.empty() && c.joints.position.empty()) return std::nullopt;
+    return c.joints.position.front();
   }
 
-  void set_gripper_target(bool close)
+  bool validate_gripper_target(const TaskCommand &c)
+  {
+    // Open/close is always well-formed; configure() succeeded in the constructor.
+    if (!gripper_mapping_confirmed_) return false;
+    if (c.joints.name.empty() && c.joints.position.empty()) return true;
+    return !c.close && c.joints.name.size() == 1 && c.joints.position.size() == 1 &&
+      c.joints.name.front() == "gripper" && gripper_controller_.is_valid_open_angle(c.joints.position.front());
+  }
+
+  void set_gripper_target(bool close, std::optional<double> open_angle)
   {
     // Store the validated target; angle selection and clamping happen in control_loop().
-    gripper_controller_.set_target(close);
+    gripper_controller_.set_target(close, open_angle);
     publish_bool(gripper_target_reached_pub_, false);
   }
 
@@ -550,10 +713,11 @@ private:
     return true;
   }
 
-  void set_path_target(const nav_msgs::msg::Path & path, bool require_heading)
+  void set_path_target(
+    const nav_msgs::msg::Path & path, bool require_heading, const std::vector<double> & speed_limit)
   {
     // Store the validated path revision and publish its tracking geometry.
-    lateral_.set_target(path, require_heading);
+    lateral_.set_target(path, require_heading, speed_limit);
     tracking_path_pub_->publish(lateral_.target_path());
     if (path.poses != last_path_poses_) {
       last_path_poses_ = path.poses;
@@ -674,11 +838,12 @@ private:
 
   void clear_planning_targets()
   {
+    camera_distance_mode_ = false; lateral_.set_camera_distance_mode(false);
     clear_arm_target();
     clear_lm_target();
     gripper_controller_.clear_target();
     publish_bool(gripper_target_reached_pub_, false);
-    publish_bool(gripper_grasped_pub_, false);
+    publish_bool(gripper_grasped_pub_, gripper_controller_.is_grasped());
     clear_wheel_target();
     longitudinal_.clear_target();
     clear_path_target();
@@ -688,6 +853,7 @@ private:
 
   void clear_targets_for_new_task()
   {
+    camera_distance_mode_ = false; lateral_.set_camera_distance_mode(false);
     // Keep the manipulator's last arm/LM/gripper targets across tasks. Clearing them makes the
     // arm hold its measured pose, which sits below the target by the gravity sag (it drops each
     // task), and releases a closed gripper. STOP/hold/fault still clear everything.
@@ -721,6 +887,8 @@ private:
     msg.name.insert(msg.name.end(), names.begin(), names.end());
     msg.position.push_back(*lm_position);
     msg.position.insert(msg.position.end(), positions->begin(), positions->end());
+    // effort: motor current [A] (signed, raw motor sign), LM and the four arm motors; overload is judged from these.
+    msg.effort.assign(motor_current_a_.begin(), motor_current_a_.begin() + 5);
     arm_joint_feedback_pub_->publish(msg);
   }
 
@@ -728,10 +896,11 @@ private:
     return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
   }
   void update_settle(std::vector<double> &anchor, const std::vector<double> &sample,
-                     double &since, double at) {
+                     double &since, double at, double tolerance = -1) {
+    if (tolerance < 0) tolerance = stop_tolerance_;
     bool moved = anchor.size() != sample.size();
     if (!moved) for (size_t i = 0; i < sample.size(); ++i)
-      moved = moved || std::abs(sample[i] - anchor[i]) > stop_tolerance_;
+      moved = moved || std::abs(sample[i] - anchor[i]) > tolerance;
     if (moved) {anchor = sample; since = at;}
   }
   void reject(const TaskCommand &msg, const std::string &reason) {
@@ -742,7 +911,7 @@ private:
     if (c.operation == TaskCommand::STOP) {
       // ID zero is an all-axis stop when no task was dispatched yet.
       if (c.task_id && c.task_id != task_.result.task_id) {reject(c, "unknown stop task"); return;}
-      task_.stop(); task_hold_ = true;
+      task_.stop(); task_hold_ = true; contact_.stop();
       clear_planning_targets(); return;
     }
     if (!c.task_id || !c.revision) {reject(c, "task ID/revision must be nonzero"); return;}
@@ -757,7 +926,16 @@ private:
       else reject(c, "no matching navigation task");
       return;
     }
-    if (update && c.revision <= task_.result.revision) return;
+    if (update && c.revision <= task_.result.revision) {
+      if (camera_distance_mode_) {
+        const auto &s = c.camera_observation_stamp;
+        const int64_t stamp = static_cast<int64_t>(s.sec) * 1000000000LL + s.nanosec;
+        if (!c.camera_distance_control || s.sec < 0 || s.nanosec >= 1000000000U ||
+            stamp != camera_stamp_ns_ || c.camera_gap_m != camera_gap_ ||
+            c.camera_target_gap_m != camera_target_gap_) {task_.fail("replayed camera update"); task_hold_ = true;}
+      }
+      return;
+    }
     if (!update && (c.operation != TaskCommand::EXECUTE || task_.running() || task_.stopping() ||
                     c.task_id <= last_task_id_)) {reject(c, "busy, invalid operation or retired task ID"); return;}
     if (planning_held_ || hardware_fault || planning_watchdog_.held(craft_control::PlanningWatchdog::Clock::now())) {
@@ -767,21 +945,61 @@ private:
       reject(c, "arm disabled (arm_enabled:=false)"); return;
     }
     sensor_msgs::msg::JointState arm;
-    bool valid = false;
+    bool valid = false, camera_engage = false;
     std::array<bool, 5> participants{};
     switch (c.kind) {
       case TaskCommand::NAVIGATE:
+        // speed < 0 drives the path in reverse (planning's correction parking backs out straight).
+        // goal_tolerance [m] / tolerance_rad [rad]: this drive's arrival distance and fine alignment, 0 = control.yaml.
         valid = validate_path_target(c.path) && validate_wheel_target(c.speed) &&
-          (update ? c.speed >= 0 : c.speed > 0);
+          (update || c.speed != 0) && std::isfinite(c.goal_tolerance) && c.goal_tolerance >= 0.0 &&
+          std::isfinite(c.tracking_reference_x) && c.tracking_reference_x >= 0.0 &&
+          std::isfinite(c.lookahead_distance) && c.lookahead_distance >= 0.0 &&
+          // A task lookahead with any reference point (0 = base_link itself; 2026-11-10 dock), none without one.
+          (c.lookahead_distance > 0.0 || c.tracking_reference_x == 0.0) &&
+          std::isfinite(c.duration_s) && c.duration_s >= 0.0 && c.duration_s <= 3600.0 &&
+          std::isfinite(c.tolerance_rad) && c.tolerance_rad >= 0.0 && c.tolerance_rad <= M_PI &&
+          (c.speed_limit.empty() || (c.speed_limit.size() == c.path.poses.size() &&
+          std::all_of(c.speed_limit.begin(), c.speed_limit.end(), [](double v) {return std::isfinite(v) && v >= 0.0;})));
+        // Off -> on once in a running dock: planning follows the LiDAR line until the upper cam first measures the gap,
+        // then that gap sets the speed and the end (camera_only_longitudinal, user 2026-11-09). Never on -> off.
+        camera_engage = update && c.camera_distance_control && !camera_distance_mode_;
+        if (update && c.camera_distance_control != camera_distance_mode_ && !camera_engage) valid = false;
+        if (c.camera_distance_control) {
+          const auto &s = c.camera_observation_stamp;
+          const int64_t stamp = static_cast<int64_t>(s.sec) * 1000000000LL + s.nanosec;
+          const double age = (now().nanoseconds() - stamp) * 1e-9;
+          valid = valid && (c.speed > 0 || (update && c.speed == 0)) && c.speed <= camera_max_speed_ &&
+            std::isfinite(c.camera_gap_m) && c.camera_gap_m >= 0 &&
+            std::isfinite(c.camera_target_gap_m) && c.camera_target_gap_m >= 0 &&
+            s.sec >= 0 && s.nanosec < 1000000000U && age >= -0.01 && age <= camera_timeout_s_ &&
+            (!update || camera_engage || (stamp >= camera_stamp_ns_ && c.camera_target_gap_m == camera_target_gap_ &&
+              (stamp > camera_stamp_ns_ || c.camera_gap_m == camera_gap_)));
+        }
         participants[2] = true; break;
       case TaskCommand::MANIPULATOR:
-        if (c.joints.name.size() == 5 && c.joints.position.size() == 5) {
-          arm.name.assign(c.joints.name.begin()+1, c.joints.name.end());
-          arm.position.assign(c.joints.position.begin()+1, c.joints.position.end());
-          valid = validate_arm_target(arm) && validate_lm_target(c.joints.name[0], c.joints.position[0]);
+        // LM + four arm joints; an optional sixth joint "gripper" [motor rad] opens the gripper to that angle in
+        // the same task (it then also waits for the gripper).
+        if (c.joints.name.size() == c.joints.position.size() &&
+            (c.joints.name.size() == 5 || (c.joints.name.size() == 6 && c.joints.name[5] == "gripper"))) {
+          arm.name.assign(c.joints.name.begin()+1, c.joints.name.begin()+5);
+          arm.position.assign(c.joints.position.begin()+1, c.joints.position.begin()+5);
+          // duration_s: travel time of the LM and the arm joints (time-based profile; 0 = their speed caps).
+          // tolerance_rad: arrival tolerance of this move (0 = control.yaml), up to kMaxTaskTolerance.
+          // speed (unused by the arm): > 0 = stop this move on contact, ratio of the shoulder current (ContactDetector).
+          valid = std::isfinite(c.duration_s) && c.duration_s >= 0.0 && c.duration_s <= kMaxArmMoveS &&
+            std::isfinite(c.speed) && c.speed >= 0.0 && c.speed < 1.0 &&
+            std::isfinite(c.tolerance_rad) && c.tolerance_rad >= 0.0 && c.tolerance_rad <= kMaxTaskTolerance &&
+            (c.position_i_gains.empty() || (c.position_i_gains.size() == craft_control::kArmMotors &&
+              std::all_of(c.position_i_gains.begin(), c.position_i_gains.end(),
+                [](uint16_t g) {return g <= kMaxPositionIGain;}))) &&
+            validate_arm_target(arm) && validate_lm_target(c.joints.name[0], c.joints.position[0]) &&
+            (c.joints.name.size() == 5 ||
+             (gripper_mapping_confirmed_ && gripper_controller_.is_valid_open_angle(c.joints.position[5])));
+          participants[4] = c.joints.name.size() == 6;
         }
         participants[0] = participants[1] = true; break;
-      case TaskCommand::GRIPPER: valid = validate_gripper_target(); participants[4] = true; break;
+      case TaskCommand::GRIPPER: valid = validate_gripper_target(c); participants[4] = true; break;
       case TaskCommand::CLOCK: valid = validate_clock_target(c.clock_slot); participants[3] = true; break;
       case TaskCommand::WAIT: valid = std::isfinite(c.duration_s) && c.duration_s >= 0; break;
     }
@@ -797,14 +1015,55 @@ private:
       return;
     }
     if (!update) {
+      contact_.stop();
       clear_targets_for_new_task();
       task_.begin(c, participants); last_task_id_ = c.task_id; task_at_ = at;
+      active_task_timeout_s_ = c.kind == TaskCommand::NAVIGATE && c.continuous_tracking && c.duration_s > 0 ?
+        c.duration_s : task_timeout_s_;
       arm_stable_at_ = clock_stable_at_ = at;
     } else task_.result.revision = c.revision;
     switch (c.kind) {
-      case TaskCommand::NAVIGATE: set_path_target(c.path, c.require_goal_heading); set_wheel_target(c.speed); break;
-      case TaskCommand::MANIPULATOR: set_arm_target(arm); set_lm_target(c.joints.position[0]); break;
-      case TaskCommand::GRIPPER: set_gripper_target(c.close); break;
+      case TaskCommand::NAVIGATE:
+        lateral_.set_task_tolerances(c.goal_tolerance, c.tolerance_rad);
+        lateral_.set_continuous_tracking(c.continuous_tracking);
+        lateral_.set_task_tracking_reference(c.tracking_reference_x, c.lookahead_distance);
+        camera_distance_mode_ = c.camera_distance_control;
+        lateral_.set_camera_distance_mode(camera_distance_mode_);
+        if (camera_distance_mode_) {
+          const int64_t stamp = static_cast<int64_t>(c.camera_observation_stamp.sec) * 1000000000LL +
+            c.camera_observation_stamp.nanosec;
+          if (!update || camera_engage || stamp > camera_stamp_ns_) camera_received_at_ = at;
+          camera_gap_ = c.camera_gap_m; camera_target_gap_ = c.camera_target_gap_m; camera_stamp_ns_ = stamp;
+        }
+        set_path_target(c.path, c.require_goal_heading, c.speed_limit); set_wheel_target(c.speed); break;
+      case TaskCommand::MANIPULATOR:
+        set_arm_target(arm); set_lm_target(c.joints.position[0]);
+        arm_move_ms_ = static_cast<int>(std::lround(c.duration_s * 1000.0));
+        contact_ratio_ = c.speed;
+        contact_.start(c.speed, c.duration_s);  // off unless speed > 0 and a timed move
+        // Same arrival tolerance here and on the board (its state stays 1 until every axis is inside it).
+        arm_controller_.set_task_tolerance(c.tolerance_rad);
+        lm_controller_.set_task_tolerance(c.tolerance_rad);
+        arm_tolerance_cdeg_ = static_cast<int>(std::lround(c.tolerance_rad * 18000.0 / M_PI));
+        // Position I gains of this move: board axes 1..4 (LM is 0), one IGAIN line each, before its targets. No
+        // gains: the board's power-up gains (IGAIN,BOOT), once after any task that set some (and once at start: a
+        // board left by an earlier control_master may still hold them).
+        arm_gain_lines_.clear();
+        for (size_t i = 0; i < c.position_i_gains.size(); ++i) {
+          arm_gain_lines_.push_back("IGAIN," + std::to_string(i + 1) + "," + std::to_string(c.position_i_gains[i]));
+        }
+        if (c.position_i_gains.empty() && arm_gains_modified_) arm_gain_lines_.push_back("IGAIN,BOOT");
+        if (!c.position_i_gains.empty()) arm_gains_modified_ = true;  // cleared once IGAIN,BOOT is written
+        send_arm_move_time_ = true;  // before this task's first targets (control_loop)
+        if (c.joints.position.size() == 6) set_gripper_target(false, c.joints.position[5]);
+        break;
+      case TaskCommand::GRIPPER:
+        set_gripper_target(c.close, gripper_open_angle_of(c));
+        arm_move_ms_ = 0;  // the gripper alone, at its speed cap (time-based on the arm board)
+        arm_tolerance_cdeg_ = -1;  // no TOL line: the arm keeps the last move's tolerance
+        arm_gain_lines_.clear();   // nor its I gains
+        send_arm_move_time_ = true;
+        break;
       case TaskCommand::CLOCK: set_clock_target(c.clock_slot); break;
       case TaskCommand::WAIT: wait_duration_ = c.duration_s; break;
     }
@@ -813,8 +1072,8 @@ private:
   void control_loop()
   {
     const auto t = craft_control::PlanningWatchdog::Clock::now();
-    const double elapsed = last_t_ ? std::chrono::duration<double>(t - *last_t_).count() : kDt;
-    const double dt = elapsed > 0.0 ? elapsed : kDt;
+    const double elapsed = last_t_ ? std::chrono::duration<double>(t - *last_t_).count() : dt_;
+    const double dt = elapsed > 0.0 ? elapsed : dt_;
     last_t_ = t;
 
     const bool arm_lm_feedback_updated = read_arm_lm_feedback();
@@ -838,18 +1097,48 @@ private:
       update_settle(arm_anchor_, {lm_angle_, arm_joints_[0], arm_joints_[1], arm_joints_[2],
                                 arm_joints_[3], gripper_angle_}, arm_stable_at_, now_s);
     }
+    // Stop on contact (a MANIPULATOR task with speed > 0): the held puck met the surface before the move arrived.
+    // The arm's target becomes where it is (goal = present position, so the board arrives at once) and the task ends
+    // normally with the cause in its reason; it does not press on and wind up the I term.
+    if (contact_.active() && task_.running() && task_.kind == TaskCommand::MANIPULATOR && arm_lm_feedback_updated &&
+      arm_lm_state_ != 2)
+    {
+      if (contact_.update(now_s - task_at_, motor_current_a_[1], arm_joints_,
+          arm_controller_.is_target_reached(arm_joints_)))
+      {
+        const auto here = arm_controller_.get_joint_positions(arm_joints_);
+        if (here) {
+          arm_controller_.set_target(*here);
+          arm_gain_lines_.clear();
+          arm_move_ms_ = 0;
+          send_arm_move_time_ = true;
+          task_.result.reason = std::string("contact (") +
+            (contact_.cause() == ContactDetector::Current ? "shoulder current" : "stall") + ")";
+          RCLCPP_INFO(get_logger(), "arm move stopped on contact after %.2f s (%s, baseline %.2f A)",
+            now_s - task_at_, task_.result.reason.c_str(), contact_.baseline_a());
+        }
+      }
+    }
     if (clock_wheel_feedback_updated) {
       publish_wheel_odometry(now_s, serial_timeout_s_);
       drive_received_at_ = now_s;
-      update_settle(clock_anchor_, {clock_angle_}, clock_stable_at_, now_s);
+      const double before = clock_stable_at_;
+      update_settle(clock_anchor_, {clock_angle_}, clock_stable_at_, now_s, clock_stop_tolerance_);
+      if (clock_stable_at_ != before) {settle_reset_by_ = "clock angle moved"; ++settle_resets_;}
     }
     if (clock_wheel_feedback_updated &&
         (std::abs(wheel_left_feedback_) > wheel_stop_tolerance_ ||
-         std::abs(wheel_right_feedback_) > wheel_stop_tolerance_)) clock_stable_at_ = now_s;
+         std::abs(wheel_right_feedback_) > wheel_stop_tolerance_)) {
+      clock_stable_at_ = now_s; settle_reset_by_ = "wheel speed feedback"; ++settle_resets_;
+    }
     const bool odom_stale = task_.running() && task_.kind == TaskCommand::NAVIGATE &&
       (!odom_at_ || now_s - *odom_at_ > odom_timeout_s_);
-    if (task_.running() && (hardware_fault || odom_stale || now_s - task_at_ > task_timeout_s_)) {
-      task_.fail(hardware_fault ? "serial feedback or board fault" : odom_stale ? "odometry timeout" : "task timeout");
+    const double camera_age = (now().nanoseconds() - camera_stamp_ns_) * 1e-9;
+    const bool camera_stale = task_.running() && camera_distance_mode_ &&
+      (now_s - camera_received_at_ > camera_timeout_s_ || camera_age < -0.01 || camera_age > camera_timeout_s_);
+    if (task_.running() && (hardware_fault || odom_stale || camera_stale || now_s - task_at_ > active_task_timeout_s_)) {
+      task_.fail(hardware_fault ? "serial feedback or board fault" : odom_stale ? "odometry timeout" :
+        camera_stale ? "camera observation timeout" : "task timeout");
       task_hold_ = true;
     }
     while (!pending_tasks_.empty()) {
@@ -857,7 +1146,7 @@ private:
       receive_task(msg, now_s, hardware_fault);
     }
     if (task_.running() && (planning_watchdog_.held(t) || planning_hold_pending_)) {
-      task_.stop(); task_hold_ = true;
+      task_.stop(); task_hold_ = true; contact_.stop();
     }
     const bool held = planning_watchdog_.held(t) || hardware_fault || planning_hold_pending_ || task_hold_;
     planning_hold_pending_ = false;
@@ -868,7 +1157,7 @@ private:
         clear_planning_targets();
       }
     }
-    if (held && !planning_held_) {arm_stable_at_ = clock_stable_at_ = now_s;}
+    if (held && !planning_held_) {arm_stable_at_ = clock_stable_at_ = now_s; settle_reset_by_ = "hold entered"; ++settle_resets_;}
     planning_held_ = held;
     arm_tx_ok_ = drive_tx_ok_ = false;
     publish_bool(planning_held_pub_, planning_held_);
@@ -891,7 +1180,55 @@ private:
       const double gripper_motor_command = gripper_controller_.compute_command(gripper_angle_);
       // Shared OpenCR transport only: independent controllers, fixed hardware channel order.
       // A stale board must expire its firmware watchdog and hold its own measured position.
-      const bool command_sent = arm_feedback_fresh && arm_lm_serial_->write_values({
+      // A new MANIPULATOR task: its travel time goes first, so the firmware times the move to its targets.
+      // TOL (0.01 deg, 0 = the firmware's own) only with a MANIPULATOR task; a GRIPPER task keeps the last one.
+      // IGAIN lines first (each sent once; a failed write is retried on the next loop).
+      while (send_arm_move_time_ && arm_feedback_fresh && !arm_gain_lines_.empty() &&
+        arm_lm_serial_->write_line(arm_gain_lines_.front()))
+      {
+        if (arm_gain_lines_.front() == "IGAIN,BOOT") arm_gains_modified_ = false;
+        arm_gain_lines_.erase(arm_gain_lines_.begin());
+      }
+      // The firmware ramps every time-based move up and down over kRampFraction (0.25) of its travel time each, so the
+      // peak acceleration is d / (T^2 f (1 - f)). The travel time sent is the longer of the asked one and the one that
+      // keeps every axis inside its cap; the firmware still lengthens it for its speed caps.
+      if (send_arm_move_time_ && arm_feedback_fresh && task_.kind == TaskCommand::MANIPULATOR) {
+        constexpr double kRamp = 0.25 * (1.0 - 0.25);  // keep equal to firmware CraftMotorFirmware.h kRampFraction
+        double need_s = 0.0;
+        if (arm_max_accel_ > 0.0) {
+          for (size_t i = 0; i < arm_motor_commands.size(); ++i) {
+            need_s = std::max(need_s, std::sqrt(std::abs(arm_motor_commands[i] - arm_joints_[i]) / (arm_max_accel_ * kRamp)));
+          }
+        }
+        if (arm_max_speed_ > 0.0) {  // peak speed of the ramp profile = d / (T (1 - f))
+          for (size_t i = 0; i < arm_motor_commands.size(); ++i) {
+            need_s = std::max(need_s, std::abs(arm_motor_commands[i] - arm_joints_[i]) / (arm_max_speed_ * 0.75));
+          }
+        }
+        if (lm_max_speed_ > 0.0 && lm_m_per_rad_ > 0.0) {
+          need_s = std::max(need_s, std::abs(lm_motor_command - lm_angle_) * lm_m_per_rad_ / (lm_max_speed_ * 0.75));
+        }
+        if (lm_max_accel_ > 0.0 && lm_m_per_rad_ > 0.0) {
+          need_s = std::max(need_s, std::sqrt(std::abs(lm_motor_command - lm_angle_) * lm_m_per_rad_ / (lm_max_accel_ * kRamp)));
+        }
+        const int need_ms = static_cast<int>(std::ceil(std::min(need_s, kMaxArmMoveS) * 1000.0));
+        // Only lengthened (2026-11-14: timing every move to the caps both ways made a 3 s via move 0.69 s and motor 6
+        // dropped out). The caps are fixed values safe on a low battery (user: one drop-out in a match is the end).
+        if (need_ms > arm_move_ms_) {
+          RCLCPP_INFO(get_logger(), "arm move %lu: %d ms -> %d ms (acceleration caps)",
+            static_cast<unsigned long>(last_task_id_), arm_move_ms_, need_ms);
+          arm_move_ms_ = need_ms;
+          contact_.start(contact_ratio_, need_ms / 1000.0);  // its windows are shares of the move time
+        }
+      }
+      if (send_arm_move_time_ && arm_feedback_fresh && arm_gain_lines_.empty() &&
+        (arm_tolerance_cdeg_ < 0 ||
+         arm_lm_serial_->write_line("TOL," + std::to_string(arm_tolerance_cdeg_))) &&
+        arm_lm_serial_->write_line("TIME," + std::to_string(arm_move_ms_)))
+      {
+        send_arm_move_time_ = false;
+      }
+      const bool command_sent = arm_feedback_fresh && !send_arm_move_time_ && arm_lm_serial_->write_values({
           lm_motor_command, arm_motor_commands[0], arm_motor_commands[1],
           arm_motor_commands[2], arm_motor_commands[3], gripper_motor_command});
       arm_tx_ok_ = command_sent;
@@ -918,8 +1255,17 @@ private:
     }
 
     if (have_clock_wheel_feedback_) {
-      if (lateral_.can_track(wheel_target_v_)) {
-        longitudinal_.set_target(wheel_target_v_);
+      lateral_.set_speed(wheel_radius_ * (wheel_left_feedback_ + wheel_right_feedback_) / 2.0);
+      const bool camera_reached = camera_distance_mode_ && camera_gap_ <= camera_target_gap_ + camera_tolerance_;
+      const double target_v = camera_distance_mode_ ? (camera_reached ? 0.0 :
+        std::min(wheel_target_v_, std::max(0.0, camera_kp_ * (camera_gap_ - camera_target_gap_)))) : wheel_target_v_;
+      if (target_v != 0.0 && lateral_.can_track(target_v)) {
+        // The planning speed profile at my node; speeding up is also capped at max_accel from the last command
+        // (the wheel boards follow steps at once: a resume or the end of an in-place turn starts mid-profile).
+        // Magnitudes along the travel direction: in reverse (speed < 0) too, and a command the other way first stops.
+        const double direction = target_v < 0.0 ? -1.0 : 1.0;
+        const double speed = std::min({std::abs(target_v), lateral_.speed_limit(), direction * drive_v_ + max_accel_ * dt_});
+        longitudinal_.set_target(direction * std::max(speed, 0.0));
       } else {
         longitudinal_.clear_target();  // no valid path/odom, or already at the path goal
       }
@@ -927,7 +1273,7 @@ private:
       // DYNAMIXEL Profile Acceleration and owns velocity PID/feedforward and motor-level tracking.
       const auto v = longitudinal_.compute_command();
       const double linear_speed = wheel_radius_ * (v[0] + v[1]) / 2.0;
-      const auto w = lateral_.compute_command(linear_speed, wheel_target_v_);
+      const auto w = lateral_.compute_command(linear_speed, target_v);
       double wl = v[0] + w[0];  // [rad/s]
       double wr = v[1] + w[1];
       const bool teleop = !task_.running() && now_s - teleop_at_ <= teleop_timeout_s_ &&
@@ -944,6 +1290,7 @@ private:
       }
       // over wheel limit: scale both by the same ratio to keep curvature
       const double k = std::max({1.0, std::abs(wl) / max_wheel_, std::abs(wr) / max_wheel_});
+      drive_v_ = wheel_radius_ * (wl + wr) / (2.0 * k);
       const double clock_motor_command = clock_controller_.compute_command(clock_angle_);
       const bool command_sent = clock_wheel_feedback_fresh &&
         clock_wheel_serial_->write_values({wl / k, wr / k, clock_motor_command});
@@ -958,7 +1305,7 @@ private:
       if (board_faulted) {
         clock_target_sent_ = false;
       }
-      publish_bool(wheel_target_reached_pub_, !board_faulted && lateral_.is_target_reached());
+      publish_bool(wheel_target_reached_pub_, !board_faulted && (camera_distance_mode_ ? camera_reached : lateral_.is_target_reached()));
       std_msgs::msg::Int32 wheel_state_msg;
       wheel_state_msg.data = wheel_reported_state;
       wheel_state_pub_->publish(wheel_state_msg);
@@ -983,7 +1330,13 @@ private:
         clock_slot_pub_->publish(slot_msg);
       }
     }
-    const bool arm_settled = !arm_enabled_ || (arm_feedback_fresh && arm_tx_ok_ && arm_lm_state_ == 0 &&
+    // A held grasp keeps the board busy (state 1): the jaws press on the puck and never reach contact + squeeze angle
+    // (2026-11-14: at 5 and 6 deg the gripper stalls at ~0.7 A and holds firmly, the close task and every arm move
+    // after it would never end; at 4 deg it arrives, the current falls to 0.03 A and a cylinder slips). With a grasp
+    // reported the board's busy state is accepted; standing still for settle_s and the per-joint targets still decide.
+    // Rolled back (user 2026-11-14): the busy board is not accepted while a grasp is held (as 1d6226a).
+    const bool arm_board_idle = arm_lm_state_ == 0;
+    const bool arm_settled = !arm_enabled_ || (arm_feedback_fresh && arm_tx_ok_ && arm_board_idle &&
       arm_received_at_ - arm_stable_at_ >= settle_s_);
     const bool drive_settled = clock_wheel_feedback_fresh && drive_tx_ok_ &&
       wheel_state_ == 0 && clock_state_ == 0 && drive_received_at_ - clock_stable_at_ >= settle_s_ &&
@@ -994,13 +1347,39 @@ private:
       if ((!arm_tx_ok_ && arm_feedback_fresh) || (!drive_tx_ok_ && clock_wheel_feedback_fresh)) {
         task_.fail("serial command write failed"); task_hold_ = true;
       } else if (now_s - task_at_ >= settle_s_) {
+        // A drive not done after 2 s standing still: say which condition holds it, every 2 s (2026-11-10: a stage turn
+        // ended within its heading tolerance and the task stayed RUNNING for 140 s with nothing in the log).
+        if (task_.kind == TaskCommand::NAVIGATE && std::abs(wheel_left_feedback_) <= wheel_stop_tolerance_ &&
+            std::abs(wheel_right_feedback_) <= wheel_stop_tolerance_ && now_s - task_at_ >= 2.0) {
+          RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
+            "drive task %lu not done: target_reached=%d feedback_fresh=%d tx_ok=%d wheel_state=%d clock_state=%d "
+            "settled_for=%.2f s (need %.2f; %lu resets, last by %s) wheel_fb=(%.3f, %.3f) clock=%.4f (anchor %.4f, tol %.4f) camera_mode=%d",
+            static_cast<unsigned long>(last_task_id_), lateral_.is_target_reached() ? 1 : 0,
+            clock_wheel_feedback_fresh ? 1 : 0, drive_tx_ok_ ? 1 : 0, wheel_state_, clock_state_,
+            drive_received_at_ - clock_stable_at_, settle_s_, static_cast<unsigned long>(settle_resets_), settle_reset_by_,
+            wheel_left_feedback_, wheel_right_feedback_,
+            clock_angle_, clock_anchor_.empty() ? 0.0 : clock_anchor_[0], clock_stop_tolerance_,
+            camera_distance_mode_ ? 1 : 0);
+        }
         task_.observe({arm_settled && arm_controller_.is_target_reached(arm_joints_),
                        arm_settled && lm_controller_.is_target_reached(lm_angle_),
-                       drive_settled && lateral_.is_target_reached(),
+                       drive_settled && (camera_distance_mode_ ? camera_gap_ <= camera_target_gap_ + camera_tolerance_ : lateral_.is_target_reached()),
                        drive_settled && clock_target_sent_ && clock_controller_.is_target_reached(clock_angle_),
                        arm_settled && gripper_controller_.is_target_reached(gripper_angle_)},
                       task_.kind != TaskCommand::WAIT || now_s - task_at_ >= wait_duration_);
       }
+    }
+    // A stop not acknowledged: which condition holds it, every second (2026-11-11: STOPPED came 8 s after STOP with
+    // the wheels at zero, planning's stop acknowledgement timed out at 3 s).
+    if (task_.stopping() && !(stopped && planning_held_)) {
+      RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,
+        "stop of task %lu not acknowledged: held=%d arm_settled=%d feedback_fresh=%d tx_ok=%d wheel_state=%d clock_state=%d "
+        "settled_for=%.2f s (need %.2f; %lu resets, last by %s) wheel_fb=(%.3f, %.3f) clock=%.4f (anchor %.4f, tol %.4f)",
+        static_cast<unsigned long>(last_task_id_), planning_held_ ? 1 : 0, arm_settled ? 1 : 0,
+        clock_wheel_feedback_fresh ? 1 : 0, drive_tx_ok_ ? 1 : 0, wheel_state_, clock_state_,
+        drive_received_at_ - clock_stable_at_, settle_s_, static_cast<unsigned long>(settle_resets_), settle_reset_by_,
+        wheel_left_feedback_, wheel_right_feedback_, clock_angle_, clock_anchor_.empty() ? 0.0 : clock_anchor_[0],
+        clock_stop_tolerance_);
     }
     if (task_.stopping() && stopped && planning_held_) task_.stopped();
     // A released hold never restores targets. A fresh EXECUTE is required.
@@ -1016,13 +1395,18 @@ private:
     status.ready = !status.fault && arm_ik_mapping_confirmed_ && lm_mapping_confirmed_ &&
       gripper_mapping_confirmed_;
     status.reason = status.fault ? "board/serial fault" : status.ready ? "" : "unconfirmed calibration";
+    if (status.fault && !arm_diag_.text.empty()) status.reason += " (arm: " + arm_diag_.text + ")";
+    if (status.fault && !wheel_diag_.text.empty()) status.reason += " (clock+wheel: " + wheel_diag_.text + ")";
     control_status_pub_->publish(status);
   }
 
   craft_control::TaskTracker task_;
   uint64_t last_task_id_ = 0;
   double task_at_ = 0, wait_duration_ = 0, settle_s_ = 0, stop_tolerance_ = 0;
-  double wheel_stop_tolerance_ = 0, task_timeout_s_ = 0, odom_timeout_s_ = 0;
+  const char *settle_reset_by_ = "nothing";  // what last restarted the drive settle timer
+  unsigned long settle_resets_ = 0;
+  double wheel_stop_tolerance_ = 0, clock_stop_tolerance_ = 0, task_timeout_s_ = 0, odom_timeout_s_ = 0;
+  double active_task_timeout_s_ = 0;
   double arm_stable_at_ = 0, clock_stable_at_ = 0, arm_received_at_ = 0, drive_received_at_ = 0;
   bool task_hold_ = false, arm_tx_ok_ = false, drive_tx_ok_ = false;
   std::vector<double> arm_anchor_, clock_anchor_;
@@ -1034,8 +1418,15 @@ private:
   craft_control::LongitudinalController longitudinal_;
   craft_control::LateralController lateral_;
   double max_wheel_ = 0.0;
+  double dt_ = 0.02;        // control period [s] = 1 / control_hz
+  double max_accel_ = 0.0;  // [m/s^2] speed-up cap of the forward command
+  double drive_v_ = 0.0;    // forward speed of the last wheel command [m/s]
   double wheel_radius_ = 0.0;
   double wheel_target_v_ = 0.0;
+  bool camera_distance_mode_ = false;
+  double camera_gap_ = 0, camera_target_gap_ = 0, camera_received_at_ = 0;
+  double camera_timeout_s_ = .5, camera_kp_ = .5, camera_tolerance_ = .003, camera_max_speed_ = .005;
+  int64_t camera_stamp_ns_ = 0;
   double max_v_ = 0.0;
   geometry_msgs::msg::Twist teleop_cmd_;
   double teleop_at_ = -1e9, teleop_timeout_s_ = 0.3;
@@ -1065,6 +1456,7 @@ private:
   double gripper_angle_ = 0.0;
   bool gripper_mapping_confirmed_ = false;
   double gripper_current_a_ = 0.0;
+  std::array<double, 6> motor_current_a_{};  // [A] LM, shoulder, elbow, wrist_pitch, tool_roll, gripper
   int arm_lm_state_ = 0;
   bool have_arm_lm_feedback_ = false;
   craft_control::WheelOdometry wheel_odometry_;
@@ -1089,6 +1481,21 @@ private:
   bool clock_target_sent_ = false;
 
   rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr arm_lm_state_pub_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr arm_diag_pub_, wheel_diag_pub_;
+  BoardDiag arm_diag_, wheel_diag_;
+  double low_supply_voltage_ = 11.0;
+  static constexpr double kMaxArmMoveS = 32.767;  // firmware TIME limit [s]
+  static constexpr double kMaxTaskTolerance = 5.0 * M_PI / 180.0;  // [motor rad] firmware TOL limit 500
+  int arm_tolerance_cdeg_ = -1;  // TOL line of the next MANIPULATOR task [0.01 deg]; -1: none
+  static constexpr uint16_t kMaxPositionIGain = 16383;  // XM430 POSITION_I_GAIN range, firmware IGAIN limit
+  std::vector<std::string> arm_gain_lines_;  // IGAIN lines of the next MANIPULATOR task, sent before TOL/TIME
+  bool arm_gains_modified_ = true;  // the board may hold gains other than its power-up ones
+  int arm_move_ms_ = 0;
+  double arm_max_accel_ = 0.0, lm_max_accel_ = 0.0, lm_m_per_rad_ = 0.0, contact_ratio_ = 0.0,
+    arm_max_speed_ = 0.0, lm_max_speed_ = 0.0;
+  using ContactDetector = craft_control::ContactDetector<craft_control::kArmMotors>;
+  ContactDetector contact_;  // stop-on-contact of the running MANIPULATOR task (speed > 0)
+  bool send_arm_move_time_ = false;  // [V] warn when a board's motors report less (12 V supply)
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr gripper_grasped_pub_;
   rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr wheel_state_pub_;
   rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr clock_state_pub_;
@@ -1099,11 +1506,13 @@ private:
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr gripper_target_reached_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr wheel_target_reached_pub_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr tracking_path_pub_;
+  rclcpp::Publisher<geometry_msgs::msg::PointStamped>::SharedPtr lookahead_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr planning_held_pub_;
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr arm_joint_feedback_pub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr planning_hold_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
   rclcpp::TimerBase::SharedPtr timer_;
+  rclcpp::TimerBase::SharedPtr lookahead_timer_;
 };
 
 int main(int argc, char ** argv)

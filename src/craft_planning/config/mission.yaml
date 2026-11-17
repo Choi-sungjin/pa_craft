@@ -1,0 +1,55 @@
+# Dice memory mission (발제 2026-11-04, v5): mission_master. Every parameter is required.
+#   ros2 topic pub -1 /mission/command std_msgs/msg/String "{data: START}"     (STOP, RESET)
+#   ros2 topic echo /mission/state
+mission_master:
+  ros__parameters:
+    loop_hz: 20.0
+    map_frame: map
+    # Start boxes in visiting order (planning.yaml box_approach names), pucks_per_box on each: 12 pucks in all.
+    start_boxes: [S1, S2, S3, S4, S5, S6]
+    pucks_per_box: 2
+    # L1, L2, L3 in that order: the sorted groups go to them in this order.
+    locations: [L1, L2, L3]
+    # Where the robot goes back to [x m, y m, yaw deg], map frame. TODO(user): confirm. (0.56, 0.98) is the marked
+    # start of demo/corner/run_tour.py; 180 deg = looking at the traffic light (-x), as at the start.
+    home: [0.662, 1.081, -179.6]  # the robot start pose, facing -x (x +0.048: base_link moved 48 mm back 2026-11-15; user 2026-11-14; was the brief zone centre 0.743, 0.950)
+    # Where the upper cam reads the barcode, [x m, y m, yaw deg] map frame; [] = read it where the robot stands.
+    # Brief (mission.pdf, 2026-11-14 user): the barcode is 0.40 m high anywhere on the 3rd wall panel from (0,0)
+    # along +y (the traffic light's panel; posts every 0.394 m -> y 0.818..1.152, centre 0.985), facing +x, wall
+    # face x ~0.08. The traffic light (0.08, 0.95) stands right in front of that panel and is an obstacle.
+    # Upper cam (URDF: base -0.062 x, -0.0325 y, 0.593 high, 43.6 deg down, 42 deg vertical FOV): an 8 cm label
+    # reads from <= ~0.6 m (PC D435 bags, 2026-11-14); a 0.40 m high one stays in view up to ~0.46 m horizontal.
+    # x 0.48: robot front (r 0.20) 0.28 m from the light centre (~0.2 m from its stand), camera 0.46 m from the
+    # wall = at the top edge of the view by the URDF pitch. y 0.95: camera on the panel centre. Facing -x.
+    # TODO(user): on the robot, check the label is inside the upper-cam view here and the planner accepts the pose.
+    # user 2026-11-14: the start pose is moved so the barcode is read from there (no view drive): barcode_view left
+    # out = [] (mission_master default). Do not write "barcode_view: []": an empty list has no type and the node dies.
+    # barcode_view: [0.48, 0.95, 180.0]
+    home_still_s: 3.0          # stand still in the start zone this long (brief: 3 s)
+    # START clears the blink counter, the barcode and the puck survey of perception, so START comes before the
+    # operator starts the light. false: keep what perception already holds.
+    reset_perception_on_start: true
+    # 0 = wait without a limit. A light that never completes 12 blinks otherwise holds the mission in WatchSignal
+    # (STOP ends it). TODO(user): decide the limits (docs/todo/puck_perception.md B9).
+    barcode_timeout_s: 0.0
+    signal_timeout_s: 0.0
+    approach_timeout_s: 300.0  # one drive + dock to a box, then the mission faults
+    go_home_timeout_s: 300.0
+    leave_timeout_s: 60.0      # back out of a dock (planning box_approach.reverse_distance) before the next drive
+    # true: all three locations are placed first, then each is visited again and verified (the brief's order).
+    # false: a location is verified right after its pucks are placed, before leaving it.
+    verify_after_all: true
+    # true (user 2026-11-12, no arm for now): skip every arm action. The upper-cam barcode is still read (2026-11-14), then the
+    # robot drives up to S1..S6, then L1..L3, then home. false = the full mission (pick, place, verify).
+    drive_only: true
+    # Real pick adapter (puck_picker.py -> execute.py --planning). One mode per slot in collection order.
+    # Omit pick_modes for automatic standing-first, nearest-first collection (fresh survey per pick).
+    # Explicit find/lie2/lie5 modes remain available for calibration experiments.
+    # pick_modes: [lie2, lie5, find, find, find, find, find, find, find, find, find, find]
+    pick_timeout_s: 600.0
+    # --- skeleton parts (observe / place / verify are not connected yet) ---
+    skeleton_action_s: 0.5     # a skeleton action reports done after this long
+    # The pick skeleton cannot say which puck it took: true hands the surveyed ids out to the clock slots, lowest
+    # first, so the whole sequence can be walked through. MUST be false once the pick reports the puck id.
+    assume_unknown_picks: true
+    log_dir: ~/craft_mission_logs  # mission_<time>/signal.json, allocation.json, mission.log; empty = no files

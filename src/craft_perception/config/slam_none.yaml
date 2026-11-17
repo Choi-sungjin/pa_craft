@@ -1,0 +1,6 @@
+# Empty overlay for craft.launch.py: an option that is off adds this instead of slam.yaml again (2026-11-12: slam.yaml
+# added after slam_ekf.yaml set transform_publish_period back to 0.05, so slam_toolbox and ekf_global both published
+# map->odom; it also undid slam_wide.yaml).
+slam_toolbox:
+  ros__parameters:
+    use_sim_time: false

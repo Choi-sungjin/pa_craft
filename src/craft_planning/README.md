@@ -44,7 +44,6 @@ Types use the ROS `package/msg/Type` convention.
 | `/control/arm_joints` | `sensor_msgs/msg/JointState` | Default measured, inverse-calibrated URDF joints; configurable with `joint_state_topic` |
 | `/perception/lidar/obstacle` | `geometry_msgs/msg/PoseArray` | LiDAR points; required for navigation by default |
 | `/perception/vision/d435/obstacle` | `geometry_msgs/msg/PoseArray` | Additional vision obstacle points |
-| `/perception/vision/d435/knob_observations` | `craft_perception/msg/KnobObservationArray` | Depth-valid knob targets |
 | `/perception/vision/d435/puck_observations` | `craft_perception/msg/PuckObservationArray` | Axis-valid puck targets |
 | `/perception/vision/object_pose` | `geometry_msgs/msg/PoseStamped` | Optional generic observation source |
 | `/perception/vision/d435/object_detection` | `geometry_msgs/msg/PoseArray` | Generic object positions |
@@ -113,6 +112,101 @@ margin leaves straight to the nearest free cell within 0.10 m while `r_robot` is
 Requested start/goal XY is preserved. `max_cells`, `max_expansions` and sampling checks
 bound work.
 
+## Global / local paths (`path_planner.mode: global_local`)
+
+The default since 2026-11-07. A Navigate step plans a **global path** once: 8-connected A* on the same C-space
+(`r_robot + margin`, proximity cost) to the goal (or to the approach entry `approach_len` before it when
+`goal_heading_required`), then line-of-sight pruning to an any-angle polyline. It is planned again only when the
+driven path is blocked (pause, `block_wait_s`, replan) or a local path could not be renewed before its end.
+
+The global polyline is then smoothed once, as a whole, like `astar8_spline.smooth_curve` (clearance band pad +
+0.05 m, curvature above min(a_lat_max / v_ref^2, w_max / v_ref) pulled in, 600 steps, every point within
+`local_max_dev` (0.20 m) of the polyline) and natural-cubic-splined at 0.02 m: that is the global path (2026-11-08;
+before, each local window was smoothed on its own, so the local path left the global one).
+
+The robot drives a **local path**: the samples of the global path in `[ego - local_behind, ego + local_ahead]`
+(1 m behind, 4 m ahead = 5 m), cut from it unchanged, so a renewal never moves the path under the robot. After
+`local_update` (2 m) of progress along the global path, planning_master sends the next window as UPDATE_PATH of the
+same task; the last one ends exactly at the goal. A local path that ends short of the global end counts as a
+segment: driven to its end without a renewal, the rest is planned from there.
+
+Each window carries a **speed profile** (`TaskCommand.speed_limit`, per pose): min(v_ref, sqrt(a_lat_max / k),
+w_max / k, and both wheels within `max_wheel` once the turn is added, v (1 + |k| wheel_separation / 2) /
+wheel_radius <= max_wheel), then `a_lon_max` up from `v_min` at the window start and down to `v_min`, which it holds
+over the last `goal_tolerance` (where control stops), never below `v_min`. The wheel boards follow steps at once
+(Profile Acceleration at its maximum), so this profile is the driving ramp. The window starts `local_behind` behind
+the robot, so a renewal does not slow a moving robot down. Control drives min(cruise_speed, the profile at its
+nearest pose), speeding up at most `max_accel` from its last command (resume, end of an in-place turn).
+
+### Driving up to a box (`/planning/approach_box`, 2026-11-08)
+
+`/planning/approach_box` (std_msgs/String, a `box_approach.names` entry: L1, L2, L3) queues a Navigate step to that
+box (`demo/corner/run_corner.py --box L2`). `PathPlanner::plan_box` makes one goal per face: `box_approach.gap` from
+the LiDAR front face (`front_face_x` ahead of base_link) to the face, on the face normal through the box centre,
+heading into the box. A face is approachable only when that goal, the approach entry `approach_len` behind it and the
+line between are clear of the padding (inflated map + obstacles), the box's own padding aside: within padding of that
+approach line, cells blocked only by the target box's padding are free (`BoxApproach`; the box itself, walls and
+obstacles still block), so the goal may sit closer to the box than the padding (the upper cam gap, the final stop).
+Renewals and the blocked-path check while driving use the same rule. Each approachable face is planned as a normal
+global_local goal with the heading required, and the shortest global path wins. With the heading required the
+approach is the straight `approach_len` along the goal heading at any angle (it used to round to a quarter turn), so
+a box at any yaw works; the upper camera's gap only holds square to a face. The step drives at `box_approach.speed`
+with the goal heading required; planning logs the chosen face and publishes its goal on `/planning/approach_goal`.
+The planning.yaml box is the known position: the step plans to the stage points of its approachable faces at once,
+and the perceived box (`/perception/box/pose`) takes over at the stage point. Phases of a box step:
+
+1. Stage: `plan_box` with the known box and `stage_lead`: for every approachable face an ordinary path (no heading)
+   to its stage point, `approach_len + stage_lead` behind the face goal on its normal (moved toward the entry in
+   5 cm steps when in the padding); the shortest is driven at `speed`, arriving within `stage_goal_tolerance`.
+   Stage points sit 0.43-0.58 m from the face (LiDAR front). (One path straight into the face could hairpin at the
+   approach entry; Pure Pursuit cut it and turned back and forth for 40 s, 2026-11-08.)
+2. Perceive: at the stage point the robot stands still `settle_s`, then takes a `/perception/box/pose` received
+   after that (map frame, orientation = yaw of a face normal; `box_detection_timeout_s` in rates.yaml, at most
+   `max_offset` from the known position). None within the timeout fails the step.
+3. Dock: with the perceived box a new task drives the face normal itself, from
+   the point on it nearest the robot to the face goal, at `dock_speed`, `goal_tolerance` = `dock_goal_tolerance` and
+   `tolerance_rad` = `yaw_tolerance_deg`: control turns toward its lookahead point first, Pure Pursuit pulls the
+   robot onto the normal (near the end the target stays lookahead ahead on the extended line) and the arrival
+   counts along the line; it turns square at the goal. A dock or back-out that stays blocked `block_wait_s` fails
+   (no global replan off the normal).
+4. Settle: at the face goal the robot stands still `settle_s` (camera shake, the gap filter), then is checked against
+   the goal of the same face of the box as perceived after settling: lateral offset and heading error within
+   `lateral_tolerance` / `yaw_tolerance_deg` complete the step. `/planning/box_alignment` reports each check
+   ([lateral m, yaw rad, forward m, aligned 0/1, correction]).
+5. Reverse (correction parking): out of tolerance, the robot backs out `reverse_distance` straight along the normal
+   (a new task, speed `-reverse_speed`, still facing the box), perceives again (2.), docks again and settles
+   again; after `max_corrections` corrections the step fails. Blocked behind (padding, an obstacle), it backs
+   out the longest clear distance down to `reverse_min_distance` in 5 cm steps; a blocked back-out or dock line waits
+   and fails after `block_wait_s`.
+
+The box detection itself is not part of planning (any node publishing `/perception/box/pose` works);
+`demo/corner/run_corner.py --box L2 --fake-detect [--fake-offset DX DY DYAW]` stands in for it.
+
+Global and local outputs pass a repair step (samples in a blocked cell corner, where a line-of-sight path grazes
+the padding, are pushed out half a cell along the clearance gradient) so `collision_free` agrees with them.
+Jetson (Orin Nano Super, 초레지 0.02 m, pad 0.293 m): global + first local 11-13 ms, a local renewal 4-9 ms;
+figure `tools/path_compare/out/global_local.png`.
+
+`mode: arc` keeps the previous behaviour (A*+arc, whole path, STOP_TURN segments). Comparison on 초레지:
+`tools/path_compare` (8-connected + spline + curve: 7-10 % shorter, 7-15 % faster than A*+arc).
+
+## Arena boxes in the A* map
+
+`src/box_detector.py` (Python, installed as `craft_planning.box_detector`) finds the 205 x 205 mm boxes
+(start boxes S1-S6, destinations L1-L3 of the project2 brief) in a ROS YAML map, at that map's resolution,
+which is also the A* grid (YAML maps are not resampled). Hits on straight runs longer than 0.32 m are walls;
+the rest is clustered, fragments merge while they fit one footprint, and a fixed 205 mm square is fitted to the
+outline (yaw within +-15 degrees, 0.2 hit per degree). Box insides show as free in these maps, so with one face
+seen the nearest brief position decides the side. `--write <base>` copies the map with every box drawn as its
+full square outline, so A* and the global localizer see the unseen faces too.
+
+```bash
+/usr/bin/python3 src/box_detector.py ~/maps/arena5_legend_arena_raw.yaml --png boxes.png --write ~/maps/arena5_legend_arena
+```
+
+`~/maps/arena5_legend_arena` (corner_demo default) is the arena-frame map (`tools/mapmaker`, pipeline/make_arena_map.py)
+with the boxes completed; `_raw` is the plain render. On it the boxes sit 57-275 mm from the brief positions.
+
 ## Puck graspable check
 
 `grasp_region.hpp`, no IK. On every `/perception/vision/d435/puck_observations` message the nearest puck
@@ -144,7 +238,7 @@ missions:
       pose: [1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
     - id: grasp_pose
       type: tcp
-      source: d435_knob
+      source: d435_puck
       class_id: 0
       frame: base_link
       pose: [0.0, 0.0, 0.02, 0.0, 0.0, 0.0, 1.0]
@@ -155,7 +249,7 @@ missions:
 
 Step IDs must be unique per mission. Unknown keys/types, invalid slots, frames,
 poses and non-finite values fail parsing. Pose is `[x,y,z,qx,qy,qz,qw]` with a
-nonzero quaternion. `source` defaults to `fixed`; alternatives are `d435_knob`,
+nonzero quaternion. `source` defaults to `fixed`; alternatives are
 `d435_puck`, `object_pose`, `object_detection`. For `d435_puck`, `class_id` is the
 AprilTag ID printed on the puck underside. The highest-confidence fresh
 matching target is transformed into the step frame. Configured XYZ is an offset
@@ -255,3 +349,193 @@ the initial pip `pin` dependency combination crashed during ROS node constructio
 Tests cover native map/FK/IK/FSM/configuration behavior, ROS scheduling with
 synthetic feedback, and control heartbeat/hold/recovery using disposable PTYs.
 They do not verify physical motor calibration or complete hardware bringup.
+
+## Mission (`mission_master`, 2026-11-12)
+
+The dice memory mission (발제 2026-11-04, v5) runs one level above `planning_master`:
+`ros2 launch craft_bringup craft.launch.py mission:=true`, then
+`ros2 topic pub -1 /mission/command std_msgs/msg/String "{data: START}"` (also `STOP`, `RESET`); `/mission/state` shows
+the state and the action being run. Settings: [config/mission.yaml](config/mission.yaml).
+
+| File | What it holds |
+| --- | --- |
+| `mission_logic.hpp/.cpp` | barcode -> sort order, counts -> groups of L1-L3 (ties R, Y, G), 12 pucks -> allocation (Y one shape), dice spots |
+| `mission_fsm.hpp/.cpp` | `Idle -> ReadBarcode -> WatchSignal -> Collect -> Allocate -> Deliver -> Verify -> Return -> Done`, any -> `Fault`; one `MissionAction` at a time, no ROS |
+| `mission_master.cpp` | ROS node: perception inputs, drives through `/planning/approach_box` and `/planning/target_base_pose`, `signal.json` / `allocation.json` / `mission.log` under `log_dir` |
+
+Collect picks every puck of every start box into the clock (12 slots) before the allocation is made, so R/G cannot take
+what Y needs. A fault (unregistered barcode, invalid signal, incomplete survey, no allocation, a failed or timed-out
+action) sends planning `STOP` and stays in `Fault` until `RESET` or a new `START`.
+
+**Skeletons** (`run_skeleton` in `mission_master.cpp`: logged as `[SKELETON]`, done after `skeleton_action_s`):
+`observe_pucks`, `pick_puck`, `place_puck`, `verify_location`. The pick must report the puck id it took and check
+`/control/gripper_grasped` (control latches a grasp at >= 0.1 A for 0.1 s; a close that ends without it held nothing).
+Until then `assume_unknown_picks: true` hands the surveyed ids out to the slots so the sequence can be walked through.
+
+`box_approach.square_boxes` (L1-L3): these boxes are not turned, so they take the map yaw and skip the second stage
+drive + LiDAR measurement of a box step.
+
+### Calibrated puck pick integration (2026-11-15)
+
+`mission:=true` also starts `puck_picker.py`. A `PickPuck` action now waits for the
+actual executor result; it no longer succeeds after the skeleton delay.
+The adapter runs `demo/puck_pick/execute.py --planning --slot N --box NAME --auto`.
+`planning_master` owns all control task IDs, the hold heartbeat, watchdogs and STOP.
+The executor sends one correlated request at a time on `/planning/pick_step` and
+waits for `/planning/pick_step_result`. Arm durations, tolerances, gains and taught
+poses pass through unchanged. No grasp confirmation, a failed step, timeout or
+cancellation fails the pick and stops the sequence.
+
+For lying prisms the existing calibrated order is preserved:
+
+1. Pick at taught cell 2 or 5; place on cell 8 and rise.
+2. Reverse **0.28 m** along the robot heading. This request is never shortened to
+   the default reverse minimum if the endpoint is blocked.
+3. Move elbow/wrist/LM; raise shoulder halfway with roll held; then finish shoulder
+   travel with roll rotation.
+4. Re-dock at the same box via the existing near-entry LiDAR/camera docking FSM.
+5. Regrasp, load into the requested clock slot, carry via, via, nominal.
+
+The C++ camera executables need exclusive camera access. The project camera
+drivers now accept `pick_pause` leases and acknowledge `pick_paused` after closing
+the USB stream. The executor renews the lease during capture, releases it after
+capture (also on error), and drivers resume when an abandoned lease expires after
+2 seconds. Uppercam remains available for re-docking. Restart the rebuilt
+`uppercam_bridge` and `realsense_processor` before using this integration.
+
+For a single lying pick with the project already running, docked at S1, arm at
+nominal, and planning in `Run.AwaitRequest`:
+
+```bash
+source ~/craft/install/setup.bash
+python3 ~/craft/demo/puck_pick/execute.py --planning --lie --cell 5 --pick --box S1 --slot 12 --auto
+```
+
+Without `--planning`, the experimental executor retains its manual wheel pauses.
+`--dry-run` prints the pose plan without starting ROS or moving the robot.
+
+Mission configuration: `drive_only: true` still skips picks. For a collection run,
+set it to false and set `pick_modes` to one entry per collected slot in visiting
+order: `collect`, `find`, `lie2`, or `lie5`. Omit the list for automatic `collect` everywhere (standing first, then nearest).
+The adapter's `executor_path` parameter defaults to `~/craft/demo/puck_pick/execute.py`;
+its `log_dir` defaults to `~/craft_mission_logs/picks` and each request has a log.
+`pick_timeout_s` bounds the mission pick; adapter `timeout_s` defaults to 600 s.
+
+Limits: lying picks still use the taught 2/5 cell locations (only lateral correction
+is calibrated); no arbitrary-position lying picker or validated cylinder picker
+has been added. Observe/Place/Verify and puck-ID assignment are still the prior
+skeletons, so enabling picks does **not** make the full competition mission complete.
+Hardware validation of reverse/re-dock with the regrasp arm pose remains required.
+
+### RViz puck footprints (2026-11-16)
+
+`craft.launch.py` starts `craft_bringup/puck_marker.py` and the RViz configs include
+`/perception/pucks/markers` (MarkerArray, reliable, transient local). It draws flat
+footprints in `map`, fixed at each observation's timestamp:
+
+- Standing cylinder: circle; standing prism: square.
+- Lying cylinder: capsule; lying prism: long rectangle, aligned with the observed axis.
+- Red/green fill: detected colour; grey: colour unknown.
+- Text: ID (or local detection index), `standing`/`lying`, colour, shape, source and confidence.
+- Unknown posture/shape: diamond and `unknown`; missing yaw is labelled explicitly.
+
+It consumes upper/gripper `puck_survey_observations` plus the calibrated executor's
+`/perception/pucks/picker_upper` and `picker_grip` snapshots. Uppercam's coarse
+position/class alone does not prove posture. The gripper depth result confirms
+posture and provides the geometric footprint axis. A nearby matching-shape upper
+snapshot (within 60 mm) supplies colour for the gripper snapshot; its coarse marker
+is replaced by the detailed one. This association is for display only.
+
+Live observations expire after 3 s; executor snapshots after 30 s or explicit clear.
+An empty observation clears that source immediately. Missing TF or missing measured
+3D position is not drawn at a guessed location. Full-project TF uses the gripper
+camera alias `camera_color_optical_frame` -> `camera_wrist_color_optical_frame`.
+
+For an already-running project, start the display node separately:
+
+```bash
+ros2 run craft_bringup puck_marker.py
+```
+
+For a standalone arm demo without `map` TF, use `--ros-args -p fixed_frame:=base_link`.
+RViz: Add → MarkerArray → `/perception/pucks/markers`; TopDownOrtho gives a 2D view.
+The footprints use nominal 30 mm width/diameter and 60 mm length, not fitted dimensions.
+
+### Two-puck collection priority (2026-11-16)
+
+S1..S6 each contain two pucks: red/green, cylinder/prism. Cylinders always stand;
+prisms may stand or lie. The default mission `PickPuck` mode is now `collect`:
+
+1. Survey the docked box at nominal with `upper_puck` before each pick.
+2. Keep confident detections (>=0.4) in the docked 205 mm box footprint (ahead
+   0..205 mm, lateral +/-102.5 mm after camera bias correction).
+3. Treat cylinders as standing. For prisms, estimate the local box surface from
+   surrounding depth excluding detected pucks; compare the puck's 95th percentile
+   top height to that surface: 45..75 mm standing, 20..40 mm lying, otherwise unknown.
+4. Sort by **standing first**, then increasing planar distance from `base_link` to
+   the corrected puck centre. Colour, shape and confidence do not override these
+   rules; confidence only breaks an exact distance tie.
+5. Run the selected standing/lying sequence into the requested slot. After loading,
+   return to nominal. The next mission pick takes a **new** survey, not the old list.
+
+Mission requests include the remaining count: 2 for the first pick, 1 for the
+second. A missing/extra detection or unknown prism posture triggers one rescan,
+then fails instead of violating priority. A highest-priority target out of calibrated
+reach also fails; it is never silently skipped in favour of another puck.
+
+`execute.py --collect --planning --box S1 --slot 1 --expected-pucks 2 --auto`
+executes one policy-selected pick; use slot 2 / expected-pucks 1 for the second.
+The mission supplies these values automatically. `--find` also uses the ranking
+policy for standing candidates; `--lie --cell` remains the explicit teaching mode.
+Selection candidates, posture, distance and the selected target are saved in
+`runs/find_*/log.json` under `selection` and printed as `PICK POLICY`.
+
+The gripper reader gates blobs around the selected calibration position and avoids
+the other candidate's predicted camera position. Standing and lying modes no longer
+compete on frame count during a selected pick. Cylinders use `--no-yaw` (centre only,
+no yaw stability rejection or tool-roll correction). Synthetic two-puck depth checks
+cover choosing each prism, rejecting an ambiguous rival and cylinder centre-only mode.
+
+Calibration limits still apply: automatic lying dispatch uses the taught 2/5 row
+neighbourhoods (within 20 mm of their corrected row coordinates), coarse lateral
+positioning and local gripper corrections up to 25 mm. Forward corrections require
+the complete local model solution; failure stops before descent. Arbitrary-position
+lying trajectories, uppercam posture classification with two real pucks and real
+cylinder picks still need hardware validation. `drive_only` remains the current
+mission configuration until the collection trial is enabled.
+
+### View the decision simulation in RViz
+
+```bash
+bash ~/craft/demo/puck_pick/run_pick_policy_sim.sh
+```
+
+The launcher opens six simultaneous S1..S6 examples in a separate ROS domain (217),
+using the actual `pick_policy.py` parser and selector. Gold circles mark the current
+target; grey ghosts have been removed. Every five seconds the display advances from
+first pick to a fresh survey of the remaining puck, then completion. Closing RViz
+stops both display processes. No hardware/control nodes are launched.
+
+The deterministic verification covers 1,788 pairs (including 1,500 seeded random
+pairs), reversed detector ordering, fresh second-pick surveys, unknown/missing/extra
+observations and always-standing cylinders. The independent expected result uses
+standing priority followed by base-link planar distance. Inputs are synthetic
+perception outputs: camera classification and physical motion are outside this test.
+
+`--verify-only` runs without a window. Results and screenshots are under
+`demo/puck_pick/runs/policy_sim/`; `verification.json` includes counts and the six
+example orders. On domain217, `/puck_pick_sim/command` accepts String values
+`pause`, `play`, `next`, `reset`. `PICK_SIM_DOMAIN_ID` overrides the isolated domain.
+
+### Driving and LiDAR simulation (camera-free)
+
+`bash ~/craft/demo/driving_sim/run.sh` opens an isolated domain216 simulation with
+this unchanged `planning_master`, the production wheel tracking controllers,
+the V307 URDF and lightweight dual LiDAR ray casting. RViz shows the known map,
+planner padding, initial/current issued paths, actual trajectory and front/rear
+scans. An unmapped obstacle appears during travel so sensor-driven replanning is
+visible. No hardware controller, drivers or camera pipeline is started.
+
+See `demo/driving_sim/README.md` for sensor/CAD assumptions, the simulation-only
+0.34 m planner radius, tests and recorded results. This uses ideal wheel kinematics
+and ground-truth localization; it is not a SLAM or contact-physics validation.

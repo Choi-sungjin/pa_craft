@@ -1,0 +1,292 @@
+{
+ "5": {
+  "time": "2026-11-15 18:03:11",
+  "row": "middle",
+  "ahead_mm": 112.5,
+  "lm": 0.012216466477396794,
+  "grasp": "stand_grasp_c5",
+  "grip_ref": {
+   "centre_mm": [
+    51.8,
+    -21.6,
+    227.8
+   ],
+   "yaw_deg": 2.8,
+   "floor_mm": [
+    60.3,
+    5.9,
+    280.7
+   ],
+   "floor_note": "FLOOR of the same ref shot (cal_ref_162507 / 180210 / 162703), grip_yaw 2026-11-15"
+  },
+  "cam_per_arm": [
+   [
+    -0.02,
+    0.995
+   ],
+   [
+    0.83,
+    -0.055
+   ]
+  ],
+  "fit_rms_mm": 1.17,
+  "shots": {
+   "ref": {
+    "centre": [
+     51.8,
+     -21.6,
+     227.8
+    ],
+    "yaw": 2.8,
+    "dlm": 0.0,
+    "dahead": 0.0
+   },
+   "lm+10": {
+    "centre": [
+     52.1,
+     -13.6,
+     222.3
+    ],
+    "yaw": -1.1,
+    "dlm": 10.0,
+    "dahead": 0.0
+   },
+   "lm-10": {
+    "centre": [
+     52.5,
+     -30.2,
+     231.0
+    ],
+    "yaw": 0.6,
+    "dlm": -10.0,
+    "dahead": 0.0
+   },
+   "ahead-10": {
+    "centre": [
+     43.9,
+     -22.0,
+     227.3
+    ],
+    "yaw": 2.2,
+    "dlm": 0.0,
+    "dahead": -10.0
+   },
+   "ahead+10": {
+    "centre": [
+     63.8,
+     -23.1,
+     224.0
+    ],
+    "yaw": -6.7,
+    "dlm": 0.0,
+    "dahead": 10.0
+   }
+  },
+  "grasp_ref": null,
+  "upper": {
+   "ahead_mm": 122.4,
+   "lateral_mm": -25.1,
+   "cls": "red_prism",
+   "score": 0.81,
+   "ahead_err_mm": 9.9
+  },
+  "lie_ref": {
+   "floor_mm": [
+    63.3,
+    9.7
+   ],
+   "yaw_deg": -3.0,
+   "time": "2026-11-15 23:31:42"
+  }
+ },
+ "2": {
+  "time": "2026-11-15 16:26:11",
+  "row": "far",
+  "ahead_mm": 172.5,
+  "lm": 0.012216466477396794,
+  "grasp": "stand_grasp_c2",
+  "grip_ref": {
+   "centre_mm": [
+    44.2,
+    -17.7,
+    215.4
+   ],
+   "yaw_deg": -0.3,
+   "floor_mm": [
+    60.7,
+    6.3,
+    268.0
+   ],
+   "floor_note": "FLOOR of the same ref shot (cal_ref_162507 / 180210 / 162703), grip_yaw 2026-11-15"
+  },
+  "cam_per_arm": [
+   [
+    -0.025,
+    0.922
+   ],
+   [
+    0.85,
+    -0.142
+   ]
+  ],
+  "fit_rms_mm": 0.1,
+  "shots": {
+   "ref": {
+    "centre": [
+     44.2,
+     -17.7,
+     215.4
+    ],
+    "yaw": -0.3,
+    "dlm": 0.0,
+    "dahead": 0.0
+   },
+   "lm+10": {
+    "centre": [
+     43.8,
+     -9.3,
+     211.1
+    ],
+    "yaw": -0.5,
+    "dlm": 10.0,
+    "dahead": 0.0
+   },
+   "lm-10": {
+    "centre": [
+     44.3,
+     -26.3,
+     219.2
+    ],
+    "yaw": 0.1,
+    "dlm": -10.0,
+    "dahead": 0.0
+   },
+   "ahead-10": {
+    "centre": [
+     34.9,
+     -16.2,
+     218.3
+    ],
+    "yaw": -1.1,
+    "dlm": 0.0,
+    "dahead": -10.0
+   },
+   "ahead-20": {
+    "centre": [
+     25.8,
+     -14.9,
+     222.5
+    ],
+    "yaw": -0.1,
+    "dlm": 0.0,
+    "dahead": -20.0
+   }
+  },
+  "upper": {
+   "ahead_mm": 197.3,
+   "lateral_mm": -6.4,
+   "cls": "red_prism",
+   "score": 0.79,
+   "ahead_err_mm": 24.8
+  },
+  "lie_ref": {
+   "floor_mm": [
+    73.5,
+    10.4
+   ],
+   "yaw_deg": -1.3,
+   "time": "2026-11-15 23:30:07"
+  }
+ },
+ "8": {
+  "time": "2026-11-15 16:28:10",
+  "row": "near",
+  "ahead_mm": 52.5,
+  "lm": 0.012216466477396794,
+  "grasp": "stand_grasp_c8",
+  "grip_ref": {
+   "centre_mm": [
+    40.8,
+    -20.8,
+    222.8
+   ],
+   "yaw_deg": -3.9,
+   "floor_mm": [
+    43.6,
+    3.8,
+    277.3
+   ],
+   "floor_note": "FLOOR of the same ref shot (cal_ref_162507 / 180210 / 162703), grip_yaw 2026-11-15"
+  },
+  "cam_per_arm": [
+   [
+    0.005,
+    1.098
+   ],
+   [
+    0.85,
+    0.032
+   ]
+  ],
+  "fit_rms_mm": 1.69,
+  "shots": {
+   "ref": {
+    "centre": [
+     40.8,
+     -20.8,
+     222.8
+    ],
+    "yaw": -3.9,
+    "dlm": 0.0,
+    "dahead": 0.0
+   },
+   "lm+10": {
+    "centre": [
+     44.1,
+     -12.2,
+     219.3
+    ],
+    "yaw": 0.1,
+    "dlm": 10.0,
+    "dahead": 0.0
+   },
+   "lm-10": {
+    "centre": [
+     44.0,
+     -29.2,
+     227.0
+    ],
+    "yaw": -2.6,
+    "dlm": -10.0,
+    "dahead": 0.0
+   },
+   "ahead+10": {
+    "centre": [
+     52.9,
+     -20.2,
+     222.5
+    ],
+    "yaw": -3.4,
+    "dlm": 0.0,
+    "dahead": 10.0
+   },
+   "ahead+20": {
+    "centre": [
+     62.2,
+     -20.3,
+     221.2
+    ],
+    "yaw": -5.1,
+    "dlm": 0.0,
+    "dahead": 20.0
+   }
+  },
+  "upper": {
+   "ahead_mm": 79.1,
+   "lateral_mm": -15.9,
+   "cls": "red_prism",
+   "score": 0.75,
+   "ahead_err_mm": 26.6
+  }
+ }
+}

@@ -67,7 +67,8 @@ class ScanMatcher:
             out[sel] = v.mean(1)
         return out
 
-    def global_search(self, pts, clearance=0.18, step=0.06, angle_step_deg=3.0, top=6, near=None, radius=0.5):
+    def global_search(self, pts, clearance=0.18, step=0.06, angle_step_deg=3.0, top=6, near=None, radius=0.5,
+                      yaw=None, yaw_span_deg=20.0):
         # 6 cm / 3 deg: 6 s on the Jetson for arena3_clean, synthetic scans <= 1.1 cm after refine (4 cm / 2 deg: 19 s)
         """Best distinct poses over the free map (or only within radius of near=(x, y)): [(score, x, y, yaw)], best first."""
         cells = self.g.free_cells(clearance, step)
@@ -75,7 +76,9 @@ class ScanMatcher:
             cells = cells[np.hypot(cells[:, 0] - near[0], cells[:, 1] - near[1]) <= radius]
             if not len(cells):
                 return []
-        yaws = np.radians(np.arange(0.0, 360.0, angle_step_deg))
+        # yaw [rad]: only headings within yaw_span_deg of it (the robot is placed facing a fixed way, user 2026-11-14)
+        yaws = (np.radians(np.arange(0.0, 360.0, angle_step_deg)) if yaw is None else
+                yaw + np.radians(np.arange(-yaw_span_deg, yaw_span_deg + 1e-9, angle_step_deg)))
         scores = np.empty((len(yaws), len(cells)), np.float32)
         for i, yaw in enumerate(yaws):
             scores[i] = self.score(np.c_[cells, np.full(len(cells), yaw)], pts)
@@ -106,12 +109,12 @@ class ScanMatcher:
             x0, y0, yaw0 = best[1:]
         return best
 
-    def localize(self, pts, clearance=0.18, ambiguity=0.92, near=None, radius=0.5):
+    def localize(self, pts, clearance=0.18, ambiguity=0.92, near=None, radius=0.5, yaw=None):
         """Global search + refinement. Returns dict(pose, score, second, second_pose, ambiguous, candidates).
         near=(x, y): only candidates within radius of it compete (the robot was placed there roughly)."""
         self.pts = pts
         # near: search only there (filtering the whole-map top candidates afterwards could drop the true pose)
-        cands = self.global_search(pts, clearance, near=near, radius=radius)
+        cands = self.global_search(pts, clearance, near=near, radius=radius, yaw=yaw)
         if near is not None:
             if not cands:
                 return {'pose': None, 'score': 0.0, 'second': 0.0, 'second_pose': None, 'ambiguous': True,

@@ -1,0 +1,169 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Map
+      Name: 1 Known map
+      Enabled: true
+      Topic:
+        Value: /drive_sim/map
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+        Depth: 1
+      Alpha: 0.65
+      Color Scheme: map
+    - Class: rviz_default_plugins/Map
+      Name: 2 Planner clearance padding
+      Enabled: true
+      Topic:
+        Value: /planning/padding
+        Reliability Policy: Reliable
+        Depth: 1
+      Alpha: 0.35
+      Color Scheme: costmap
+    - Class: rviz_default_plugins/Path
+      Name: 3 Requested straight line (reference)
+      Enabled: true
+      Topic:
+        Value: /drive_sim/direct_goal
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+        Depth: 1
+      Color: 180; 180; 180
+      Line Style: Lines
+      Line Width: 0.01
+    - Class: rviz_default_plugins/Path
+      Name: Initial plan before LiDAR replan
+      Enabled: true
+      Topic:
+        Value: /drive_sim/initial_plan
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+        Depth: 1
+      Color: 210; 110; 255
+      Alpha: 0.6
+      Line Style: Lines
+      Line Width: 0.012
+    - Class: rviz_default_plugins/Path
+      Name: 4 C++ planner issued path
+      Enabled: true
+      Topic:
+        Value: /drive_sim/planned_path
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+        Depth: 1
+      Color: 20; 220; 255
+      Line Style: Lines
+      Line Width: 0.025
+    - Class: rviz_default_plugins/Path
+      Name: 5 Actual simulated trajectory
+      Enabled: true
+      Topic:
+        Value: /drive_sim/trail
+        Reliability Policy: Reliable
+        Depth: 1
+      Color: 255; 220; 0
+      Line Style: Lines
+      Line Width: 0.02
+    - Class: rviz_default_plugins/LaserScan
+      Name: Front LiDAR (URDF)
+      Enabled: true
+      Topic:
+        Value: /lidar/front/scan
+        Reliability Policy: Best Effort
+        Depth: 5
+      Color Transformer: FlatColor
+      Color: 255; 90; 65
+      Style: Flat Squares
+      Size (m): 0.025
+      Decay Time: 0
+    - Class: rviz_default_plugins/LaserScan
+      Name: Rear LiDAR (URDF)
+      Enabled: true
+      Topic:
+        Value: /lidar/rear/scan
+        Reliability Policy: Best Effort
+        Depth: 5
+      Color Transformer: FlatColor
+      Color: 100; 170; 255
+      Style: Flat Squares
+      Size (m): 0.025
+      Decay Time: 0
+    - Class: rviz_default_plugins/LaserScan
+      Name: Merged scan
+      Enabled: false
+      Topic:
+        Value: /lidar/merged
+        Reliability Policy: Best Effort
+        Depth: 5
+      Color Transformer: FlatColor
+      Color: 255; 255; 255
+      Style: Flat Squares
+      Size (m): 0.025
+    - Class: rviz_default_plugins/PoseArray
+      Name: LiDAR unmapped obstacles to planner
+      Enabled: true
+      Topic:
+        Value: /perception/lidar/obstacle
+        Reliability Policy: Reliable
+        Depth: 5
+      Shape: Arrow (Flat)
+      Color: 0; 255; 110
+      Alpha: 1
+      Arrow Length: 0.045
+    - Class: rviz_default_plugins/RobotModel
+      Name: V307 URDF
+      Enabled: true
+      Visual Enabled: true
+      Collision Enabled: false
+      Description Source: Topic
+      Description Topic:
+        Value: /robot_description
+        Durability Policy: Transient Local
+        Reliability Policy: Reliable
+        Depth: 1
+    - Class: rviz_default_plugins/PointStamped
+      Name: Controller lookahead
+      Enabled: true
+      Topic:
+        Value: /drive_sim/lookahead
+        Reliability Policy: Reliable
+        Depth: 5
+      Color: 255; 0; 255
+      Radius: 0.045
+      History Length: 1
+    - Class: rviz_default_plugins/MarkerArray
+      Name: Simulation state and world
+      Enabled: true
+      Topic:
+        Value: /drive_sim/world_markers
+        Reliability Policy: Reliable
+        Durability Policy: Transient Local
+        Depth: 1
+  Global Options:
+    Fixed Frame: map
+    Background Color: 22; 28; 38
+    Frame Rate: 30
+  Tools:
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/SetGoal
+      Topic:
+        Value: /goal_pose
+    - Class: rviz_default_plugins/Measure
+  Views:
+    Current:
+      Class: rviz_default_plugins/TopDownOrtho
+      Name: Driving and planning
+      Target Frame: map
+      Angle: 0
+      Scale: 175
+      X: 3.0
+      Y: 2.0
+    Saved: ~
+Window Geometry:
+  Width: 1650
+  Height: 1000
+  X: 30
+  Y: 25

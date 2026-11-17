@@ -18,9 +18,12 @@ public:
   // in radians. wheel_track: left/right wheel center distance, wheelbase: front/rear axle distance [m].
   // skid_steer_factor <= 0 uses the geometric estimate 1 + (wheelbase / wheel_track)^2.
   // tracking_gain scales the Pure Pursuit turn command only (under steer compensation; not the in-place turn).
+  // Lookahead [m] at the driven speed: linear in lookahead_speeds [m/s] (increasing) -> lookahead_distances,
+  // held at the end values outside them; ControlMaster validates the table.
   void configure(
     double wheel_radius, double wheel_track, double wheelbase, double skid_steer_factor,
-    double lookahead, double goal_tolerance, double path_spacing,
+    const std::vector<double> & lookahead_speeds, const std::vector<double> & lookahead_distances,
+    double goal_tolerance, double path_spacing,
     double heading_tolerance = 0.5, double rotate_angular_speed = 0.6, double tracking_gain = 1.0);
   // 4WD skid steer: chassis yaw rate = wheel_radius * (wr - wl) / effective_separation().
   double effective_separation() const {return wheel_separation_;}
@@ -33,9 +36,55 @@ public:
   // overlaps itself (U-turn) never switches branches; re-searched globally only when that is lookahead away.
   void set_odom(const nav_msgs::msg::Odometry & odom);
   void clear_odom();
-  // Subdivides planner segments to at most path_spacing without changing path geometry.
-  void set_target(const nav_msgs::msg::Path & path, bool require_goal_heading = false);
+  // Subdivides planner segments to at most path_spacing without changing path geometry. speed_limit: per path
+  // pose [m/s], interpolated onto the subdivision; empty = no limit.
+  void set_target(
+    const nav_msgs::msg::Path & path, bool require_goal_heading = false, const std::vector<double> & speed_limit = {});
   void clear_target();
+  // Speed limit at my node [m/s] (infinity without a profile).
+  double speed_limit() const;
+  // Per task (TaskCommand.goal_tolerance / tolerance_rad of a NAVIGATE): arrival distance [m] and the in-place
+  // alignment tolerance [rad] at the start of the path and at the goal heading; 0 = the configured ones. A finer
+  // alignment turns until within half of it.
+  void set_task_tolerances(double goal_tolerance, double heading_tolerance);
+  void set_goal_rotate_angular_speed(double speed, double min_speed = 0.0)
+  {goal_rotate_angular_speed_ = speed; goal_rotate_min_speed_ = min_speed;}
+  void set_task_tracking_reference(double reference_x, double distance)
+  {tracking_reference_x_ = reference_x; task_lookahead_ = distance;}
+  void set_continuous_tracking(bool enabled) {continuous_tracking_ = enabled;}
+  void set_camera_distance_mode(bool enabled) {camera_distance_mode_ = enabled;}
+  // Lateral error integral on top of Pure Pursuit: curvature -= integral, integral += gain * offset * distance driven
+  // (gain [1/m^3], 0 = off; |integral| <= limit [1/m]; dt [s] = period of compute_command). A pose heading that reads
+  // b off the travel direction leaves Pure Pursuit lookahead * tan(b) beside the path for good (tour bags 2026-11-11:
+  // 2-3 deg, +0.9 cm left on every straight); the integral takes that out whatever the cause. Not in a box dock
+  // (front reference) or camera distance mode. Kept from path to path while driving on (the offset comes from the pose,
+  // not the path); back to 0 with every turn on the spot (it differs with the direction driven).
+  void set_lateral_integral(double gain, double limit, double dt)
+  {integral_gain_ = gain; integral_limit_ = limit; integral_dt_ = dt; integral_ = 0.0;}
+  double lateral_integral() const {return integral_;}
+  // Heading offset [rad] added to the pose yaw wherever Pure Pursuit steers toward the lookahead point (not at the goal
+  // heading alignment, a box dock or camera distance mode): the robot travels this far left of where the pose says it
+  // points. Tour bags 2026-11-11 (14 laps): yaw - travel direction = -3.2 deg median, the same over 4.5 h -> +3 deg.
+  void set_heading_offset(double offset) {heading_offset_ = offset;}
+  // Scale on tracking_gain by the bearing of the lookahead point off the (corrected) heading: linear between
+  // errors [rad] (increasing) -> scales, held at the end values; one entry = a constant. Lower at small bearings: less
+  // reaction to the 0.3-1.5 deg steps of the pose yaw; the offset beside the path Pure Pursuit settles at is the same
+  // at any scale (the command is zero there).
+  void set_gain_schedule(const std::vector<double> & errors, const std::vector<double> & scales)
+  {gain_errors_ = errors; gain_scales_ = scales;}
+  // Task speed |target_v| <= speed (dock, camera, reverse, correction): gain replaces tracking_gain. speed 0 = off.
+  void set_slow_tracking_gain(double speed, double gain) {slow_speed_ = speed; slow_gain_ = gain;}
+  // Box dock (task lookahead) where the planning speed profile is <= speed: no lateral chase, only the heading of the
+  // path's last segment (the face normal), omega = gain * heading error. speed 0 = off.
+  void set_dock_straight(double speed, double gain) {dock_straight_speed_ = speed; dock_heading_gain_ = gain;}
+  double gain_scale(double bearing) const;
+  // Robot beside the path at my node [m]: + = left of the path direction. nullopt without a path of two points or odom.
+  std::optional<double> lateral_offset() const;
+  // The Pure Pursuit target now (map frame of the path; past the end on the extended last segment), for RViz.
+  std::optional<geometry_msgs::msg::Point> lookahead_point() const;
+  // Driven linear speed [m/s] (wheel feedback) that picks the lookahead.
+  void set_speed(double speed) {speed_ = speed;}
+  double lookahead() const;
   // Resampled path being tracked (empty when there is no target).
   const nav_msgs::msg::Path & target_path() const;
   // False while turning in place: the lookahead target is more than heading_tolerance off (hysteresis:
@@ -54,23 +103,42 @@ private:
   nav_msgs::msg::Odometry odom_;
   nav_msgs::msg::Path path_;
   std::vector<double> arc_;  // cumulative length along path_ [m]
+  std::vector<double> speed_limit_;  // per path_ pose [m/s], empty = none
   std::size_t node_ = 0;
   mutable bool rotating_ = false;  // hysteresis state of the in-place turn, per travel direction
   mutable int rotating_direction_ = 0;
+  mutable int rotate_sign_ = 0;    // direction of the current in-place turn: kept unless near the target heading
+  double task_goal_tolerance_ = 0.0, task_heading_tolerance_ = 0.0;
+  double goal_tol() const {return task_goal_tolerance_ > 0.0 ? task_goal_tolerance_ : goal_tolerance_;}
   void update_node();
-  std::size_t target_index() const;
+  double projected_arc() const;
+  geometry_msgs::msg::Point target_point() const;
   bool needs_rotation(double target_v) const;
   bool at_goal() const;
-  std::optional<double> get_curvature(double target_v) const;
+  std::optional<double> get_curvature(double target_v, double * bearing = nullptr) const;
+  // Pose yaw the tracking steers by: + heading_offset_ outside a box dock and camera distance mode.
+  double tracking_yaw() const;
   std::optional<double> heading_error(double target_v) const;
   std::array<double, 2> wheel_delta(double omega) const;
   bool require_goal_heading_ = false;
+  bool continuous_tracking_ = false;
   double heading_tolerance_ = 0.5;
   double rotate_angular_speed_ = 0.6;
+  double goal_rotate_angular_speed_ = 0.0;  // [rad/s] in-place turn at the goal (0 = rotate_angular_speed_)
+  double goal_rotate_min_speed_ = 0.0;      // [rad/s] its slowest, near the heading (0 = the general floor)
   double tracking_gain_ = 1.0;
+  double slow_speed_ = 0.0, slow_gain_ = 1.0;
+  double dock_straight_speed_ = 0.0, dock_heading_gain_ = 1.0;
   double wheel_radius_ = 0.0;
   double wheel_separation_ = 0.0;  // effective (skid steer) separation
-  double lookahead_ = 0.0;
+  std::vector<double> lookahead_speeds_, lookahead_distances_;
+  double speed_ = 0.0;
+  double tracking_reference_x_ = 0.0, task_lookahead_ = 0.0;
+  bool camera_distance_mode_ = false;
+  double integral_gain_ = 0.0, integral_limit_ = 0.0, integral_dt_ = 0.0;
+  mutable double integral_ = 0.0;  // [1/m] curvature taken off the Pure Pursuit one
+  double heading_offset_ = 0.0;
+  std::vector<double> gain_errors_, gain_scales_;
   double goal_tolerance_ = 0.0;
   double path_spacing_ = 0.0;
   bool have_odom_ = false;

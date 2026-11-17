@@ -1,0 +1,10 @@
+free_thresh: 0.196
+image: sit1.pgm
+mode: trinary
+negate: 0
+occupied_thresh: 0.65
+origin:
+- -0.929027
+- -0.271365
+- 0
+resolution: 0.02

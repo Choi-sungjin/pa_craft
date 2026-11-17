@@ -30,6 +30,10 @@ public:
   // Store positions after is_valid_target() succeeds; no validation or conversion here.
   void set_target(const ArmIkJointValues & joint_positions);
   void clear_target();
+  // No target, but keep the motors at this measured pose until the next target (instead of commanding the
+  // live measurement every cycle, which lets a loaded joint creep: 2026-11-16 the shoulder sank 0.49 -> 1.23 rad
+  // during a 7 s gripper open).
+  void hold(const ArmJoints & current_pose);
   // Four rotational motor positions in; four rotational motor commands out. LM/gripper are separate.
   ArmIkJointValues compute_command(const ArmJoints & current_pose) const;
   // Invert measured motor radians into model joint radians, independent of the target.
@@ -38,15 +42,23 @@ public:
   // All four motor feedback angles within tolerance of the stored target.
   bool is_target_reached(const ArmJoints & current_pose) const;
 
+  // Arrival tolerance of the current task [motor rad]: max(configured, tolerance); 0 = configured.
+  void set_task_tolerance(double tolerance)
+  {
+    tolerance_ = tolerance > default_tolerance_ ? tolerance : default_tolerance_;
+  }
+
 private:
   ArmIkJointValues min_angle_{};
   ArmIkJointValues max_angle_{};
   double tolerance_ = 0.0;
+  double default_tolerance_ = 0.0;
   ArmIkJointNames ik_joint_names_{};
   ArmIkJointValues motor_directions_{};
   ArmIkJointValues motor_offsets_{};
   ArmIkJointValues target_joint_positions_{};
   bool has_target_ = false;
+  std::optional<ArmIkJointValues> hold_;
 };
 
 }  // namespace craft_control
