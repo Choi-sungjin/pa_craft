@@ -61,18 +61,36 @@ bash tools/build_workspace.sh -Dncnn_DIR="$HOME/.local/lib/cmake/ncnn"
 
 ## 실행
 
-다음 명령은 실제 장치를 사용하는 실행 명령입니다. 장치 연결과 작업 공간을 확인한 사용자가 직접 실행해 주십시오.
+현재 로봇 Jetson의 `.bashrc`에 등록된 명령을 사용합니다. 터미널 네 개를 열고 아래 순서대로 실행해 주십시오.
+
+**터미널 1: 미션 실행 환경**
 
 ```bash
-cd ~/craft
-source install/setup.bash
-ros2 launch craft_bringup craft.launch.py
+mrun
+```
+
+**터미널 2: 카메라**
+
+```bash
+camera
+```
+
+**터미널 3: TUI**
+
+```bash
+tui
+```
+
+**터미널 4: 미션 시작**
+
+터미널 1~3의 준비가 끝난 뒤 실행해 주십시오.
+
+```bash
+start
 ```
 | `craft_voice` | 상태·인지 결과를 바탕으로 음성 안내와 질문 응답을 제공합니다. [실행 안내](src/craft_voice/README.md) |
 
-미션 실행은 launch에 `mission:=true`를 추가합니다. `config/mission.yaml`의 `drive_only` 등 미션 설정을 먼저 확인해 주십시오. 어퍼캠 박스 관측 브리지와 robot_state_publisher도 통합 launch에서 실행합니다. 기존 별도 실행 프로세스와 중복 실행하지 않도록 해 주십시오.
-
-대시보드는 `ros2 run craft_bringup craft_dashboard.sh`로 실행합니다. `group:=perception|planning|control|infra`로 launch 그룹을 나누어 실행할 수도 있습니다.
+`mrun`은 미션 노드를 포함한 실행 환경을 준비하고, `start`는 미션 시작 명령을 전달합니다. 실행 전 [미션 설정](src/craft_planning/config/mission.yaml)의 `drive_only` 등을 확인해 주십시오.
 
 자세한 설정과 실행 절차는 [계획 패키지](src/craft_planning/README.md), [인지 패키지](src/craft_perception/README.md), [제어 패키지](src/craft_control/README.md), [LiDAR 패키지](src/lidar_processor/README.md), [펌웨어](firmware/README.md)를 참조해 주십시오. 집기의 실물 확인 범위와 미완료 항목은 [인수인계](demo/puck_pick/HANDOFF_20261115.md)에 기록되어 있습니다.
 
