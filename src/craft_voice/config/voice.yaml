@@ -1,0 +1,120 @@
+# craft_voice voice_node. Types are fixed by the node: keep the decimal point on floats (10.0, not 10).
+# The OpenAI key is read from the OPENAI_API_KEY environment variable only; never put it in this file.
+voice_node:
+  ros__parameters:
+    # ---- camera -------------------------------------------------------------------------------
+    camera: d435                  # d435 | c310 (craft_sensors shared memory, same machine) | topic | none
+    image_topic: /camera/image_raw   # camera: topic (stock TurtleBot camera, bag, another machine)
+    image_transport: raw          # raw (sensor_msgs/Image) | compressed (sensor_msgs/CompressedImage)
+    camera_description: 로봇 앞쪽 D435 카메라   # told to GPT so it knows where the picture comes from
+    use_image: true
+    frame_max_age_s: 2.0          # older frames are not sent
+    # input: GPT sees the frame the planning state machine's vision input came from (YOLO detections and
+    #        puck observations carry that frame's camera stamp); at a state change, the one it had then.
+    #        Falls back to the newest frame when perception is not running or the stamp matches nothing.
+    # latest: always the newest camera frame.
+    image_source: input
+    input_frame_interval_s: 0.2   # copy an input frame at most this often (at least frame_max_age_s / 63: 64 copies kept)
+    image_max_side: 512           # longer side after resizing, before JPEG
+    jpeg_quality: 80
+
+    # ---- state machine ------------------------------------------------------------------------
+    planning_state_topic: /planning/state
+    planning_diagnostics_topic: /planning/diagnostics
+    control_status_topic: /control/status
+    # comma separated std_msgs/String topics, context only (box_phase: lidar_dock, camera_dock, ...)
+    context_topics: /perception/localization/state,/planning/box_phase,/planning/box_status
+    # std_msgs/String topics that are events (last command, mission, box to approach): kept 30 min, told with their age
+    event_topics: /planning/command,/planning/mission,/planning/approach_box,/planning/approach_box_near
+    flag_topics: /planning/hold,/control/gripper_grasped     # std_msgs/Bool, context only
+    # What perception sees, told to GPT next to the camera picture ("" = do not subscribe)
+    odom_topic: /perception/state/odom                         # moving / turning / stopped
+    objects_topic: /perception/vision/d435/detections          # YOLO labels (knob, signs)
+    pucks_topic: /perception/vision/d435/puck_observations     # pucks: standing/lying, distance
+    tags_topic: /perception/vision/d435/apriltag               # AprilTag ids
+    # Labels that are announced when /planning/state changes to them (Fault is never rate limited).
+    # All labels: Idle, Ready, Run.AwaitRequest, Run.PrepareTask, Run.Compute, Run.Execute,
+    #             Run.Complete, Run.Stopping, Fault
+    announce_states: Ready,Run.Execute,Run.Complete,Run.Stopping,Fault
+    # Spoken names of planning step ids; '*' copies that part of the id (load_S3 -> 시작 박스 3 퍽 싣기).
+    # Dice mission step ids (agreed 2026-11-03, craft_voice/mission.py MISSION_STEP_IDS), same as missions.yaml.
+    step_names: "read_barcode:바코드 읽기,observe_signal:신호등 관측,count_sort:횟수 계산과 정렬,load_S*:시작 박스 * 퍽 싣기,allocate:장소별 퍽 배정,place_L*:L* 주사위 눈 놓기,verify_L*:L* 다시 확인,return_home:출발 구역으로 복귀"
+    # Background for GPT so narration uses the mission's words ("" = none). Facts still come only from topics.
+    mission_context: "주사위 기억 미션(경기장 4.5 x 6.4 m, 벽으로 나뉜 미로): 출발 구역에서 시작해 바코드(P2-01~P2-04)를 읽어 오름차순/내림차순을 정하고, 신호등이 1초씩 12번 깜빡이는 빨강·노랑·초록 순서를 기억한 뒤 색별 횟수를 센다. 시작 박스 6곳에서 퍽 12개를 12칸 캐러셀에 싣고, 횟수 순서대로 L1·L2·L3(AprilTag 12·13·14)에 퍽을 주사위 눈 모양으로 내려놓는다. 놓은 자리를 다시 확인하고 출발 구역으로 돌아와 3초 멈추면 끝난다."
+    state_cooldown_s: 10.0        # the same label is announced at most once per cooldown
+    state_mode: gpt               # gpt: GPT phrases it (with the image) | template: fixed sentence, faster
+    fault_reason_wait_s: 1.2      # wait this long for the diagnostics fault reason before speaking
+
+    # ---- when to talk (when the action changes, and periodically while working) -------------------
+    narrate_period_s: 20.0        # while working: "what I am doing + what I see" every N s, 0 = off
+    narrate_idle_period_s: 0.0    # the same while Idle / Ready / stopped, 0 = off
+    min_interval_s: 5.0           # quiet time needed before a periodic scene
+    max_gpt_calls_per_min: 12     # cost guard; over it state changes fall back to templates
+    repeat_window_s: 30.0
+    interrupt_on_fault: true
+
+    # ---- GPT (OpenAI Responses API) -----------------------------------------------------------
+    language: ko
+    persona: ""                   # extra style instructions, e.g. "반말로 친구처럼 말해."
+    max_chars: 150
+    # Fastest first; the next one is used if a model is unknown to this key or takes no images.
+    # Compare on your network: python -m craft_voice.bench --compare "gpt-5.4-mini,gpt-6-luna,gpt-5.5"
+    model: "gpt-5.4-mini,gpt-6-luna,gpt-5.5"
+    reasoning_effort: none        # none -> minimal -> low -> unset if a model rejects it; reasoning adds seconds
+    image_detail: low             # low | high | auto | original
+    max_output_tokens: 400        # includes reasoning tokens; too small gives an empty answer
+    request_timeout_s: 15.0       # GPT and normal speech requests (one retry)
+    fault_tts_timeout_s: 4.0      # fault sentence speech: no retry (hard stop +1 s), then fallback_tts_command
+    gpt_state_deadline_s: 6.0     # state change: fixed template if GPT has not answered by then
+    gpt_narrate_deadline_s: 10.0  # narration / describe / status: fixed words after this
+    gpt_ask_deadline_s: 15.0      # question: "지금은 답하기 어려워요" + the situation after this
+    tts_deadline_s: 8.0           # other speech: fallback_tts_command if OpenAI has not answered by then
+    api_base_url: ""              # "" = api.openai.com; any OpenAI-compatible endpoint otherwise
+
+    # ---- speech ---------------------------------------------------------------------------------
+    # gpt-realtime-* / gpt-live-*: the Realtime API speaks (WebSocket, sound while it arrives).
+    # Anything else (gpt-4o-mini-tts, tts-1) goes through audio/speech; those were announced to shut down
+    # on 2027-01-06 (openai SDK 3.42.1).
+    tts_model: gpt-realtime-2.1
+    tts_voice: marin              # Realtime voices: marin cedar alloy ash ballad coral echo sage shimmer verse
+    tts_instructions: 밝고 또렷한 한국어 안내 로봇 목소리로, 조금 빠르게 말해.
+    tts_speed: 1.0                # audio/speech models only (tts-1); gpt-4o-mini-tts and Realtime ignore it
+    tts_sample_rate: 24000        # raw PCM rate of the speech endpoint (16-bit mono)
+    player_command: aplay -q {file}          # or: paplay {file}  /  aplay -q -D plughw:1,0 {file}
+    tts_stream: true              # play OpenAI speech while it arrives (first audio ~0.6 s sooner, measured)
+    # "" = derived from player_command with its device options (aplay -> -t raw ..., paplay -> --raw ...);
+    # other players speak whole WAVs. Explicit example: aplay -q -t raw -f S16_LE -r {rate} -c 1 -
+    stream_player_command: ""
+    fallback_tts_command: ""      # offline speech when OpenAI is unreachable, e.g. espeak-ng -v ko --stdout -- {text}
+
+    # ---- persona, reactions, memory -----------------------------------------------------------------
+    style: polite                 # polite | cute (short friendly 반말: "준비 끝! 출발 신호 기다리는 중이야.")
+    phrases_file: ""              # JSON {key: sentence} replacing single fixed sentences (keys: robot_state.PHRASES)
+    # Things that happen without a state change are said at once, never through GPT:
+    # replan = "path still blocked; replanning", blocked = "path blocked; waiting before replanning", clear
+    announce_situations: replan,blocked
+    notice: true                  # remarks of its own: a long compute, a path blocked for long, lost state, ...
+    # Recordings played instead of a sentence, "event=/path/file.wav, ...". Events: replan, blocked,
+    # step_done (a step ended, more queued), run_done (nothing queued behind it), done (either), ready,
+    # wake (answer to the name alone), ack (the name with a question), idle (nothing to do for 30 min)
+    # and any notice key.
+    reactions: ""
+    speech_cache_dir: ~/.cache/craft_voice/speech   # fixed sentences are synthesized once and kept ("" = off)
+
+    # ---- microphone: "크래프트" -> what it is doing; "크래프트, <question>" -> an answer ----------------
+    listen: false                 # true needs a microphone and the OpenAI key (speech-to-text)
+    mic_command: pw-record --rate 16000 --channels 1 --format s16 -   # raw 16 kHz mono PCM on stdout; or:
+                                  # arecord -q -t raw -f S16_LE -r 16000 -c 1 -   /   pw-record --target <source> ...
+    wake_words: 크래프트           # comma separated; matched by sound ("크라프트", "크레프트", "craft" count)
+    wake_tolerance: 2             # how many sound letters may differ
+    wake_mode: think              # the name alone: think (GPT, with memory) | template (fixed words, at once)
+    wake_ack: true                # a short "응!" at once while the answer is being made
+    gpt_voice_deadline_s: 5.0     # fixed words if GPT has not answered a spoken question by then
+    follow_up_s: 6.0              # after an answer the next sentence needs no name (0 = always need the name)
+    listen_tail_s: 0.6            # ignore the microphone this long after the robot stopped speaking
+    stt_model: "gpt-transcribe,gpt-4o-mini-transcribe,whisper-1"   # fastest first
+    stt_language: ko
+    stt_prompt: ""
+    max_stt_per_min: 20           # cost guard: at most this many utterances a minute go to speech-to-text
+    vad_min_rms: 150.0            # quieter than this is never speech (16-bit scale)
+    vad_loud_ratio: 2.5           # speech = this much louder than the noise floor (driving noise becomes the floor)

@@ -66,6 +66,7 @@ cd ~/craft
 source install/setup.bash
 ros2 launch craft_bringup craft.launch.py
 ```
+| `craft_voice` | 상태·인지 결과를 바탕으로 음성 안내와 질문 응답을 제공합니다. [실행 안내](src/craft_voice/README.md) |
 
 미션 실행은 launch에 `mission:=true`를 추가합니다. `config/mission.yaml`의 `drive_only` 등 미션 설정을 먼저 확인해 주십시오. 어퍼캠 박스 관측 브리지와 robot_state_publisher도 통합 launch에서 실행합니다. 기존 별도 실행 프로세스와 중복 실행하지 않도록 해 주십시오.
 
