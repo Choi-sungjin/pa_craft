@@ -61,24 +61,33 @@ bash tools/build_workspace.sh -Dncnn_DIR="$HOME/.local/lib/cmake/ncnn"
 
 ## 실행
 
-현재 로봇 Jetson의 `.bashrc`에 등록된 명령을 사용합니다. 터미널 네 개를 열고 아래 순서대로 실행해 주십시오.
+별도 alias 등록 없이 실행할 수 있는 명령입니다. 터미널 네 개를 열고 아래 순서대로 실행해 주십시오. 지도 경로는 현재 로봇 Jetson 기준입니다.
 
 **터미널 1: 미션 실행 환경**
 
 ```bash
-mrun
+cd ~/craft
+source /opt/ros/lyrical/setup.bash
+source install/setup.bash
+RCUTILS_COLORIZED_OUTPUT=1 ros2 launch craft_bringup craft.launch.py \
+  mission:=true arm:=true localization:=amcl \
+  map_file:=/home/craft/maps/brief_arena1cm.yaml \
+  slam_map:=/home/craft/maps/noboxes_legend_opt_arena
 ```
 
 **터미널 2: 카메라**
 
 ```bash
-camera
+bash ~/craft/demo/corner/run_uppercam_bridge.sh
 ```
 
 **터미널 3: TUI**
 
 ```bash
-tui
+cd ~/craft
+source /opt/ros/lyrical/setup.bash
+source install/setup.bash
+ros2 run craft_bringup craft_tui.py
 ```
 
 **터미널 4: 미션 시작**
@@ -86,11 +95,15 @@ tui
 터미널 1~3의 준비가 끝난 뒤 실행해 주십시오.
 
 ```bash
-start
+cd ~/craft
+source /opt/ros/lyrical/setup.bash
+source install/setup.bash
+bash tools/ensure_uppercam.sh && \
+  ros2 topic pub -t 6 -r 2 /mission/command std_msgs/msg/String "{data: START}"
 ```
 | `craft_voice` | 상태·인지 결과를 바탕으로 음성 안내와 질문 응답을 제공합니다. [실행 안내](src/craft_voice/README.md) |
 
-`mrun`은 미션 노드를 포함한 실행 환경을 준비하고, `start`는 미션 시작 명령을 전달합니다. 실행 전 [미션 설정](src/craft_planning/config/mission.yaml)의 `drive_only` 등을 확인해 주십시오.
+터미널 1은 미션 노드를 포함한 실행 환경을 준비하고, 터미널 4는 미션 시작 명령을 전달합니다. 실행 전 [미션 설정](src/craft_planning/config/mission.yaml)의 `drive_only` 등을 확인해 주십시오.
 
 자세한 설정과 실행 절차는 [계획 패키지](src/craft_planning/README.md), [인지 패키지](src/craft_perception/README.md), [제어 패키지](src/craft_control/README.md), [LiDAR 패키지](src/lidar_processor/README.md), [펌웨어](firmware/README.md)를 참조해 주십시오. 집기의 실물 확인 범위와 미완료 항목은 [인수인계](demo/puck_pick/HANDOFF_20261115.md)에 기록되어 있습니다.
 
