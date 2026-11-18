@@ -4,6 +4,7 @@
 - 판정은 실제 형상(visual 메시)을 1 mm 복셀로 채워서 한다. 볼록 껍질은 ㄷ자 힌지 브라켓 안쪽을 메워
   모터와 겹친 것으로 잘못 나와서 쓰지 않는다.
 - 관절 하나씩, 나머지 관절은 0에 두고 1° 단위로 돌린다 (조합 자세는 보지 않음).
+- 관절 축에서 HUB_R(14 mm) 안의 부모-자식 겹침은 뺀다 (혼·혼 볼트는 자식과 같이 돌지만 메시는 모터 쪽).
 - 두 링크의 겹친 복셀 수가 0자세 때보다 MARGIN개 넘게 늘면 충돌 (0자세의 접촉·체결부는 허용).
   충돌 직전 각도까지를 한계로 둔다 (URDF 한계보다 좁힐 때만).
 - 몸체(base_link 등)와의 충돌은 보지 않는다. 팔 링크끼리만 본다.
@@ -22,6 +23,7 @@ ARM = ['shoulder_link', 'elbow_link', 'wrist_pitch_link', 'tool_roll_link', 'jaw
 JOINTS = ['elbow', 'wrist_pitch']
 VOXEL = 0.001          # 1 mm
 MARGIN = 5             # 0자세보다 이만큼(복셀 개수) 넘게 더 겹치면 충돌
+HUB_R = 0.014          # 관절 축에서 이 반지름 안(혼·혼 볼트)의 부모-자식 겹침은 뺀다: 혼은 자식과 같이 도는데 메시는 모터(부모) 쪽
 STEP = np.radians(1.0)
 
 
@@ -114,6 +116,9 @@ def load(urdf):
         joints[j.find('child').get('link')] = dict(
             name=j.get('name'), parent=j.find('parent').get('link'), type=j.get('type'),
             T=tf(vec(o, 'xyz'), vec(o, 'rpy')), axis=vec(j.find('axis'), 'xyz', '1 0 0'), limit=j.find('limit'))
+    for child, j in joints.items():
+        if j['parent'] in ARM and child in ARM and j['type'] in ('revolute', 'continuous'):
+            HUBS[(j['parent'], child)] = j['axis'] / np.linalg.norm(j['axis'])
     vox = {}
     for link in root.findall('link'):
         name = link.get('name')
@@ -147,14 +152,26 @@ def fk(joints, q):
     return out
 
 
+HUBS = {}   # (부모, 자식): 자식 좌표의 관절 축 (load에서 채움)
+
+
 def overlaps(vox, T):
-    """링크 쌍마다 겹친 복셀 수"""
+    """링크 쌍마다 겹친 복셀 수 (부모-자식 쌍은 관절 축 둘레 HUB_R 안을 뺌)"""
     res = {}
     for i, a in enumerate(ARM):
         for b in ARM[i + 1:]:
             M = np.linalg.inv(T[b]) @ T[a]
             pts = vox[a].centers @ M[:3, :3].T + M[:3, 3]
-            res[(a, b)] = int(vox[b].contains(pts).sum())
+            hit = vox[b].contains(pts)
+            for key in ((a, b), (b, a)):
+                if key in HUBS:        # 축은 자식(key[1]) 좌표, 원점 지남
+                    child = key[1]
+                    Mc = np.linalg.inv(T[child]) @ T[b]
+                    q = pts @ Mc[:3, :3].T + Mc[:3, 3]
+                    ax = HUBS[key]
+                    r = np.linalg.norm(q - np.outer(q @ ax, ax), axis=1)
+                    hit &= r > HUB_R
+            res[(a, b)] = int(hit.sum())
     return res
 
 

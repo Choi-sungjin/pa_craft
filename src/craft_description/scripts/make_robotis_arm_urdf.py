@@ -39,15 +39,21 @@ OMX = {  # OMX URDF 그대로 (원점: 그 링크의 관절)
                        I=(3.0654178e-05, -1.2764155e-06, -2.6874417e-07, 2.4230292e-04, 1.1559550e-08, 2.5155057e-04)),
 }
 JOINT_XYZ = {'elbow': '-0.024 0 0.128', 'wrist_pitch': '-0.124 0 0'}
+ELBOW_UPRIGHT = True  # 엘보 모터를 세워 L1 프레임 위에 'i'자로 얹음 (모터 바닥 = 프레임 윗면, 혼 축 = 엘보)
+# L2 엘보 힌지 브라켓(OMX link4 x 5~25 mm 구간)을 이만큼 늘림 [m]. 세운 엘보 모터(모서리 혼 축에서 ~41 mm)를 피하려고
+L2_HINGE_EXTRA = float(__import__('os').environ.get('L2_HINGE_EXTRA', '0.0'))
+WRIST_PITCH_REVERSED = False # wrist_pitch + 방향을 반대로 (축 부호 뒤집기)
+L1_CRADLE_CUT = 0.1005      # L1 프레임에서 이 높이(OMX link3 z) 위 받침을 지움. 0이면 안 지움
+WRIST_HINGE = True          # 손목 브라켓을 OMX 손목 브라켓 대신 L2 엘보 힌지(OMX link4 힌지)와 같은 부품으로
 FLIP_ELBOW = False  # 엘보 모터만 pitch 180° 뒤집기 (L1 24 mm 꺾임과 안 맞아 끔, 대신 FLIP_UPPER)
 # 구간마다 링크(프레임)·브라켓 경계 [m], 관절 원점 방향 좌표 s (0 = 부모 관절, 끝 = 이 관절).
 # box_reach가 <urdf 이름>.segments.json을 읽어 링크 길이·브라켓 길이 슬라이더를 따로 띄운다.
 SEGMENTS = {
-    'elbow': ('L1 어깨-팔꿈치', [(0.0276, 'bracket', '어깨 힌지 브라켓'), (0.1200, 'link', 'LINK FRAME(LONG)'),
+    'elbow': ('L1 어깨-팔꿈치', [(0.0276, 'bracket', '어깨 힌지 브라켓'), (0.1005, 'link', 'LINK FRAME(LONG) 기둥'),
                                   (None, 'bracket', '엘보 모터 자리')]),
     'wrist_pitch': ('L2 팔꿈치-손목', [(0.0273, 'bracket', '엘보 힌지 브라켓'), (0.0950, 'link', 'LINK FRAME(SHORT)'),
                                      (None, 'bracket', '손목 모터 자리')]),
-    'tool_roll': ('L3 손목-비틀기', [(0.0280, 'bracket', 'OMX 손목 브라켓'), (None, 'link', 'tool_roll 모터 오프셋')]),
+    'tool_roll': ('L3 손목-비틀기', [(0.0285 if WRIST_HINGE else 0.0280, 'bracket', '엘보 힌지(손목)' if WRIST_HINGE else 'OMX 손목 브라켓'), (None, 'link', 'tool_roll 모터 오프셋')]),
     'tcp_joint': ('L4 비틀기-TCP', [(0.0490, 'bracket', 'roll-집게 연결 브라켓'), (None, 'link', 'OMX 집게')]),
 }
 FLIP_UPPER = True   # 어깨 관절 위쪽 전체를 어깨 수직축 기준 180° 돌림: 어깨 모터·축·0점·한계는 그대로, 앞팔이 앞(+x)
@@ -258,6 +264,8 @@ def write_segments(text):
         L = float(np.linalg.norm(list(map(float, xyz.split()))))
         knots, kinds, names = [0.0], [], []
         for end, kind, name in parts:
+            if joint == 'wrist_pitch' and end is not None:   # 늘인 엘보 힌지만큼 뒤 경계가 밀림
+                end += L2_HINGE_EXTRA
             knots.append(L if end is None else end)
             kinds.append(kind)
             names.append(name)
@@ -266,6 +274,14 @@ def write_segments(text):
         print(f'{label}: 링크 {lk * 1000:.1f} + 브라켓 {(L - lk) * 1000:.1f} = {L * 1000:.1f} mm')
     f = OUT.with_suffix('.segments.json')
     f.write_text(json.dumps(out, ensure_ascii=False, indent=1))
+
+
+def stretch_x(tri, a, b, extra):
+    """x가 a~b인 구간을 extra만큼 늘이고, b 너머는 extra만큼 민다 (힌지 브라켓 늘이기)."""
+    x = tri[..., 0]
+    out = tri.copy()
+    out[..., 0] = np.where(x >= b, x + extra, np.where(x > a, a + (x - a) * (b - a + extra) / (b - a), x))
+    return out
 
 
 def rot_z180(com, I):
@@ -356,9 +372,19 @@ def main(omx_dir):
     rail_kg = solid(rail, OMX_RAIL_KG_M3)[0]
     bracket_kg = OMX_LINK5_KG - XM430_KG - rail_kg
     vol = solid(bracket, 1.0)[0]
-    b_kg, b_com, b_I = solid(bracket, bracket_kg / vol)
-    print(f'OMX 손목 브라켓 {b_kg * 1000:.1f} g = link5 {OMX_LINK5_KG * 1000:.1f} - XM430 {XM430_KG * 1000:.0f} '
-          f'- 레일 {rail_kg * 1000:.1f} (부피 {vol * 1e6:.2f} cm3)')
+    density = bracket_kg / vol
+    if WRIST_HINGE:
+        # L2 엘보 힌지(OMX link4: 옆판 2장 + 힌지 블록, x -20~28.5 mm)를 손목에 그대로 쓴다. 밀도는 OMX 손목 브라켓과 같게
+        l4 = read_stl(Path(omx_dir) / 'link4.stl') * 1e-3
+        c4 = components(l4)
+        # 힌지 블록은 메시에서 프레임과 한 덩어리라 삼각형 중심 x < 27.9 mm(프레임 시작 27.3, 블록 끝 28.5)로 자른다
+        motor = max(np.unique(c4), key=lambda k: (c4 == k).sum() if l4[c4 == k].reshape(-1, 3)[:, 0].min() > 0.08 else 0)
+        keep = (c4 != motor) & (l4.mean(1)[:, 0] < 0.0279)
+        bracket = l4[keep] * np.array([-1, -1, 1])
+        motor_face = 0.0285
+    b_kg, b_com, b_I = solid(bracket, density)
+    print(f"손목 브라켓({'엘보 힌지' if WRIST_HINGE else 'OMX 손목 브라켓'}) {b_kg * 1000:.1f} g "
+          f"(밀도 {density / 1000:.2f} g/cm3 = OMX link5 {OMX_LINK5_KG * 1000:.1f} - XM430 - 레일 {rail_kg * 1000:.1f}, 끝면 x {motor_face * 1000:.1f} mm)")
 
     link = 'wrist_pitch_link'
     pat = re.compile(rf'(<link name="{link}">\s*)(<inertial>.*?</inertial>)', re.S)
@@ -468,16 +494,75 @@ def main(omx_dir):
     # 팔 링크 → OMX
     for link, s in OMX.items():
         tri = read_stl(Path(omx_dir) / f"{s['mesh']}.stl") * 1e-3
+        if link == 'elbow_link' and L2_HINGE_EXTRA > 0:
+            tri = stretch_x(tri, 0.005, 0.025, L2_HINGE_EXTRA)
         for kind in ('visual', 'collision'):
             write_stl(PKG / f'meshes/{kind}/{SUB}/{link}.stl', tri)
         com, I = rot_z180(s['com'], s['I'])
+        if link == 'elbow_link' and L2_HINGE_EXTRA > 0:   # 힌지 너머(프레임·손목 모터)가 밀린 만큼 무게중심 이동 (질량은 그대로)
+            com = (com[0] - L2_HINGE_EXTRA * 0.85, com[1], com[2])
         new = (f'<link name="{link}">\n    {inertial(s["mass"], com, I)}\n'
                f'    <visual><origin xyz="0 0 0" rpy="0 0 3.14159265"/><geometry><mesh filename="package://craft_description/meshes/visual/{SUB}/{link}.stl"/></geometry>'
                f'<material name="robotis_frame_mat"><color rgba="0.75 0.75 0.78 1"/></material></visual>\n'
                f'    <collision><origin xyz="0 0 0" rpy="0 0 3.14159265"/><geometry><mesh filename="package://craft_description/meshes/collision/{SUB}/{link}.stl"/></geometry></collision>\n  </link>')
         text = re.sub(rf'<link name="{link}">.*?</link>', lambda _: new, text, flags=re.S)
-    for joint, xyz in JOINT_XYZ.items():
+    jxyz = dict(JOINT_XYZ)
+    jxyz['wrist_pitch'] = f'{-(0.124 + L2_HINGE_EXTRA):.6g} 0 0'
+    for joint, xyz in jxyz.items():
         text = re.sub(rf'(<joint name="{joint}"[^>]*>.*?<origin xyz=")[^"]*', lambda m: m.group(1) + xyz, text, count=1, flags=re.S)
+
+    if ELBOW_UPRIGHT:
+        # OMX link3 좌표(앞팔 +x)에서: 누운 엘보 모터를 혼 축(y) 둘레로 90° 세워 긴 쪽이 아래로 가게 하고,
+        # 모터 바닥을 LINK FRAME(LONG) 윗면(z 120 mm)에, 좌우(x) 중심을 프레임 중심에 맞춘다.
+        # 엘보 관절은 세운 모터의 혼 축으로 옮긴다. 프레임 위쪽 받침(누운 모터용)은 출력품으로 바꾼다고 가정.
+        f = PKG / f'meshes/visual/{SUB}/shoulder_link.stl'
+        tri = read_stl(f)
+        comp = components(tri)
+        ks = np.unique(comp)
+        mk = max(ks, key=lambda k: (comp == k).sum())                     # 엘보 모터
+        J = np.array([0.024, 0, 0.128])
+        mot = tri[comp == mk]
+        rel = mot - J
+        up = np.stack([-rel[..., 2], rel[..., 1], rel[..., 0]], -1)      # x→z: 혼에서 먼 쪽(뒤 35 mm)이 아래로
+        rest = tri[comp != mk]
+        cradle_kg = 0.0
+        if L1_CRADLE_CUT:
+            # 프레임 위쪽 받침(z > L1_CRADLE_CUT, 누운 모터를 받치던 넓은 판)을 지우고 모터를 기둥 끝에 바로 붙인다
+            cut = rest.mean(1)[:, 2] > L1_CRADLE_CUT
+            cradle = rest[cut]
+            rest = rest[~cut]
+        frame = rest.reshape(-1, 3)
+        frame = frame[(frame[:, 2] > 0.06)]                                 # 프레임 위쪽 (어깨 힌지 제외)
+        top = frame[:, 2].max() if L1_CRADLE_CUT else 0.120
+        fx = 0.5 * (frame[:, 0].min() + frame[:, 0].max())
+        mp = up.reshape(-1, 3)
+        J2 = np.array([fx - 0.5 * (mp[:, 0].min() + mp[:, 0].max()), 0, top - mp[:, 2].min()])
+        new_mot = up + J2
+        write_stl(f, np.concatenate([rest, new_mot]))
+        pat0 = re.compile(r'(<link name="shoulder_link">\s*)(<inertial>.*?</inertial>)', re.S)
+        if L1_CRADLE_CUT:
+            # 받침 질량: OMX 프레임(닫힌 메시)을 1 mm 복셀로 채워 z > 컷 부분을 PLA로 계산해 뺀다
+            import collision_limits as CL
+            fk = [k for k in ks if k != mk and tri[comp == k].reshape(-1, 3)[:, 2].max() > L1_CRADLE_CUT]
+            vx = CL.Voxels(tri[np.isin(comp, fk)])
+            c = vx.centers[vx.centers[:, 2] > L1_CRADLE_CUT] * np.array([-1, -1, 1])   # URDF 좌표
+            mv = (CL.VOXEL ** 3) * PLA_KG_M3
+            cradle_kg = mv * len(c)
+            ccom = c.mean(0)
+            d = c - ccom
+            I_c = mv * ((d * d).sum(1).sum() * np.eye(3) - d.T @ d)
+            text = pat0.sub(lambda m: m.group(1) + remove_body(m.group(2), cradle_kg, ccom, I_c), text)
+            print(f'L1 위 받침 삭제: {cradle_kg * 1000:.1f} g (PLA), 모터 바닥 = 기둥 끝 z {top * 1000:.1f} mm')
+        yaw = np.array([-1, -1, 1])
+        v = solid(mot, 1.0)[0]
+        old = solid(mot * yaw, XM430_KG / v)
+        new = solid(new_mot * yaw, XM430_KG / v)
+        pat = re.compile(r'(<link name="shoulder_link">\s*)(<inertial>.*?</inertial>)', re.S)
+        text = pat.sub(lambda m: m.group(1) + remove_body(m.group(2), old[0], old[1], old[2]), text)
+        text = pat.sub(lambda m: m.group(1) + remove_body(m.group(2), -new[0], new[1], -new[2]), text)
+        text = re.sub(r'(<joint name="elbow"[^>]*>.*?<origin xyz=")[^"]*', lambda m: m.group(1) + fmt(J2 * yaw), text, count=1, flags=re.S)
+        print(f'엘보 모터 세움: 엘보 관절 OMX ({J[0] * 1000:.1f}, {J[2] * 1000:.1f}) → ({J2[0] * 1000:.1f}, {J2[2] * 1000:.1f}) mm, '
+              f'L1 {np.linalg.norm(J) * 1000:.1f} → {np.linalg.norm(J2) * 1000:.1f} mm, 모터 z {mp[:, 2].min() * 1000:.1f}~{mp[:, 2].max() * 1000:.1f} (관절 기준)')
 
     if FLIP_ELBOW:
         # 엘보 모터를 혼 축(y) 기준 180° 뒤집어 단다: 모터 몸체를 elbow 관절 둘레로 180° 돌리고,
@@ -504,6 +589,13 @@ def main(omx_dir):
     if FLIP_UPPER:
         text = flip_upper(text)
         print('어깨 위쪽 전체를 z축 180° 돌림 (어깨 관절은 그대로)')
+    if WRIST_PITCH_REVERSED:
+        text = re.sub(r'(<joint name="wrist_pitch".*?<axis xyz=")([^"]*)',
+                      lambda m: m.group(1) + fmt(-np.array(list(map(float, m.group(2).split())))), text, count=1, flags=re.S)
+        # 한계도 뒤집어 같은 물리 범위로 시작 (충돌 검사가 다시 좁힘)
+        text = re.sub(r'(<joint name="wrist_pitch".*?<limit lower=")([^"]*)(" upper=")([^"]*)',
+                      lambda m: f'{m.group(1)}{-float(m.group(4)):.9g}{m.group(3)}{-float(m.group(2)):.9g}', text, count=1, flags=re.S)
+        print('wrist_pitch + 방향 반대로')
 
     # 충돌형상: 바꾼 팔 링크는 부품(연결 성분)마다 볼록 껍질. 0.05 cm3 미만(볼트 등)은 뺀다
     for link in HULL_LINKS:
