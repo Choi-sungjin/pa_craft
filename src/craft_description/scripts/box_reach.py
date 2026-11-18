@@ -148,6 +148,8 @@ class BoxReach(Node):
         overrides = [o for o in self.declare_parameter('limit_overrides', ['']).value if o]
         # 구간별 링크·브라켓 경계 JSON (<urdf>.segments.json). 있으면 링크·브라켓 길이를 따로 조절
         segments = self.declare_parameter('segments', '').value
+        box_distance = self.declare_parameter('box_distance', 0.020).value   # 시작 로봇 앞면-박스 거리 [m]
+        tol_deg = self.declare_parameter('tcp_tol_deg', 10.0).value          # 시작 TCP 각도 허용 [deg]
         if not urdf:
             raise RuntimeError('robot_description 파라미터가 비어 있음')
 
@@ -229,10 +231,10 @@ class BoxReach(Node):
         self.stretched_by = {l: j for _, j in self.links for l in self.stretched_links(j)}
         lo, hi = self.limits[self.slide]
         self.slide_center, self.stroke0 = 0.5 * (lo + hi), hi - lo
-        self.box = {'distance': 0.0,
+        self.box = {'distance': float(box_distance),
                     'lateral': self.arm_lateral(0.5 * (lo + hi)),  # LM 가이드 중앙
                     'height': self.box_size[2]}
-        self.tol_deg = 0.0
+        self.tol_deg = float(tol_deg)
         self.clearance = 0.030  # 높이 여유 [m]
 
         self.lock = threading.Lock()
@@ -818,7 +820,7 @@ def build_gui(node):
             debounce('markers', 50, refresh)
         return f
 
-    slider('로봇 앞면-박스 거리 [mm]', 0, 400, 0, 1, set_box('distance'))
+    slider('로봇 앞면-박스 거리 [mm]', 0, 400, node.box['distance'] * 1000, 1, set_box('distance'))
     slider('박스 좌우 중심 [mm]', -300, 300, node.box['lateral'] * 1000, 1, set_box('lateral'))
     slider('검사 높이 (바닥 기준) [mm]', 0, 300, height, 1, set_box('height'))
 
@@ -826,7 +828,7 @@ def build_gui(node):
         node.tol_deg = v
         debounce('markers', 50, refresh)
 
-    slider('TCP 각도 허용 (수직 아래 기준) [deg]', 0, 180, 0, 1, set_tol)
+    slider('TCP 각도 허용 (수직 아래 기준) [deg]', 0, 180, node.tol_deg, 1, set_tol)
 
     def set_clearance(v):
         node.clearance = v / 1000.0

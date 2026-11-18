@@ -14,6 +14,7 @@
 
 사용: python3 make_robotis_arm_urdf.py <omx 메시 폴더(link3.stl, link4.stl, link5.stl)>
 """
+import os
 import re
 import sys
 from pathlib import Path
@@ -39,17 +40,22 @@ OMX = {  # OMX URDF 그대로 (원점: 그 링크의 관절)
                        I=(3.0654178e-05, -1.2764155e-06, -2.6874417e-07, 2.4230292e-04, 1.1559550e-08, 2.5155057e-04)),
 }
 JOINT_XYZ = {'elbow': '-0.024 0 0.128', 'wrist_pitch': '-0.124 0 0'}
+L1_FROM_L2 = True     # L1을 L2(OMX link4: 엘보 힌지 + SHORT 프레임 + 세운 모터)를 그대로 세워 만든다. L1 = 124 mm
 ELBOW_UPRIGHT = True  # 엘보 모터를 세워 L1 프레임 위에 'i'자로 얹음 (모터 바닥 = 프레임 윗면, 혼 축 = 엘보)
 # L2 엘보 힌지 브라켓(OMX link4 x 5~25 mm 구간)을 이만큼 늘림 [m]. 세운 엘보 모터(모서리 혼 축에서 ~41 mm)를 피하려고
 L2_HINGE_EXTRA = float(__import__('os').environ.get('L2_HINGE_EXTRA', '0.0'))
 WRIST_PITCH_REVERSED = False # wrist_pitch + 방향을 반대로 (축 부호 뒤집기)
 L1_CRADLE_CUT = 0.1005      # L1 프레임에서 이 높이(OMX link3 z) 위 받침을 지움. 0이면 안 지움
+L1_FRAME_LEN = 0.0677       # L1 프레임(기둥) 길이 [m]: SHORT 67.7. LONG 기둥(받침 삭제)은 72.9. 기둥 구간을 이 길이로 줄이거나 늘린다
 WRIST_HINGE = True          # 손목 브라켓을 OMX 손목 브라켓 대신 L2 엘보 힌지(OMX link4 힌지)와 같은 부품으로
+ROLL_MOTOR_DEG = float(os.environ.get('ROLL_MOTOR_DEG', '90'))   # tool_roll 모터를 roll 축 둘레로 돌려 단다 (0 = 원래 방향)
 FLIP_ELBOW = False  # 엘보 모터만 pitch 180° 뒤집기 (L1 24 mm 꺾임과 안 맞아 끔, 대신 FLIP_UPPER)
 # 구간마다 링크(프레임)·브라켓 경계 [m], 관절 원점 방향 좌표 s (0 = 부모 관절, 끝 = 이 관절).
 # box_reach가 <urdf 이름>.segments.json을 읽어 링크 길이·브라켓 길이 슬라이더를 따로 띄운다.
 SEGMENTS = {
-    'elbow': ('L1 어깨-팔꿈치', [(0.0276, 'bracket', '어깨 힌지 브라켓'), (0.1005, 'link', 'LINK FRAME(LONG) 기둥'),
+    'elbow': ('L1 어깨-팔꿈치', [(0.0273, 'bracket', '어깨 힌지 브라켓'), (0.0950, 'link', 'LINK FRAME(SHORT)'),
+                                  (None, 'bracket', '엘보 모터 자리')]) if L1_FROM_L2 else
+             ('L1 어깨-팔꿈치', [(0.0276, 'bracket', '어깨 힌지 브라켓'), (0.0276 + L1_FRAME_LEN, 'link', 'L1 프레임 기둥'),
                                   (None, 'bracket', '엘보 모터 자리')]),
     'wrist_pitch': ('L2 팔꿈치-손목', [(0.0273, 'bracket', '엘보 힌지 브라켓'), (0.0950, 'link', 'LINK FRAME(SHORT)'),
                                      (None, 'bracket', '손목 모터 자리')]),
@@ -388,6 +394,19 @@ def main(omx_dir):
 
     link = 'wrist_pitch_link'
     pat = re.compile(rf'(<link name="{link}">\s*)(<inertial>.*?</inertial>)', re.S)
+    jm = re.search(r'<joint name="tool_roll"[^>]*>.*?<origin xyz="([^"]*)".*?<axis xyz="([^"]*)"', text, re.S)
+    roll_p0 = np.array(list(map(float, jm.group(1).split())))
+    roll_ax = np.array(list(map(float, jm.group(2).split())))
+    roll_ax /= np.linalg.norm(roll_ax)
+    K = np.array([[0, -roll_ax[2], roll_ax[1]], [roll_ax[2], 0, -roll_ax[0]], [-roll_ax[1], roll_ax[0], 0]])
+    q = np.radians(ROLL_MOTOR_DEG)
+    R_roll = np.eye(3) + np.sin(q) * K + (1 - np.cos(q)) * K @ K
+
+    def turn_motor(tri, shift):
+        # tool_roll 모터(+혼·볼트)를 자기 roll 축 둘레로 ROLL_MOTOR_DEG 돌린다. 축 위치는 그대로라 집게·TCP는 안 바뀜
+        c = roll_p0 + shift
+        return ((tri.reshape(-1, 3) - c) @ R_roll.T + c).reshape(tri.shape)
+
     for kind in ('visual', 'collision'):
         f = PKG / f'meshes/{kind}/{SUB}/{link}.stl'
         tri = read_stl(f)
@@ -405,9 +424,10 @@ def main(omx_dir):
         if kind == 'collision':   # 충돌 메시는 거칠어 bbox가 달라지므로 visual 이동량을 그대로 쓴다
             shift = vis_shift
         print(f'{kind}/{link}: 우리 브라켓 삼각형 {own.sum()}개 삭제, tool_roll 쪽 이동 {np.round(shift * 1000, 1)} mm')
+        moved = turn_motor(keep + shift, shift)
         if kind == 'visual':   # 관절·질량은 visual 기준
-            vis_keep, vis_shift = keep + shift, shift
-        write_stl(f, np.concatenate([keep + shift, bracket]))
+            vis_keep, vis_shift = moved, shift
+        write_stl(f, np.concatenate([moved, bracket]))
     shift = vis_shift
 
     # 손목 질량은 부품별로 다시 합산한다. 남는 건 tool_roll XM430 + 혼·볼트뿐이고,
@@ -492,8 +512,19 @@ def main(omx_dir):
     text = re.sub(r'(<joint name="tcp_joint"[^>]*>.*?<origin xyz=")[^"]*', lambda m: m.group(1) + fmt(ee), text, count=1, flags=re.S)
 
     # 팔 링크 → OMX
-    for link, s in OMX.items():
+    omx = dict(OMX)
+    if L1_FROM_L2:
+        # link4(+x 방향 팔)를 y축 -90° 돌려 +z(위)로 세운 것을 L1으로: R (1,0,0) = (0,0,1)
+        Ry = np.array([[0, 0, -1], [0, 1, 0], [1, 0, 0]], float)
+        e = OMX['elbow_link']
+        ixx, ixy, ixz, iyy, iyz, izz = e['I']
+        I = Ry @ np.array([[ixx, ixy, ixz], [ixy, iyy, iyz], [ixz, iyz, izz]]) @ Ry.T
+        omx['shoulder_link'] = dict(mesh='link4', R=Ry, mass=e['mass'], com=tuple(Ry @ np.array(e['com'])),
+                                    I=(I[0, 0], I[0, 1], I[0, 2], I[1, 1], I[1, 2], I[2, 2]))
+    for link, s in omx.items():
         tri = read_stl(Path(omx_dir) / f"{s['mesh']}.stl") * 1e-3
+        if 'R' in s:
+            tri = tri @ s['R'].T
         if link == 'elbow_link' and L2_HINGE_EXTRA > 0:
             tri = stretch_x(tri, 0.005, 0.025, L2_HINGE_EXTRA)
         for kind in ('visual', 'collision'):
@@ -511,7 +542,10 @@ def main(omx_dir):
     for joint, xyz in jxyz.items():
         text = re.sub(rf'(<joint name="{joint}"[^>]*>.*?<origin xyz=")[^"]*', lambda m: m.group(1) + xyz, text, count=1, flags=re.S)
 
-    if ELBOW_UPRIGHT:
+    if L1_FROM_L2:
+        text = re.sub(r'(<joint name="elbow"[^>]*>.*?<origin xyz=")[^"]*', lambda m: m.group(1) + '0 0 0.124', text, count=1, flags=re.S)
+        print('L1 = L2 구조 (엘보 힌지 + SHORT 프레임 + 세운 엘보 모터), L1 124 mm')
+    elif ELBOW_UPRIGHT:
         # OMX link3 좌표(앞팔 +x)에서: 누운 엘보 모터를 혼 축(y) 둘레로 90° 세워 긴 쪽이 아래로 가게 하고,
         # 모터 바닥을 LINK FRAME(LONG) 윗면(z 120 mm)에, 좌우(x) 중심을 프레임 중심에 맞춘다.
         # 엘보 관절은 세운 모터의 혼 축으로 옮긴다. 프레임 위쪽 받침(누운 모터용)은 출력품으로 바꾼다고 가정.
@@ -531,6 +565,13 @@ def main(omx_dir):
             cut = rest.mean(1)[:, 2] > L1_CRADLE_CUT
             cradle = rest[cut]
             rest = rest[~cut]
+        stem0, stem1 = 0.0276, 0.1005                                       # 기둥 구간 (어깨 힌지 끝 ~ 받침 컷)
+        dL = L1_FRAME_LEN - (stem1 - stem0)
+        if abs(dL) > 1e-6:   # 기둥 구간만 늘이거나 줄이고 그 위는 dL만큼 옮김
+            z = rest[..., 2]
+            rest = rest.copy()
+            rest[..., 2] = np.where(z >= stem1, z + dL, np.where(z > stem0, stem0 + (z - stem0) * (stem1 - stem0 + dL) / (stem1 - stem0), z))
+            print(f'L1 기둥 {(stem1 - stem0) * 1000:.1f} → {L1_FRAME_LEN * 1000:.1f} mm')
         frame = rest.reshape(-1, 3)
         frame = frame[(frame[:, 2] > 0.06)]                                 # 프레임 위쪽 (어깨 힌지 제외)
         top = frame[:, 2].max() if L1_CRADLE_CUT else 0.120

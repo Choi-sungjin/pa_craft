@@ -36,6 +36,8 @@ def launch_setup(context):
         Node(package='craft_description', executable='box_reach.py',
              parameters=[{'robot_description': robot_description,
                           'segments': ParameterValue(segments, value_type=str),
+                          'box_distance': float(LaunchConfiguration('box_distance').perform(context)) / 1000,
+                          'tcp_tol_deg': float(LaunchConfiguration('tol').perform(context)),
                           'stroke': float(LaunchConfiguration('stroke').perform(context)) / 1000,
                           # 빈 리스트는 타입 추론이 안 되므로 ['']로 넘기고 노드에서 걸러냄
                           'limit_overrides': LaunchConfiguration('limits').perform(context).split()
@@ -53,6 +55,10 @@ def generate_launch_description():
                                           'v307_robotis_arm) 또는 .urdf/.xacro 경로'),
         DeclareLaunchArgument('stroke', default_value='0',
                               description='시작 LM 스트로크 [mm]. 0이면 URDF 값 (V307: 129)'),
+        DeclareLaunchArgument('box_distance', default_value='20',
+                              description='시작 로봇 앞면-박스 거리 [mm]'),
+        DeclareLaunchArgument('tol', default_value='10',
+                              description='시작 TCP 각도 허용 (수직 아래 기준) [deg]'),
         DeclareLaunchArgument('limits', default_value='',
                               description="관절 한계 바꾸기 '관절:하한:상한' 공백 구분 (deg/mm). "
                                           "예: 'shoulder:0:45'. URDF 파일은 그대로"),

@@ -13,7 +13,7 @@
     <collision><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://craft_description/meshes/collision/slide_link.stl"/></geometry></collision>
   </link>
   <link name="shoulder_link">
-    <inertial><origin xyz="0.00100486539 0.000437305146 0.105301445" rpy="0 0 0"/><mass value="0.133464"/><inertia ixx="0.000372048733" ixy="-1.96427713e-07" ixz="-3.3646011e-06" iyy="0.00036548543" iyz="-1.61369543e-06" izz="3.98858334e-05"/></inertial>
+    <inertial><origin xyz="-0.00022413279 0.00038929816 0.09090959" rpy="0 0 0"/><mass value="0.132746"/><inertia ixx="0.00025155057" ixy="-1.155955e-08" ixz="2.6874417e-07" iyy="0.00024230292" iyz="-1.2764155e-06" izz="3.0654178e-05"/></inertial>
     <visual><origin xyz="0 0 0" rpy="0 -0 -3.58979303e-09"/><geometry><mesh filename="package://craft_description/meshes/visual/robotis_arm/shoulder_link.stl"/></geometry><material name="robotis_frame_mat"><color rgba="0.75 0.75 0.78 1"/></material></visual>
     <collision><origin xyz="0 0 0" rpy="0 -0 -3.58979303e-09"/><geometry><mesh filename="package://craft_description/meshes/collision/robotis_arm/shoulder_link.stl"/></geometry></collision>
   </link>
@@ -23,7 +23,7 @@
     <collision><origin xyz="0 0 0" rpy="0 -0 -3.58979303e-09"/><geometry><mesh filename="package://craft_description/meshes/collision/robotis_arm/elbow_link.stl"/></geometry></collision>
   </link>
   <link name="wrist_pitch_link">
-    <inertial><origin xyz="0.0425911196 3.01466495e-08 0.0120659122" rpy="0 0 0"/><mass value="0.106769"/><inertia ixx="3.87023674e-05" ixy="-4.7373677e-09" ixz="-5.2160087e-06" iyy="5.61900358e-05" iyz="-6.48517965e-09" izz="5.25963837e-05"/></inertial>
+    <inertial><origin xyz="0.0433596929 -0.0110617856 0.00103088937" rpy="0 0 0"/><mass value="0.106769"/><inertia ixx="3.8563863e-05" ixy="5.36746172e-06" ixz="-5.90957319e-07" iyy="4.6385678e-05" iyz="1.01127788e-07" izz="6.36526145e-05"/></inertial>
     <visual><origin xyz="0 0 0" rpy="0 -0 3.14159265"/><geometry><mesh filename="package://craft_description/meshes/visual/robotis_arm/wrist_pitch_link.stl"/></geometry><material name="wrist_pitch_link_mat"><color rgba="0.6 0.6 0.6 1"/></material></visual>
     <collision><origin xyz="0 0 0" rpy="0 -0 3.14159265"/><geometry><mesh filename="package://craft_description/meshes/collision/robotis_arm/wrist_pitch_link.stl"/></geometry></collision>
   </link>
@@ -73,11 +73,11 @@
   <joint name="shoulder" type="revolute"><parent link="slide_link"/><child link="shoulder_link"/><origin xyz="0.035 0 0.01975" rpy="0 0 0"/><axis xyz="0 1 0"/>
     <limit lower="-0.314159265" upper="0.785398163" effort="3.0" velocity="8.06"/>
     <dynamics damping="0.01" friction="0.05"/></joint>
-  <joint name="elbow" type="revolute"><parent link="shoulder_link"/><child link="elbow_link"/><origin xyz="0.00186334786 0 0.143749997" rpy="0 -0 0"/><axis xyz="0 -1 0"/>
+  <joint name="elbow" type="revolute"><parent link="shoulder_link"/><child link="elbow_link"/><origin xyz="0 0 0.124" rpy="0 -0 0"/><axis xyz="0 -1 0"/>
     <limit lower="-0.471238898" upper="3.12413936" effort="3.0" velocity="8.06"/>
     <dynamics damping="0.01" friction="0.05"/></joint>
   <joint name="wrist_pitch" type="revolute"><parent link="elbow_link"/><child link="wrist_pitch_link"/><origin xyz="0.124 0 0" rpy="0 -0 0"/><axis xyz="0 -1 0"/>
-    <limit lower="-2.02458193" upper="1.78023584" effort="3.0" velocity="8.06"/>
+    <limit lower="-2.05948852" upper="1.76278254" effort="3.0" velocity="8.06"/>
     <dynamics damping="0.01" friction="0.05"/></joint>
   <joint name="tool_roll" type="revolute"><parent link="wrist_pitch_link"/><child link="tool_roll_link"/><origin xyz="0.0321566601 0 1.43402885e-05" rpy="0 -0 0"/><axis xyz="0.997583329 0 0.0694802318"/>
     <limit lower="-3.12413936" upper="3.12413936" effort="3.0" velocity="8.06"/>
