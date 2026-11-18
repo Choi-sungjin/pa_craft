@@ -51,7 +51,7 @@ class ArmSliders(Node):
         wanted = [n for n in wanted if n] or list(self.movable)
         missing = [n for n in wanted if n not in self.movable]
         if missing:
-            self.get_logger().warn(f'URDF에 없는(또는 고정된) 관절이라 건너뜀: {missing}')
+            self.get_logger().warning(f'URDF에 없는(또는 고정된) 관절이라 건너뜀: {missing}')
         self.slider_joints = [n for n in wanted if n in self.movable]
 
         # 0이 범위 밖이면 범위 안의 가장 가까운 값에서 시작

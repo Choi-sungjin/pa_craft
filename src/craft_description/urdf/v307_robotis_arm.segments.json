@@ -1,0 +1,72 @@
+{
+ "elbow": {
+  "label": "L1 어깨-팔꿈치",
+  "knots": [
+   0.0,
+   0.0276,
+   0.12,
+   0.13023056476879766
+  ],
+  "kinds": [
+   "bracket",
+   "link",
+   "bracket"
+  ],
+  "names": [
+   "어깨 힌지 브라켓",
+   "LINK FRAME(LONG)",
+   "엘보 모터 자리"
+  ]
+ },
+ "wrist_pitch": {
+  "label": "L2 팔꿈치-손목",
+  "knots": [
+   0.0,
+   0.0273,
+   0.095,
+   0.124
+  ],
+  "kinds": [
+   "bracket",
+   "link",
+   "bracket"
+  ],
+  "names": [
+   "엘보 힌지 브라켓",
+   "LINK FRAME(SHORT)",
+   "손목 모터 자리"
+  ]
+ },
+ "tool_roll": {
+  "label": "L3 손목-비틀기",
+  "knots": [
+   0.0,
+   0.028,
+   0.03165666334803474
+  ],
+  "kinds": [
+   "bracket",
+   "link"
+  ],
+  "names": [
+   "OMX 손목 브라켓",
+   "tool_roll 모터 오프셋"
+  ]
+ },
+ "tcp_joint": {
+  "label": "L4 비틀기-TCP",
+  "knots": [
+   0.0,
+   0.049,
+   0.14700001748135869
+  ],
+  "kinds": [
+   "bracket",
+   "link"
+  ],
+  "names": [
+   "roll-집게 연결 브라켓",
+   "OMX 집게"
+  ]
+ }
+}

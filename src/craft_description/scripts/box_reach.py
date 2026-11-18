@@ -31,6 +31,7 @@
   충돌(로봇 몸체, 박스)은 보지 않는다.
 """
 import atexit
+import json
 import math
 import os
 import re
@@ -145,6 +146,8 @@ class BoxReach(Node):
         stroke = self.declare_parameter('stroke', 0.0).value  # 시작 LM 스트로크 [m], 0이면 URDF 값
         # 관절 한계 바꾸기: ['관절:하한:상한', ...], 회전은 deg, 직동은 mm. 예: ['shoulder:0:45']
         overrides = [o for o in self.declare_parameter('limit_overrides', ['']).value if o]
+        # 구간별 링크·브라켓 경계 JSON (<urdf>.segments.json). 있으면 링크·브라켓 길이를 따로 조절
+        segments = self.declare_parameter('segments', '').value
         if not urdf:
             raise RuntimeError('robot_description 파라미터가 비어 있음')
 
@@ -178,7 +181,7 @@ class BoxReach(Node):
         self.a = axes[0]
         self.s = unit(vec(self.joint_el[self.slide].find('axis'), 'xyz', '1 0 0'))
         if any(abs(abs(ax @ self.a) - 1) > 1e-3 for ax in axes) or abs(abs(self.s @ self.a) - 1) > 1e-3:
-            self.get_logger().warn('팔 관절 축이 평행하지 않거나 LM 가이드가 팔 축 방향이 아님: 판정이 틀릴 수 있음')
+            self.get_logger().warning('팔 관절 축이 평행하지 않거나 LM 가이드가 팔 축 방향이 아님: 판정이 틀릴 수 있음')
         up = AXES['z'] - (AXES['z'] @ self.a) * self.a
         self.e1 = unit(up) if np.linalg.norm(up) > 1e-6 else unit(np.cross(self.a, AXES['x']))
         self.e2 = np.cross(self.a, self.e1)
@@ -191,6 +194,26 @@ class BoxReach(Node):
         self.links = [('L1 어깨-팔꿈치', self.arm[1]), ('L2 팔꿈치-손목', self.arm[2]),
                       ('L3 손목-비틀기', self.roll), ('L4 비틀기-TCP', self.tcp)]
         self.lengths = {j: float(np.linalg.norm(self.base_origin[j])) for _, j in self.links}
+        # 길이 관절과 같은 부모 링크에 원점이 0이 아닌 채 붙은 관절 → 그 길이 관절 (늘이면 같이 옮김)
+        self.sibling_of = {}
+        for _, j in self.links:
+            parent = self.joint_el[j].find('parent').get('link')
+            for n, el in self.joint_el.items():
+                if (n != j and n not in self.lengths and el.find('parent').get('link') == parent
+                        and np.linalg.norm(self.base_origin[n]) > 1e-9):
+                    self.sibling_of[n] = j
+        self.parts = {}     # 관절: {'knots', 'kinds', 'names', 'label'}
+        self.part_len = {}  # 관절: {'link': m, 'bracket': m} (지금 값)
+        if segments:
+            for j, seg in json.loads(segments).items():
+                if j not in self.lengths:
+                    continue
+                knots = np.array(seg['knots'], float)
+                knots *= self.lengths[j] / knots[-1]   # URDF 길이에 맞춤
+                self.parts[j] = dict(seg, knots=knots)
+                self.part_len[j] = {k: float(sum(b - a for a, b, kk in zip(knots, knots[1:], seg['kinds']) if kk == k))
+                                    for k in ('link', 'bracket')}
+            self.links = [(self.parts[j]['label'] if j in self.parts else l, j) for l, j in self.links]
         self.mesh_dir = tempfile.mkdtemp(prefix='box_reach_meshes_')
         atexit.register(shutil.rmtree, self.mesh_dir, True)
         self.stretch = {j: self.stretch_targets(j) for _, j in self.links}
@@ -229,6 +252,11 @@ class BoxReach(Node):
         if joint in self.lengths:
             n = np.linalg.norm(v)
             v = v / n * self.lengths[joint] if n > 0 else v
+        elif joint in self.sibling_of:  # 길이 관절과 같은 링크에 붙은 관절(OMX 손가락): 늘인 만큼 같이 옮김
+            j = self.sibling_of[joint]
+            d = self.base_origin[j] / float(np.linalg.norm(self.base_origin[j]))
+            s = float(v @ d)
+            v = v + (float(self.map_s(j, np.array(s))) - s) * d
         return v
 
     def stretched_links(self, joint):
@@ -260,7 +288,7 @@ class BoxReach(Node):
                 try:
                     tris = read_stl(resolve_uri(mesh.get('filename'))) * scale
                 except (OSError, ValueError) as e:
-                    self.get_logger().warn(f'{name} 메시를 못 읽어 늘이지 않음: {e}')
+                    self.get_logger().warning(f'{name} 메시를 못 읽어 늘이지 않음: {e}')
                     continue
                 targets.append({'name': f'{name}_{i}', 'mesh': mesh, 'vis': vis,
                                 'uri': mesh.get('filename'), 'scale': mesh.get('scale'),
@@ -290,7 +318,7 @@ class BoxReach(Node):
                 try:
                     v = read_stl(resolve_uri(mesh.get('filename'))).reshape(-1, 3)
                 except (OSError, ValueError) as e:
-                    self.get_logger().warn(f'{name} 메시를 못 읽어 앞면 계산에서 뺌: {e}')
+                    self.get_logger().warning(f'{name} 메시를 못 읽어 앞면 계산에서 뺌: {e}')
                     continue
                 v = (v * vec(mesh, 'scale', '1 1 1')) @ Rv.T + tv
                 pts.append(v @ Rj.T + tj)
@@ -305,14 +333,38 @@ class BoxReach(Node):
         m = (z >= 0) & (z <= height) & (np.abs(lat - c) <= width / 2)
         return float((self.body[m] @ self.f).max()) if m.any() else self.front_face
 
+    def map_s(self, joint, s):
+        """링크 방향 좌표 s를 지금 길이에 맞게 옮긴다. 구간 정의가 있으면 링크·브라켓 구간을
+        각자 길이 비율로 늘이고, 없으면 양 끝 허브를 둔 채 가운데만 늘인다."""
+        L = float(np.linalg.norm(self.base_origin[joint]))
+        if joint not in self.parts:
+            return stretch_map(s, L, self.lengths[joint])
+        P = self.parts[joint]
+        K = P['knots']
+        old = {k: sum(b - a for a, b, kk in zip(K, K[1:], P['kinds']) if kk == k) for k in ('link', 'bracket')}
+        scale = {k: (self.part_len[joint][k] / old[k] if old[k] > 1e-9 else 1.0) for k in old}
+        K_new = np.concatenate([[0.0], np.cumsum([(b - a) * scale[k] for a, b, k in zip(K, K[1:], P['kinds'])])])
+        s = np.asarray(s, float)
+        return np.where(s >= K[-1], s + (K_new[-1] - K[-1]), np.where(s <= 0, s, np.interp(s, K, K_new)))
+
+    def changed(self, joint):
+        L = float(np.linalg.norm(self.base_origin[joint]))
+        if joint in self.parts:
+            K, kinds = self.parts[joint]['knots'], self.parts[joint]['kinds']
+            return any(abs(self.part_len[joint][k] - sum(b - a for a, b, kk in zip(K, K[1:], kinds) if kk == k)) > 1e-6
+                       for k in ('link', 'bracket'))
+        return abs(self.lengths[joint] - L) > 1e-6
+
     def update_meshes(self, joint):
         """joint 길이에 맞게 늘인 메시를 써서 URDF visual을 바꾼다."""
         L = float(np.linalg.norm(self.base_origin[joint]))
         L_new = self.lengths[joint]
         d = self.base_origin[joint] / L
+        tag = (f"{self.part_len[joint]['link'] * 1000:.1f}_{self.part_len[joint]['bracket'] * 1000:.1f}"
+               if joint in self.parts else f'{L_new * 1000:.1f}')
         for t in self.stretch[joint]:
             mesh, vis = t['mesh'], t['vis']
-            if abs(L_new - L) < 1e-6:  # 원래 메시로 되돌림
+            if not self.changed(joint):  # 원래 메시로 되돌림
                 mesh.set('filename', t['uri'])
                 if t['scale'] is not None:
                     mesh.set('scale', t['scale'])
@@ -324,11 +376,11 @@ class BoxReach(Node):
                         else:
                             o.set(k, v)
                 continue
-            path = os.path.join(self.mesh_dir, f"{t['name']}_{L_new * 1000:.1f}mm.stl")
+            path = os.path.join(self.mesh_dir, f"{t['name']}_{tag}mm.stl")
             if not os.path.exists(path):  # RViz는 URI로 캐시하므로 길이마다 다른 파일
                 tris = t['tris']
                 s = tris @ d
-                write_stl(path, tris + ((stretch_map(s, L, L_new) - s)[..., None] * d))
+                write_stl(path, tris + ((self.map_s(joint, s) - s)[..., None] * d))
             mesh.set('filename', 'file://' + path)
             mesh.attrib.pop('scale', None)
             o = vis.find('origin')  # 링크 좌표로 썼으므로 visual 원점은 0
@@ -461,10 +513,9 @@ class BoxReach(Node):
                 continue
             j = self.stretched_by.get(link)
             if j is not None:  # 늘인 링크: 무게중심도 메시와 같은 방식으로 옮김
-                L = float(np.linalg.norm(self.base_origin[j]))
-                d = self.base_origin[j] / L
+                d = self.base_origin[j] / float(np.linalg.norm(self.base_origin[j]))
                 s = c @ d
-                c = c + (stretch_map(np.array(s), L, self.lengths[j]) - s) * d
+                c = c + (float(self.map_s(j, np.array(s))) - s) * d
             R, p = frames[link]
             masses.append((link, m, p + R @ c))
         tcp_link = self.joint_el[self.tcp].find('child').get('link')
@@ -549,8 +600,11 @@ class BoxReach(Node):
             v = self.origin(joint)
             self.joint_el[joint].find('origin').set('xyz', ' '.join(f'{c:.6g}' for c in v))
             self.update_meshes(joint)
+        for joint in self.sibling_of:
+            v = self.origin(joint)
+            self.joint_el[joint].find('origin').set('xyz', ' '.join(f'{c:.6g}' for c in v))
         if not self.rsp_client.service_is_ready():
-            self.get_logger().warn('robot_state_publisher 파라미터 서비스가 아직 없음')
+            self.get_logger().warning('robot_state_publisher 파라미터 서비스가 아직 없음')
             return
         p = Parameter(name='robot_description')
         p.value.type = ParameterType.PARAMETER_STRING
@@ -736,9 +790,24 @@ def build_gui(node):
             refresh_tcp()
         return f
 
+    def set_part(joint, kind):
+        def f(v):
+            node.part_len[joint][kind] = v / 1000.0
+            node.lengths[joint] = sum(node.part_len[joint].values())
+            debounce('rsp', 300, node.push_description)
+            refresh_tcp()
+        return f
+
     for label, joint in node.links:
         L = node.lengths[joint] * 1000
-        slider(f'{label} (원래 {L:.1f})', 10, max(400, 2 * L), L, 0.1, set_length(joint))
+        if joint not in node.parts:
+            slider(f'{label} (원래 {L:.1f})', 10, max(400, 2 * L), L, 0.1, set_length(joint))
+            continue
+        P = node.parts[joint]
+        for kind, word in (('link', '링크'), ('bracket', '브라켓')):
+            names = ' + '.join(n for n, k in zip(P['names'], P['kinds']) if k == kind)
+            v = node.part_len[joint][kind] * 1000
+            slider(f'{label} {word}: {names} (원래 {v:.1f})', 0, max(300, 2 * v), v, 0.1, set_part(joint, kind))
 
     depth, width, height = (v * 1000 for v in node.box_size)
     section(f'박스 {depth:.0f}×{width:.0f}×{height:.0f} mm')

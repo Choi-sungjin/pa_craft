@@ -52,6 +52,40 @@ ros2 launch craft_description arm_sliders.launch.py   # LM 가이드 + 팔 관�
 ros2 launch craft_description box_reach.launch.py     # 전방 박스(205×205×70 mm) 커버 검사
 ```
 
+### URDF 고르기 (`urdf:=이름`)
+
+두 launch 모두 `urdf:=`에 `urdf/` 폴더의 이름(확장자 생략 가능) 또는 경로를 받는다. 기본은 `v307_full_robot`.
+
+```bash
+ros2 launch craft_description box_reach.launch.py urdf:=v307_robotis_arm
+ros2 launch craft_description arm_sliders.launch.py urdf:=v307_robotis_arm
+```
+
+- `v307_robotis_arm.urdf`: V307 몸체·LM·tool_roll 모터는 그대로, 팔 두 링크·손목 브라켓·집게 손가락·TCP를 ROBOTIS OpenMANIPULATOR-X 것으로 바꾼 URDF. 카메라 없음.
+  - shoulder_link = OMX link3(LINK FRAME LONG + XM430, 138.5 g), elbow_link = OMX link4(LINK FRAME SHORT + XM430, 132.7 g). 메시·질량·관성은 ROBOTIS `open_manipulator`(Apache-2.0) URDF 값이고, 앞팔이 −x로 가도록 z축 180° 돌렸다.
+  - **앞쪽 장착:** 어깨 관절 위쪽 전체(L1, 엘보, L2, 손목, 집게)를 어깨 수직축 기준 180° 돌려 0°에서 팔이 앞(+x)을 향한다. 어깨 모터·관절(원점, 축 +y, 0점, 한계)은 그대로다. 관절 원점에 회전을 넣지 않고 각 링크 좌표 값에 Rz(180°)를 반영했다(box_reach가 관절 rpy를 안 읽음). 그래서 elbow·wrist_pitch·집게 축이 −y 쪽으로 바뀌었다. 엘보 모터만 뒤집는 안은 L1의 24 mm 꺾임과 안 맞아(엘보 −121 ~ +2°) 쓰지 않았다(`FLIP_ELBOW`).
+  - **링크·브라켓 길이 따로:** `urdf/v307_robotis_arm.segments.json`(생성 스크립트가 씀)에 구간마다 링크(프레임)·브라켓 경계가 있고, `box_reach`는 이 파일이 있으면 L1~L4 슬라이더를 링크·브라켓 두 개로 나눠 띄운다. 링크를 바꾸면 프레임 구간만, 브라켓을 바꾸면 브라켓 구간들(양 끝이면 둘 다 같은 비율)만 늘인다. 같은 링크에 붙은 관절(집게 손가락)도 늘인 만큼 같이 옮긴다.
+
+    | 구간 | 링크 | 브라켓 | 합 |
+    |---|---|---|---|
+    | L1 어깨-팔꿈치 | LINK FRAME(LONG) 92.4 | 어깨 힌지 27.6 + 엘보 모터 자리 10.2 = 37.8 | 130.2 |
+    | L2 팔꿈치-손목 | LINK FRAME(SHORT) 67.7 | 엘보 힌지 27.3 + 손목 모터 자리 29.0 = 56.3 | 124.0 |
+    | L3 손목-비틀기 | tool_roll 모터 오프셋 3.7 | OMX 손목 브라켓 28.0 | 31.7 |
+    | L4 비틀기-TCP | OMX 집게 98.0 | roll-집게 연결 브라켓 49.0 | 147.0 |
+
+  - 관절 간격: shoulder→elbow (24, 0, 128) mm(직선 130.2 mm), elbow→wrist_pitch 124 mm.
+  - 카메라: `camera_*` 프레임을 빼고 상단·손목 D435 몸체를 메시에서 지웠다. 몸체 질량에서 72 g(D435 사양)을 뺐다. 상단 거치대는 남겼다.
+  - 손목(L3, `wrist_pitch_link`): 카메라 거치대도 지웠다. 손목 브라켓(우리 옆판 2장 + 연결판)을 OMX link5의 옆판 2장 + 연결판으로 바꾸고, tool_roll 모터·관절·집게·TCP를 연결판에 붙게 x로 13.2 mm 당기고 z로 3.1 mm 내려 OMX 모터 자리에 맞췄다(L3 45 → 31.7 mm, roll 축 z 3.1 → 0 mm).
+  - 손목 질량은 부품별로 다시 합산했다: OMX 브라켓 21.0 g(= link5 143.3 − XM430 82 − 집게 레일 40.3 추정, 레일은 부피 × 1.24) + tool_roll XM430 82 g + 혼·볼트(강철) = 119.5 g. 원본 577 g에서 빼는 방식은 원본 재질 가정을 몰라 무게중심이 틀어져 쓰지 않았다.
+  - 집게: 우리 집게 모터·레일은 OMX link5의 것과 같은 메시다(맞춤 오차 0.0005 mm). 그 변환으로 손가락을 OMX `gripper_left/right_palm`(jaw_upper/jaw_lower, stroke −11~+20 mm), TCP를 OMX end_effector(모터 기준 x 126 mm)로 두었다. TCP: tool_roll에서 (146.6, 0, 10.2) mm.
+  - 질량: tool_roll_link 185.8 g = 집게 XM430 82 g + 레일(부피 × 1.24) + 연결 브라켓(PLA) + 볼트. 손가락은 OMX URDF가 1 g 자리표시라 부피 × 1.24로 33.7 g씩.
+  - 충돌형상: shoulder·elbow·wrist_pitch·tool_roll·손가락 링크는 부품마다 볼록 조각 여러 개로 근사(오목한 부품은 껍질 부피가 1.3배 이하가 될 때까지 쪼갬, 0.05 cm³ 미만 볼트 제외). 그래도 ㄷ자 브라켓 안쪽은 일부 메워진다.
+  - 관절 한계: elbow·wrist_pitch는 팔 링크끼리 부딪히는 각도로 좁혔다(`scripts/collision_limits.py`, 생성 때 자동 실행). 실제 메시를 1 mm 복셀로 채워, 관절 하나씩(나머지 0) 1°씩 돌리며 0자세보다 5 mm³ 넘게 더 겹치면 충돌로 본다.
+    - elbow: **−82 ~ +100°** (−83°에서 손목이 위팔에 닿음, +101°에서 shoulder_link ↔ elbow_link). 하한은 V307 값(−52°) 대신 충돌로 정했다.
+    - wrist_pitch: −156 ~ +125° → **−127 ~ +103°** (elbow_link ↔ wrist_pitch_link)
+    - 조합 자세(두 관절을 같이 굽힌 경우)와 몸체·LM 가이드와의 충돌은 보지 않는다. 나머지 관절 한계는 V307 값 그대로다(집게 제외).
+  - 다시 만들기: `python3 scripts/make_robotis_arm_urdf.py <link3.stl·link4.stl 폴더>` (link3·link4·link5.stl, OMX 메시는 `ROBOTIS-GIT/open_manipulator`의 `open_manipulator_description/meshes/open_manipulator_x/`)
+
 ### `arm_sliders` — 고른 관절만 슬라이더로
 
 - 기본은 `lm_slide`(mm), `shoulder`/`elbow`/`wrist_pitch`/`tool_roll`(deg)이다. 나머지 움직이는 관절(집게, 캐러셀, 바퀴)은 0으로 고정해 발행한다.
