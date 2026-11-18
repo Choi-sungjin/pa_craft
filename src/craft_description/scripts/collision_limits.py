@@ -8,6 +8,7 @@
 - 두 링크의 겹친 복셀 수가 0자세 때보다 MARGIN개 넘게 늘면 충돌 (0자세의 접촉·체결부는 허용).
   충돌 직전 각도까지를 한계로 둔다 (URDF 한계보다 좁힐 때만).
 - 몸체(base_link 등)와의 충돌은 보지 않는다. 팔 링크끼리만 본다.
+- 관절마다 부모 링크 ↔ 그 관절 아래 링크들만 본다 (더 먼 링크와의 충돌은 다른 관절 각도에 따라 달라짐).
 
 사용: python3 collision_limits.py <urdf> [관절 ...]   (URDF를 그 자리에서 고침)
 """
@@ -175,6 +176,15 @@ def overlaps(vox, T):
     return res
 
 
+def chain(joints, link):
+    """link에서 뿌리까지 조상 링크 목록"""
+    out = []
+    while link in joints:
+        link = joints[link]['parent']
+        out.append(link)
+    return out
+
+
 def sweep(urdf, names=JOINTS):
     joints, vox = load(urdf)
     base = overlaps(vox, fk(joints, {}))
@@ -183,13 +193,18 @@ def sweep(urdf, names=JOINTS):
     for name in names:
         lim = next(j['limit'] for j in joints.values() if j['name'] == name)
         lo, hi = float(lim.get('lower')), float(lim.get('upper'))
+        # 관절 한계는 부모 링크 ↔ 자식 쪽 링크들 충돌만 본다. 그 너머(예: 손목 돌릴 때 집게 ↔ 어깨)는
+        # 다른 관절(엘보) 각도에 따라 달라지므로 관절 한계가 아니다
+        parent = next(j['parent'] for j in joints.values() if j['name'] == name)
+        sub = {c for c in ARM if any(l == c for l in ARM) and parent in chain(joints, c) and c != parent}
+        pairs = {k for k in base if (k[0] == parent and k[1] in sub) or (k[1] == parent and k[0] in sub)}
         found = []
         for sign, bound in ((+1, hi), (-1, lo)):
             q, last = 0.0, 0.0
             while abs(q + sign * STEP) <= abs(bound) + 1e-9:
                 q += sign * STEP
                 ov = overlaps(vox, fk(joints, {name: q}))
-                hit = [(k, n - base[k]) for k, n in ov.items() if n - base[k] > MARGIN]
+                hit = [(k, n - base[k]) for k, n in ov.items() if k in pairs and n - base[k] > MARGIN]
                 if hit:
                     (a, b), n = max(hit, key=lambda h: h[1])
                     print(f'  {name} {np.degrees(q):+.0f}°: {a} ↔ {b} ({n} mm³ 더 겹침)')

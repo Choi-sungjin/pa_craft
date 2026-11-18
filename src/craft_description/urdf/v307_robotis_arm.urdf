@@ -13,17 +13,17 @@
     <collision><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://craft_description/meshes/collision/slide_link.stl"/></geometry></collision>
   </link>
   <link name="shoulder_link">
-    <inertial><origin xyz="-0.00022413279 0.00038929816 0.09090959" rpy="0 0 0"/><mass value="0.132746"/><inertia ixx="0.00025155057" ixy="-1.155955e-08" ixz="2.6874417e-07" iyy="0.00024230292" iyz="-1.2764155e-06" izz="3.0654178e-05"/></inertial>
+    <inertial><origin xyz="-0.00022413279 0.00038929816 0.07926459" rpy="0 0 0"/><mass value="0.132746"/><inertia ixx="0.00025155057" ixy="-1.155955e-08" ixz="2.6874417e-07" iyy="0.00024230292" iyz="-1.2764155e-06" izz="3.0654178e-05"/></inertial>
     <visual><origin xyz="0 0 0" rpy="0 -0 -3.58979303e-09"/><geometry><mesh filename="package://craft_description/meshes/visual/robotis_arm/shoulder_link.stl"/></geometry><material name="robotis_frame_mat"><color rgba="0.75 0.75 0.78 1"/></material></visual>
     <collision><origin xyz="0 0 0" rpy="0 -0 -3.58979303e-09"/><geometry><mesh filename="package://craft_description/meshes/collision/robotis_arm/shoulder_link.stl"/></geometry></collision>
   </link>
   <link name="elbow_link">
-    <inertial><origin xyz="0.09090959 0.00038929816 0.00022413279" rpy="0 0 0"/><mass value="0.132746"/><inertia ixx="3.0654178e-05" ixy="-1.2764155e-06" ixz="-2.6874417e-07" iyy="0.00024230292" iyz="1.155955e-08" izz="0.00025155057"/></inertial>
+    <inertial><origin xyz="0.07926459 0.00038929816 0.00022413279" rpy="0 0 0"/><mass value="0.132746"/><inertia ixx="3.0654178e-05" ixy="-1.2764155e-06" ixz="-2.6874417e-07" iyy="0.00024230292" iyz="1.155955e-08" izz="0.00025155057"/></inertial>
     <visual><origin xyz="0 0 0" rpy="0 -0 -3.58979303e-09"/><geometry><mesh filename="package://craft_description/meshes/visual/robotis_arm/elbow_link.stl"/></geometry><material name="robotis_frame_mat"><color rgba="0.75 0.75 0.78 1"/></material></visual>
     <collision><origin xyz="0 0 0" rpy="0 -0 -3.58979303e-09"/><geometry><mesh filename="package://craft_description/meshes/collision/robotis_arm/elbow_link.stl"/></geometry></collision>
   </link>
   <link name="wrist_pitch_link">
-    <inertial><origin xyz="0.0604294046 -0.0110274485 0.00102768937" rpy="0 0 0"/><mass value="0.107101"/><inertia ixx="4.25347532e-05" ixy="8.82829591e-06" ixz="-9.13485464e-07" iyy="7.73447049e-05" iyz="1.11466925e-07" izz="9.7717695e-05"/></inertial>
+    <inertial><origin xyz="0.056244665 -0.0110360128 0.00102848751" rpy="0 0 0"/><mass value="0.107018"/><inertia ixx="4.15420545e-05" ixy="7.86542787e-06" ixz="-8.23752173e-07" iyy="6.80518748e-05" iyz="1.08884342e-07" izz="8.76483748e-05"/></inertial>
     <visual><origin xyz="0 0 0" rpy="0 -0 3.14159265"/><geometry><mesh filename="package://craft_description/meshes/visual/robotis_arm/wrist_pitch_link.stl"/></geometry><material name="wrist_pitch_link_mat"><color rgba="0.6 0.6 0.6 1"/></material></visual>
     <collision><origin xyz="0 0 0" rpy="0 -0 3.14159265"/><geometry><mesh filename="package://craft_description/meshes/collision/robotis_arm/wrist_pitch_link.stl"/></geometry></collision>
   </link>
@@ -73,13 +73,13 @@
   <joint name="shoulder" type="revolute"><parent link="slide_link"/><child link="shoulder_link"/><origin xyz="0.035 0 0.01975" rpy="0 0 0"/><axis xyz="0 1 0"/>
     <limit lower="-0.314159265" upper="0.785398163" effort="3.0" velocity="8.06"/>
     <dynamics damping="0.01" friction="0.05"/></joint>
-  <joint name="elbow" type="revolute"><parent link="shoulder_link"/><child link="elbow_link"/><origin xyz="0 0 0.124" rpy="0 -0 0"/><axis xyz="0 -1 0"/>
+  <joint name="elbow" type="revolute"><parent link="shoulder_link"/><child link="elbow_link"/><origin xyz="0 0 0.1103" rpy="0 -0 0"/><axis xyz="0 -1 0"/>
     <limit lower="-0.471238898" upper="3.12413936" effort="3.0" velocity="8.06"/>
     <dynamics damping="0.01" friction="0.05"/></joint>
-  <joint name="wrist_pitch" type="revolute"><parent link="elbow_link"/><child link="wrist_pitch_link"/><origin xyz="0.124 0 0" rpy="0 -0 0"/><axis xyz="0 -1 0"/>
-    <limit lower="-1.98967535" upper="2.18166156" effort="3.0" velocity="8.06"/>
+  <joint name="wrist_pitch" type="revolute"><parent link="elbow_link"/><child link="wrist_pitch_link"/><origin xyz="0.1103 0 0" rpy="0 -0 0"/><axis xyz="0 -1 0"/>
+    <limit lower="-2.46091425" upper="2.26892803" effort="3.0" velocity="8.06"/>
     <dynamics damping="0.01" friction="0.05"/></joint>
-  <joint name="tool_roll" type="revolute"><parent link="wrist_pitch_link"/><child link="tool_roll_link"/><origin xyz="0.0521566601 0 1.43402885e-05" rpy="0 -0 0"/><axis xyz="0.997583329 0 0.0694802318"/>
+  <joint name="tool_roll" type="revolute"><parent link="wrist_pitch_link"/><child link="tool_roll_link"/><origin xyz="0.0471566601 0 1.43402885e-05" rpy="0 -0 0"/><axis xyz="0.997583329 0 0.0694802318"/>
     <limit lower="-3.12413936" upper="3.12413936" effort="3.0" velocity="8.06"/>
     <dynamics damping="0.01" friction="0.05"/></joint>
   <joint name="jaw_upper" type="prismatic"><parent link="tool_roll_link"/><child link="jaw_upper_link"/><origin xyz="0.103910877 -2.87908755e-09 -0.0138137884" rpy="1.57079645 0.0695341865 3.14159256"/><axis xyz="0 -1 0"/>
