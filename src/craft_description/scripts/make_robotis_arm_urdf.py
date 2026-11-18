@@ -48,6 +48,7 @@ WRIST_PITCH_REVERSED = False # wrist_pitch + 방향을 반대로 (축 부호 뒤
 L1_CRADLE_CUT = 0.1005      # L1 프레임에서 이 높이(OMX link3 z) 위 받침을 지움. 0이면 안 지움
 L1_FRAME_LEN = 0.0677       # L1 프레임(기둥) 길이 [m]: SHORT 67.7. LONG 기둥(받침 삭제)은 72.9. 기둥 구간을 이 길이로 줄이거나 늘린다
 WRIST_HINGE = True          # 손목 브라켓을 OMX 손목 브라켓 대신 L2 엘보 힌지(OMX link4 힌지)와 같은 부품으로
+WRIST_HINGE_EXTRA = float(os.environ.get('WRIST_HINGE_EXTRA', '0.020'))   # 손목 힌지(3D 프린트)를 이만큼 늘림 [m]: roll 모터가 L2에서 멀어져 손목 pitch 범위가 넓어짐
 ROLL_MOTOR_DEG = float(os.environ.get('ROLL_MOTOR_DEG', '90'))   # tool_roll 모터를 roll 축 둘레로 돌려 단다 (0 = 원래 방향)
 FLIP_ELBOW = False  # 엘보 모터만 pitch 180° 뒤집기 (L1 24 mm 꺾임과 안 맞아 끔, 대신 FLIP_UPPER)
 # 구간마다 링크(프레임)·브라켓 경계 [m], 관절 원점 방향 좌표 s (0 = 부모 관절, 끝 = 이 관절).
@@ -59,7 +60,7 @@ SEGMENTS = {
                                   (None, 'bracket', '엘보 모터 자리')]),
     'wrist_pitch': ('L2 팔꿈치-손목', [(0.0273, 'bracket', '엘보 힌지 브라켓'), (0.0950, 'link', 'LINK FRAME(SHORT)'),
                                      (None, 'bracket', '손목 모터 자리')]),
-    'tool_roll': ('L3 손목-비틀기', [(0.0285 if WRIST_HINGE else 0.0280, 'bracket', '엘보 힌지(손목)' if WRIST_HINGE else 'OMX 손목 브라켓'), (None, 'link', 'tool_roll 모터 오프셋')]),
+    'tool_roll': ('L3 손목-비틀기', [(0.0285 + WRIST_HINGE_EXTRA if WRIST_HINGE else 0.0280, 'bracket', '엘보 힌지(손목)' if WRIST_HINGE else 'OMX 손목 브라켓'), (None, 'link', 'tool_roll 모터 오프셋')]),
     'tcp_joint': ('L4 비틀기-TCP', [(0.0490, 'bracket', 'roll-집게 연결 브라켓'), (None, 'link', 'OMX 집게')]),
 }
 FLIP_UPPER = True   # 어깨 관절 위쪽 전체를 어깨 수직축 기준 180° 돌림: 어깨 모터·축·0점·한계는 그대로, 앞팔이 앞(+x)
@@ -386,8 +387,8 @@ def main(omx_dir):
         # 힌지 블록은 메시에서 프레임과 한 덩어리라 삼각형 중심 x < 27.9 mm(프레임 시작 27.3, 블록 끝 28.5)로 자른다
         motor = max(np.unique(c4), key=lambda k: (c4 == k).sum() if l4[c4 == k].reshape(-1, 3)[:, 0].min() > 0.08 else 0)
         keep = (c4 != motor) & (l4.mean(1)[:, 0] < 0.0279)
-        bracket = l4[keep] * np.array([-1, -1, 1])
-        motor_face = 0.0285
+        bracket = stretch_x(l4[keep], 0.005, 0.025, WRIST_HINGE_EXTRA) * np.array([-1, -1, 1])
+        motor_face = 0.0285 + WRIST_HINGE_EXTRA
     b_kg, b_com, b_I = solid(bracket, density)
     print(f"손목 브라켓({'엘보 힌지' if WRIST_HINGE else 'OMX 손목 브라켓'}) {b_kg * 1000:.1f} g "
           f"(밀도 {density / 1000:.2f} g/cm3 = OMX link5 {OMX_LINK5_KG * 1000:.1f} - XM430 - 레일 {rail_kg * 1000:.1f}, 끝면 x {motor_face * 1000:.1f} mm)")
