@@ -66,8 +66,8 @@
     <visual><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://craft_description/meshes/visual/rear_right_wheel_link.stl"/></geometry><material name="rear_right_wheel_link_mat"><color rgba="0.6 0.6 0.6 1"/></material></visual>
     <collision><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://craft_description/meshes/collision/rear_right_wheel_link.stl"/></geometry></collision>
   </link>
-  <joint name="lm_slide" type="prismatic"><parent link="base_link"/><child link="slide_link"/><origin xyz="0.19 -0.0435 0.09825" rpy="0 0 0"/><axis xyz="0 1 0"/>
-    <limit lower="-0.021" upper="0.108" effort="60.0" velocity="0.0513"/>
+  <joint name="lm_slide" type="prismatic"><parent link="base_link"/><child link="slide_link"/><origin xyz="0.1755 -0.0345 0.10195" rpy="0 0 0"/><axis xyz="0 1 0"/>
+    <limit lower="-0.0507" upper="0.1041" effort="60.0" velocity="0.0513"/>
     <dynamics damping="0.01" friction="2.0"/></joint>
   <joint name="shoulder" type="revolute"><parent link="slide_link"/><child link="shoulder_link"/><origin xyz="0.035 0 0.01975" rpy="0 0 0"/><axis xyz="0 1 0"/>
     <limit lower="-0.314159265" upper="0.785398163" effort="3.0" velocity="8.06"/>
@@ -87,7 +87,7 @@
   <joint name="jaw_lower" type="prismatic"><parent link="tool_roll_link"/><child link="jaw_lower_link"/><origin xyz="0 0 0" rpy="0 0 0"/><axis xyz="0.0694790287 0 0.997583412"/>
     <limit lower="-0.01" upper="0.01268" effort="20.0" velocity="0.08"/>
     <dynamics damping="0.01" friction="0.5"/></joint>
-  <joint name="carousel" type="continuous"><parent link="base_link"/><child link="carousel_link"/><origin xyz="0.046 0 0.08575" rpy="0 0 0"/><axis xyz="0 0 1"/>
+  <joint name="carousel" type="continuous"><parent link="base_link"/><child link="carousel_link"/><origin xyz="0.045955 0 0.091554" rpy="0 0 0"/><axis xyz="0 0 1"/>
     <limit effort="3.0" velocity="3.0"/>
     <dynamics damping="0.01" friction="0.05"/></joint>
   <joint name="front_left_wheel" type="continuous"><parent link="base_link"/><child link="front_left_wheel_link"/><origin xyz="0.146 0.144 0" rpy="0 0 0"/><axis xyz="0 1 0"/>

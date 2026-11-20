@@ -129,7 +129,8 @@
     <axis xyz="-1 0 0" />
     <!-- 5-degree margin inside measured motor limits (-394.4..504.2 deg, control.yaml, 2026-11-02);
          previous lower=-0.0438 upper=0.0630. -->
-    <limit effort="0" velocity="0" lower="-0.0430" upper="0.0627" />
+    <!-- 2026-11-20: LM re-mount, physical ends -1486.7..-74.4 deg = slide -50.8..+104.1 mm (control.yaml offset, carousel zero) -->
+    <limit effort="0" velocity="0" lower="-0.0507" upper="0.1041" />
   </joint>
   <joint name="shoulder_joint" type="revolute">
     <parent link="slide_link" />

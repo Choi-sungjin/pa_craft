@@ -1,4 +1,5 @@
-# EXECUTE is idempotent. UPDATE_PATH preserves the task ID and advances revision.
+# EXECUTE is idempotent. UPDATE_PATH preserves the task ID and advances revision (NAVIGATE: a new path; MANIPULATOR:
+# a stream point, new joints and duration_s for the running arm task, older revisions ignored; 2026-11-18).
 uint8 EXECUTE=0
 uint8 UPDATE_PATH=1
 uint8 STOP=2

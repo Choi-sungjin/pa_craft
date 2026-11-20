@@ -19,6 +19,13 @@ constexpr uint8_t kDriveModeTimeBased = 4;
 constexpr double kRampFraction = 0.25;     // ramp up and down, each this share of the travel time
 constexpr uint32_t kMinMoveMs = 100;
 constexpr uint32_t kMaxMoveMs = 32767;
+// STREAM,<ms>: streamed goals, each reached at constant speed in <ms> (PROFILE_ACCELERATION 0: no ramp, so a goal
+// rewritten every point keeps the speed instead of ramping from rest each time). A goal further from where the
+// axis is than its speed cap covers in <ms> is cut to that, so no axis is asked to go faster than its cap (in
+// time-based mode PROFILE_VELOCITY is a time, not a limit: this cut is the cap; review 2026-11-18, was 2 x).
+// A hold (HOLD, watchdog expiry) ends the stream, so the stop is a ramped timed move, not a dead stop.
+constexpr uint32_t kMinStreamMs = 10;
+constexpr double kStreamStepCaps = 1.0;
 constexpr double kVelocityUnitRpm = 0.229;  // X-series PROFILE_VELOCITY unit (the speed caps in AxisConfig)  // a diagnostic line every second (and at once when a fault latches)
 
 // Why the board latched its fault (diagnostic line, first cause only).
@@ -106,7 +113,7 @@ public:
     // Configure every axis with torque disabled, then preload a zero/hold goal.
     for (unsigned i = 0; i < N; ++i) {
       const auto &a = axes_[i];
-      if (!bus_.ping(a.id) || !bus_.torqueOff(a.id) || !statusOk() ||
+      if (!bus_.ping(a.id) || !bus_.torqueOff(a.id) || !statusOk() || !normalizeMotor(a.id) ||
           !bus_.setOperatingMode(a.id, a.velocity ? OP_VELOCITY : OP_EXTENDED_POSITION) ||
           !statusOk() ||
           !write(ControlTableItem::DRIVE_MODE, i, timeBased(i) ? kDriveModeTimeBased : 0) ||
@@ -121,7 +128,7 @@ public:
     }
     for (unsigned k = 0; k < follower_count_; ++k) {
       const auto &f = followers_[k];
-      if (!bus_.ping(f.id) || !bus_.torqueOff(f.id) || !statusOk() ||
+      if (!bus_.ping(f.id) || !bus_.torqueOff(f.id) || !statusOk() || !normalizeMotor(f.id) ||
           !bus_.setOperatingMode(f.id, OP_VELOCITY) || !statusOk() ||
           !writeId(ControlTableItem::DRIVE_MODE, f.id, 0) ||
           !writeId(ControlTableItem::PROFILE_ACCELERATION, f.id,
@@ -160,6 +167,14 @@ public:
       if (keyword == Keyword::kRelax && !fault_) relax();
       if (keyword == Keyword::kHold && !fault_) hold();
       if (keyword == Keyword::kTime) move_ms_ = static_cast<uint32_t>(receiver_.keywordValue());
+      if (keyword == Keyword::kStream) {
+        const long v = receiver_.keywordValue();
+        const uint32_t ms = v == 0 ? 0 : static_cast<uint32_t>(v < static_cast<long>(kMinStreamMs) ? kMinStreamMs : v);
+        // the host repeats STREAM with every point (it cannot see a watchdog hold end the stream): only a new
+        // point time rewrites the profile
+        if (ms != stream_ms_) for (unsigned i = 0; i < N; ++i) stream_profile_[i] = false;
+        stream_ms_ = ms;
+      }
       if (keyword == Keyword::kTol) loose_tolerance_ = receiver_.keywordValue() * kTwoPi / 36000.0;
       // IGAIN: the Position I gain (RAM) of one position axis, before the next targets (host: per move, e.g. a
       // smaller one against gravity); IGAIN,BOOT: every position axis back to its power-up gain (0 without
@@ -316,14 +331,28 @@ private:
   // wheel board made 16 reads, 5 writes and 2 voltage reads a tick, 28.6 ms, and sent feedback at 35 Hz instead of 50
   // (kPeriodMs is the shortest tick, not a fixed period).
   static constexpr uint16_t kPresentAddr = 64, kPresentLength = 72;
+  // X-series RAM addresses of the Sync Writes (writeTargets): PROFILE_ACCELERATION 108 and PROFILE_VELOCITY 112
+  // are adjacent (one 8-byte write), GOAL_VELOCITY 104, GOAL_POSITION 116.
+  static constexpr uint16_t kProfileAccelerationAddr = 108, kGoalVelocityAddr = 104, kGoalPositionAddr = 116;
   struct Present { int32_t velocity, position; int16_t current; bool moving; };
 
-  // Healthy, torque as expected, and its present values.
-  bool readMotor(uint8_t id, Present &p) {
-    uint8_t b[kPresentLength];
-    if (bus_.read(id, kPresentAddr, kPresentLength, b, sizeof(b), kIoTimeoutMs) != kPresentLength || !statusOk()) {
-      return fail(kFaultNoResponse, id);
+  // Settings a tool (DYNAMIXEL Wizard) may have left that this firmware relies on, put back at power-up with the
+  // torque off (2026-11-20; after the 11-19 Wizard session motor 1 was found with its torque off after every boot):
+  // SECONDARY_ID 12 (EEPROM) 255 = none (a motor that also listens to another ID takes that motor's writes),
+  // STATUS_RETURN_LEVEL 68 (RAM) 2 = every instruction answers, BUS_WATCHDOG 98 (RAM) 0 = off (the board sends
+  // nothing for ~5 s while the IMU starts). Read first, written only when different (EEPROM wear).
+  bool normalizeMotor(uint8_t id) {
+    static constexpr struct { uint16_t addr; uint8_t value; } kWant[] = {{12, 255}, {68, 2}, {98, 0}};
+    for (const auto &w : kWant) {
+      uint8_t v = 0;
+      if (bus_.read(id, w.addr, 1, &v, 1, kIoTimeoutMs) != 1 || !statusOk()) return false;
+      if (v != w.value && (!bus_.write(id, w.addr, &w.value, 1, kIoTimeoutMs) || !statusOk())) return false;
     }
+    return true;
+  }
+
+  // Healthy, torque as expected, and its present values, from one motor's TORQUE_ENABLE .. PRESENT_POSITION bytes.
+  bool parseMotor(uint8_t id, const uint8_t (&b)[kPresentLength], Present &p) {
     const auto at = [&b](uint16_t addr, unsigned bytes) {  // little endian
       uint32_t v = 0;
       for (unsigned k = bytes; k-- > 0;) v = v << 8 | b[addr - kPresentAddr + k];
@@ -335,6 +364,36 @@ private:
     p.current = static_cast<int16_t>(at(126, 2));
     p.velocity = static_cast<int32_t>(at(128, 4));
     p.position = static_cast<int32_t>(at(132, 4));
+    return true;
+  }
+
+  // Every motor (axes, then followers) in one Sync Read of the same 72 bytes (2026-11-20): one instruction, the
+  // replies back to back. One read per motor took 9.9 ms for the wheel board's 5 motors, the Sync Read 4.6 ms
+  // (with RETURN_DELAY_TIME 0; test/drive/latency_pos.py). The replies come in list order and the library stops at
+  // the first missing one, so that motor is the one reported (kFaultNoResponse, as a lost single read was).
+  bool readAll(Present (&p)[N + kMaxFollowers]) {
+    const unsigned count = N + follower_count_;
+    if (!sync_read_ready_) {
+      for (unsigned k = 0; k < count; ++k) {
+        sync_read_xels_[k].id = k < N ? axes_[k].id : followers_[k - N].id;
+        sync_read_xels_[k].p_recv_buf = sync_read_data_[k];
+      }
+      sync_read_.packet.p_buf = sync_read_packet_;
+      sync_read_.packet.buf_capacity = sizeof(sync_read_packet_);
+      sync_read_.packet.is_completed = false;
+      sync_read_.addr = kPresentAddr;
+      sync_read_.addr_length = kPresentLength;
+      sync_read_.p_xels = sync_read_xels_;
+      sync_read_.xel_count = static_cast<uint8_t>(count);
+      sync_read_.is_info_changed = true;
+      sync_read_ready_ = true;
+    }
+    const unsigned got = bus_.syncRead(&sync_read_, kIoTimeoutMs);
+    if (got < count) return fail(kFaultNoResponse, sync_read_xels_[got].id);
+    for (unsigned k = 0; k < count; ++k) {
+      if (sync_read_xels_[k].error) return fail(kFaultNoResponse, sync_read_xels_[k].id);  // status packet error
+      if (!parseMotor(sync_read_xels_[k].id, sync_read_data_[k], p[k])) return false;
+    }
     return true;
   }
 
@@ -371,9 +430,10 @@ private:
     bool moving[N];
     unsigned count[N];
     double current[N] = {};
+    Present all[N + kMaxFollowers];
+    if (!readAll(all)) return false;
     for (unsigned i = 0; i < N; ++i) {
-      Present p;
-      if (!readMotor(axes_[i].id, p)) return false;
+      const Present &p = all[i];
       notePeak(i, p.current);
       const int32_t raw = axes_[i].velocity ? p.velocity : p.position;
       // Subtract in double to avoid overflowing signed raw extended positions.
@@ -385,8 +445,7 @@ private:
     }
     for (unsigned k = 0; k < follower_count_; ++k) {
       const auto &f = followers_[k];
-      Present p;
-      if (!readMotor(f.id, p)) return false;
+      const Present &p = all[N + k];
       notePeak(N + k, p.current);
       sample[f.leader] += p.velocity * axes_[f.leader].units_per_tick * f.direction;
       ++count[f.leader];
@@ -430,6 +489,7 @@ private:
   }
 
   void holdTargets() {
+    stream_ms_ = 0;  // stop with the timed profile (ramp), not at full stream speed into a dead stop
     for (unsigned i = 0; i < N; ++i) target_[i] = axes_[i].velocity ? 0 : feedback_[i];
   }
 
@@ -454,13 +514,50 @@ private:
     return static_cast<uint32_t>(fmin(fmax(ceil(ms), kMinMoveMs), kMaxMoveMs));
   }
 
+  // Sync Write (2026-11-20): one instruction per control table range for every motor in the list, no reply (the
+  // per-tick Sync Read still sees a motor that stopped answering, rebooted or reports an error). values: one int32
+  // (len 4) or two in a row (len 8: PROFILE_ACCELERATION 108 + PROFILE_VELOCITY 112) per motor.
+  bool syncWrite(uint16_t addr, uint16_t len, const uint8_t *ids, const int32_t (*values)[2], unsigned n) {
+    if (n == 0) return true;
+    for (unsigned k = 0; k < n; ++k) {
+      for (unsigned w = 0; w < len / 4u; ++w) {
+        const uint32_t v = static_cast<uint32_t>(values[k][w]);
+        for (unsigned b = 0; b < 4; ++b) sync_write_data_[k][4 * w + b] = static_cast<uint8_t>(v >> (8 * b));
+      }
+      sync_write_xels_[k].id = ids[k];
+      sync_write_xels_[k].p_data = sync_write_data_[k];
+    }
+    sync_write_.packet.p_buf = sync_write_packet_;
+    sync_write_.packet.buf_capacity = sizeof(sync_write_packet_);
+    sync_write_.packet.is_completed = false;
+    sync_write_.addr = addr;
+    sync_write_.addr_length = len;
+    sync_write_.p_xels = sync_write_xels_;
+    sync_write_.xel_count = static_cast<uint8_t>(n);
+    sync_write_.is_info_changed = true;
+    return bus_.syncWrite(&sync_write_) || fail(kFaultWriteFailed, ids[0]);
+  }
+
+  // The goals of one tick (and the profiles of the axes whose timed move or stream starts) in at most three Sync
+  // Writes: profiles first, then goal velocities, then goal positions. Which axes get what is as before
+  // (2026-11-20; it was one write per item and axis, 2.5 ms for the wheel board's 2 goals, Sync Write 0.26 ms).
   bool writeTargets() {
+    constexpr unsigned M = N + kMaxFollowers;
+    uint8_t prof_id[M], vel_id[M], pos_id[M];
+    int32_t prof[M][2], vel[M][2], pos[M][2];
+    unsigned np = 0, nv = 0, nq = 0;
     int32_t goal[N];
     bool changed[N] = {};
     bool any = false;
     for (unsigned i = 0; i < N; ++i) {
       const auto &a = axes_[i];
-      const double raw = target_[i] * a.direction / a.units_per_tick + zero_[i];
+      double t = target_[i];
+      if (stream_ms_ && timeBased(i)) {  // never further than the cap covers in kStreamStepCaps points
+        const double cap = a.profile_velocity * kVelocityUnitRpm * kTwoPi / 60.0;  // [rad/s]
+        const double step = cap * kStreamStepCaps * stream_ms_ / 1000.0;
+        t = fmin(fmax(t, feedback_[i] - step), feedback_[i] + step);
+      }
+      const double raw = t * a.direction / a.units_per_tick + zero_[i];
       if (!isfinite(raw) || raw < INT32_MIN || raw > INT32_MAX) return fail(kFaultWriteFailed, a.id);
       goal[i] = static_cast<int32_t>(llround(raw));
       changed[i] = timeBased(i) && !(goal_written_[i] && goal[i] == goal_[i]);
@@ -469,26 +566,44 @@ private:
     const uint32_t ms = any ? moveMs(changed) : 0;
     for (unsigned i = 0; i < N; ++i) {
       const auto &a = axes_[i];
-      if (timeBased(i)) {
+      if (timeBased(i) && stream_ms_) {
         if (!changed[i]) continue;
-        const uint32_t axis_ms = static_cast<uint32_t>(fmax(kMinMoveMs, floor(ms * timeScale(i))));
-        if (!write(ControlTableItem::PROFILE_ACCELERATION, i, static_cast<int32_t>(axis_ms * kRampFraction)) ||
-            !write(ControlTableItem::PROFILE_VELOCITY, i, static_cast<int32_t>(axis_ms)) ||
-            !write(ControlTableItem::GOAL_POSITION, i, goal[i])) {
-          return fail(kFaultWriteFailed, a.id);
+        // profile written once per stream (PA 0 = no ramp, PV = the point time), then goals only
+        if (!stream_profile_[i]) {
+          prof_id[np] = a.id; prof[np][0] = 0; prof[np][1] = static_cast<int32_t>(stream_ms_); ++np;
         }
+        stream_profile_[i] = true;
+        pos_id[nq] = a.id; pos[nq][0] = goal[i]; ++nq;
         goal_[i] = goal[i];
         goal_written_[i] = true;
-      } else if (!write(a.velocity ? ControlTableItem::GOAL_VELOCITY : ControlTableItem::GOAL_POSITION, i, goal[i])) {
-        return fail(kFaultWriteFailed, a.id);
+        continue;
+      }
+      if (timeBased(i)) {
+        stream_profile_[i] = false;  // a timed move writes its own profile (and the stream's is gone)
+        if (!changed[i]) continue;
+        const uint32_t axis_ms = static_cast<uint32_t>(fmax(kMinMoveMs, floor(ms * timeScale(i))));
+        prof_id[np] = a.id;
+        prof[np][0] = static_cast<int32_t>(axis_ms * kRampFraction);
+        prof[np][1] = static_cast<int32_t>(axis_ms);
+        ++np;
+        pos_id[nq] = a.id; pos[nq][0] = goal[i]; ++nq;
+        goal_[i] = goal[i];
+        goal_written_[i] = true;
+      } else if (a.velocity) {
+        vel_id[nv] = a.id; vel[nv][0] = goal[i]; ++nv;
+      } else {
+        pos_id[nq] = a.id; pos[nq][0] = goal[i]; ++nq;
       }
     }
     for (unsigned k = 0; k < follower_count_; ++k) {
       const auto &f = followers_[k];
       const double raw = target_[f.leader] * f.direction / axes_[f.leader].units_per_tick;
-      if (!writeId(ControlTableItem::GOAL_VELOCITY, f.id, static_cast<int32_t>(llround(raw)))) {
-        return fail(kFaultWriteFailed, f.id);
-      }
+      vel_id[nv] = f.id; vel[nv][0] = static_cast<int32_t>(llround(raw)); ++nv;
+    }
+    if (!syncWrite(kProfileAccelerationAddr, 8, prof_id, prof, np) ||
+        !syncWrite(kGoalVelocityAddr, 4, vel_id, vel, nv) ||
+        !syncWrite(kGoalPositionAddr, 4, pos_id, pos, nq)) {
+      return false;
     }
     started_ = true;
     return true;
@@ -557,6 +672,8 @@ private:
   const bool *time_based_ = nullptr;
   const double *time_scale_ = nullptr;
   uint32_t move_ms_ = 0;      // TIME of the next move [ms]; 0: the speed caps decide
+  uint32_t stream_ms_ = 0;    // STREAM point time [ms]; 0: timed moves (TIME)
+  bool stream_profile_[N] = {};  // the stream's profile (PA 0, PV stream_ms_) is in the axis
   const bool *loose_ = nullptr;
   double loose_tolerance_ = 0;  // TOL [rad]; 0: every axis its own
   int32_t goal_[N] = {};      // last goal written to each time-based axis
@@ -586,6 +703,16 @@ private:
   int temperature_[N + kMaxFollowers] = {};
   double peak_current_[N + kMaxFollowers] = {};  // [A]
   unsigned voltage_next_ = 0;
+  // Sync Read of every motor (readAll) and Sync Write of the goals / profiles (syncWrite), built once.
+  DYNAMIXEL::InfoSyncReadInst_t sync_read_ = {};
+  DYNAMIXEL::XELInfoSyncRead_t sync_read_xels_[N + kMaxFollowers] = {};
+  uint8_t sync_read_data_[N + kMaxFollowers][kPresentLength] = {};
+  uint8_t sync_read_packet_[64] = {};  // the instruction: 14 bytes + one per motor
+  bool sync_read_ready_ = false;
+  DYNAMIXEL::InfoSyncWriteInst_t sync_write_ = {};
+  DYNAMIXEL::XELInfoSyncWrite_t sync_write_xels_[N + kMaxFollowers] = {};
+  uint8_t sync_write_data_[N + kMaxFollowers][8] = {};
+  uint8_t sync_write_packet_[160] = {};  // 14 bytes + (1 + 8) per motor
 };
 
 }  // namespace craft

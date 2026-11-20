@@ -13,8 +13,9 @@ namespace craft {
 // travel time of the next move of the time-based axes (0..32767 ms, 0 = as fast as their speed caps allow),
 // TOL,<0.01 deg> the arrival tolerance of the axes set loose (MotorBoard::setLooseTolerance; 0..500, 0 = their own),
 // IGAIN,<axis 0..N-1>,<0..16383> the Position I gain of one position axis from now on, IGAIN,BOOT every position
-// axis back to its power-up gain (MotorBoard::setPositionIGains).
-enum class Keyword { kNone, kRelax, kHold, kTime, kTol, kIGain, kIGainBoot };
+// axis back to its power-up gain (MotorBoard::setPositionIGains). STREAM,<ms> (2026-11-18): streamed points, each
+// changed goal of the time-based axes reached at constant speed in <ms> (no ramp, 10..500 ms), STREAM,0 back to TIME.
+enum class Keyword { kNone, kRelax, kHold, kTime, kTol, kIGain, kIGainBoot, kStream };
 
 // Fixed-size, newline-framed input. An oversized frame is discarded through '\n'.
 template<unsigned N, unsigned Capacity = 256>
@@ -34,7 +35,7 @@ public:
     return false;
   }
 
-  // TIME's value [ms] / TOL's [0.01 deg], valid after takeKeyword() returned kTime / kTol.
+  // TIME's value [ms] / TOL's [0.01 deg] / STREAM's [ms], valid after takeKeyword() returned kTime / kTol / kStream.
   long keywordValue() const { return keyword_value_; }
   // IGAIN's axis (keywordValue() is the gain), valid after takeKeyword() returned kIGain.
   long keywordAxis() const { return keyword_axis_; }
@@ -54,6 +55,7 @@ private:
     if (length == 4 && strncmp(buffer_, "HOLD", 4) == 0) return Keyword::kHold;
     if (number("TIME,", length, 32767)) return Keyword::kTime;
     if (number("TOL,", length, 500)) return Keyword::kTol;
+    if (number("STREAM,", length, 500)) return Keyword::kStream;
     if (length == 10 && strncmp(buffer_, "IGAIN,BOOT", 10) == 0) return Keyword::kIGainBoot;
     if (length > 6 && strncmp(buffer_, "IGAIN,", 6) == 0) {
       const char *comma = static_cast<const char *>(memchr(buffer_ + 6, ',', length - 6));

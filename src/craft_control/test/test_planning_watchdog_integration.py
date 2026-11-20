@@ -61,7 +61,7 @@ class FakeBoard:
                 while b'\n' in pending:
                     line, pending = pending.split(b'\n', 1)
                     # Firmware configuration lines are not position/velocity targets.
-                    if line.startswith((b'IGAIN,', b'TOL,', b'TIME,')):
+                    if line.startswith((b'IGAIN,', b'TOL,', b'TIME,', b'STREAM,')):
                         continue
                     self.command = [float(value) for value in line.split(b',')]
                     self.last_command_at = time.monotonic()

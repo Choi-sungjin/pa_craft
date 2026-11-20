@@ -369,6 +369,64 @@ void timeBased() {
   assert((bus2.registers[{6, PROFILE_VELOCITY}] == 1853));
 }
 
+// STREAM,<ms> (2026-11-18): constant-speed points, profile written once (PA 0, PV ms), then goals only; a goal is
+// cut to what the cap covers in 2 points; STREAM,0 goes back to timed moves with their own profile.
+void streamPoints() {
+  using namespace ControlTableItem;
+  Serial = {};
+  craft::CsvReceiver<3> receiver;
+  double values[3] = {};
+  assert(!frame(receiver, "STREAM,50\n", values));
+  assert(receiver.takeKeyword() == craft::Keyword::kStream && receiver.keywordValue() == 50);
+  for (const auto &bad : {"STREAM\n", "STREAM,-1\n", "STREAM,501\n", "STREAM,5.5\n"}) {
+    assert(!frame(receiver, bad, values));
+    assert(receiver.takeKeyword() == craft::Keyword::kNone);
+  }
+  craft::AxisConfig axes[6];
+  for (unsigned i = 0; i < 6; ++i) axes[i] = {static_cast<uint8_t>(i + 1), false, 0.001, 0, 1, -10, 10, 10, 30, 0.035};
+  const bool timed[6] = {true, true, true, true, true, false};
+  Dynamixel2Arduino bus(Serial3, 84);
+  craft::MotorBoard<6> board(bus, axes, true, 1000000, 0.00269);
+  board.setTimeBased(timed);
+  board.begin();
+  // cap 30 x 0.229 rpm = 0.7194 rad/s; one point of 50 ms: at most 0.036 rad = 36 ticks from where it is (0)
+  Serial.input = "STREAM,50\n0,0.03,0.5,0,0,0\n";
+  test_time_ms += 20;
+  board.tick();
+  assert((bus.registers[{2, PROFILE_ACCELERATION}] == 0 && bus.registers[{2, PROFILE_VELOCITY}] == 50));
+  assert((bus.registers[{2, GOAL_POSITION}] == 30));   // inside the step: as asked
+  assert((bus.registers[{3, GOAL_POSITION}] == 36));   // 0.5 rad asked: cut to the cap x 50 ms
+  assert((bus.registers[{1, PROFILE_VELOCITY}] != 50));  // unchanged goal: profile untouched
+  // the next point: goals only (the profile is not rewritten)
+  bus.registers[{2, PROFILE_VELOCITY}] = -1;
+  Serial.input = "STREAM,50\n0,0.035,0.5,0,0,0\n";  // the same STREAM repeated: no profile rewrite
+  test_time_ms += 20;
+  board.tick();
+  assert((bus.registers[{2, GOAL_POSITION}] == 35 && bus.registers[{2, PROFILE_VELOCITY}] == -1));
+  // a new point time writes the profile again
+  Serial.input = "STREAM,40\n0,0.02,0.5,0,0,0\n";
+  test_time_ms += 20;
+  board.tick();
+  assert((bus.registers[{2, PROFILE_VELOCITY}] == 40 && bus.registers[{2, PROFILE_ACCELERATION}] == 0));
+  // STREAM,0: a timed move with its ramp again
+  Serial.input = "STREAM,0\nTIME,1000\n0,0.2,0.5,0,0,0\n";
+  test_time_ms += 20;
+  board.tick();
+  assert((bus.registers[{2, PROFILE_VELOCITY}] == 1000 && bus.registers[{2, PROFILE_ACCELERATION}] == 250));
+  assert((bus.registers[{2, GOAL_POSITION}] == 200));
+  // a watchdog hold ends the stream: the stop and what follows are timed moves again
+  Serial.input = "STREAM,50\n0,0.21,0.5,0,0,0\n";
+  test_time_ms += 20;
+  board.tick();
+  assert((bus.registers[{2, PROFILE_VELOCITY}] == 50));
+  test_time_ms += 300;  // no command for 300 ms: the watchdog holds (and ends the stream)
+  board.tick();
+  Serial.input = "0,0.1,0.5,0,0,0\n";
+  test_time_ms += 20;
+  board.tick();
+  assert((bus.registers[{2, PROFILE_VELOCITY}] >= 100 && bus.registers[{2, PROFILE_ACCELERATION}] > 0));
+}
+
 // Nobody has the port open: no feedback printed (the OpenCR stack would block in every print), commands still work.
 void hostClosed() {
   using namespace ControlTableItem;
@@ -509,6 +567,54 @@ void lostReplies() {
   assert(Serial.output.find("D,3,1,") != std::string::npos && lastState() == 2);
 }
 
+// One tick = one Sync Read of every motor (axes + followers) and at most three Sync Writes (profiles, goal
+// velocities, goal positions), no single-motor goal writes (2026-11-20).
+void syncBus() {
+  using namespace ControlTableItem;
+  Serial = {};
+  Serial.connected = true;
+  craft::AxisConfig axes[3] = {
+    {1, true, 0.01, 0, 1, -7.8, 7.8, 32767, 0, 0.05},
+    {2, true, 0.01, 0, -1, -7.8, 7.8, 32767, 0, 0.05},
+    {5, false, 0.001, 0, 1, -100, 100, 10, 30, 0.035}};
+  const craft::FollowerConfig followers[2] = {{3, 0, 1}, {4, 1, -1}};
+  Dynamixel2Arduino bus(Serial3, 84);
+  craft::MotorBoard<3> board(bus, axes, true, 1000000);
+  board.setFollowers(followers);
+  board.begin();
+  const int reads0 = bus.sync_reads, swrites0 = bus.sync_writes, writes0 = bus.writes;
+  Serial.input = "1,2,0.5\n";
+  test_time_ms += 20;
+  board.tick();
+  assert(bus.sync_reads == reads0 + 1);
+  assert(bus.sync_writes - swrites0 <= 3);
+  assert(bus.writes - writes0 == 5);  // 4 wheel velocities (2 axes + 2 followers) + the clock goal, all synced
+  assert((bus.registers[{1, GOAL_VELOCITY}] == 100 && bus.registers[{2, GOAL_VELOCITY}] == -200));
+  assert((bus.registers[{3, GOAL_VELOCITY}] == 100 && bus.registers[{4, GOAL_VELOCITY}] == -200));
+  assert((bus.registers[{5, GOAL_POSITION}] == 500));
+  // a follower that stops answering is the one reported (list order: axes, then followers)
+  bus.registers[{4, HARDWARE_ERROR_STATUS}] = 4;
+  test_time_ms += 20;
+  board.tick();
+  test_time_ms += 1000;
+  board.tick();
+  assert(Serial.output.find("D,1,4,4,") != std::string::npos);
+}
+
+// Power-up puts back SECONDARY_ID 255, STATUS_RETURN_LEVEL 2 and BUS_WATCHDOG 0, writing only what differs.
+void normalizeSettings() {
+  Serial = {};
+  craft::AxisConfig axes[6];
+  for (unsigned i = 0; i < 6; ++i) axes[i] = {static_cast<uint8_t>(i + 1), false, 0.001, 0, 1, -10, 10, 10, 30, 0.035};
+  Dynamixel2Arduino bus(Serial3, 84);
+  bus.raw_bytes[{1, 12}] = 6;   // motor 1 also listening as 6
+  bus.raw_bytes[{1, 98}] = 20;  // bus watchdog 400 ms
+  craft::MotorBoard<6> board(bus, axes, true, 1000000, 0.00269);
+  board.begin();
+  assert(bus.rawByte(1, 12) == 255 && bus.rawByte(1, 98) == 0 && bus.rawByte(1, 68) == 2);
+  assert(bus.raw_writes == 2);  // only the two that differed
+}
+
 int main() {
   protocol();
   imuFeedback();
@@ -518,9 +624,12 @@ int main() {
   bootCenter();
   diagnostics();
   timeBased();
+  streamPoints();
   hostClosed();
   looseTolerance();
   dynamicIGain();
   lostReplies();
-  std::cout << "Firmware protocol, IMU feedback, watchdog, fault, relax/hold, channel, diagnostic, time-based profile, closed-port, loose-tolerance dynamic I gain and lost-reply tests passed\n";
+  syncBus();
+  normalizeSettings();
+  std::cout << "Firmware protocol, IMU feedback, watchdog, fault, relax/hold, channel, diagnostic, time-based profile, stream points, closed-port, loose-tolerance dynamic I gain, lost-reply, sync bus and settings tests passed\n";
 }

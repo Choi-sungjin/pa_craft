@@ -1,0 +1,114 @@
+# shoulder_path_viz.py reads this file and reloads it on every save (paths are solved again).
+# Notation as in shoulder_path.py. Masses [kg], lengths [m], angles [deg], speeds [deg/s].
+# EXAMPLE values, not measured.
+
+# model: urdf = masses, lengths, joint limits from src/craft_description/urdf/v307_robotis_arm.urdf (urdf_arm.py),
+#        scenario / x_min / z_min from the 'urdf:' block at the end, and RViz shows the URDF robot in every lane.
+#        yaml = the example values below (user's notation, m1 and Lm separate).
+model: urdf
+
+M_L1: 0.040     # link 1 mass
+m1:   0.082     # elbow motor mass
+M_L2: 0.030     # link 2 mass
+M_L3: 0.050     # long bracket (L3) mass
+m2:   0.250     # wrist + end effector mass
+
+L1: 0.124       # link 1
+Lm: 0.0465      # motor length (long axis)
+L2: 0.124       # link 2
+L3: 0.100       # long bracket
+
+r1: 0.062       # link 1 centre of mass from its start (uniform: L1/2)
+r2: 0.062       # link 2 centre of mass from its start (uniform: L2/2)
+r3: 0.050       # L3 centre of mass from its start (uniform: L3/2)
+
+psi: 0.0        # angle from the horizontal to theta1 = 0
+
+# Motion (2026-11-19). dynamic: true = MinPeak / BestIK paths bound M_dyn (gravity + inertia + centrifugal/Coriolis,
+# every segment rests at both ends) and the lanes show M_dyn; false = static M only.
+dynamic: true
+J_r: 0.0        # [kg m^2] shoulder rotor inertia at the output (gear^2 x rotor). XM430-W350 (353.5:1): ROBOTIS does
+                # not publish the rotor inertia -> unknown, 0 until measured. Link spin inertia: uniform rod M L^2 / 12
+
+q_min: [-20.0, -150.0, -150.0]   # theta1, theta2, theta3 lower limits
+q_max: [160.0,  150.0,  150.0]   # upper limits
+w_max: [15.0, 15.0, 15.0]        # max joint speed
+
+# Pick-and-load scenario: waypoints in order. tip = L3 end [m] in the shoulder frame (x horizontal, z up),
+# tool = tool angle phi3 [deg] from the horizontal (-90 = straight down). tool_free: BestIK may pick any tool angle
+# in tool_range (moves in between, nothing held in a fixed way). grasp: the puck is held from this waypoint on,
+# release: not after it (the puck mass is added to m2 meanwhile). T [s]: time to reach this waypoint (made longer
+# if the joint speed limit needs it). EXAMPLE positions, not the real box / clock.
+m_puck: 0.050   # [kg] puck
+scenario:
+  - {name: home,       tip: [0.15, 0.30],  tool: 0,   tool_free: true, tool_range: [-90, 90]}
+  - {name: above_pick, tip: [0.25, 0.05],  tool: -90, T: 3}
+  - {name: pick,       tip: [0.25, -0.03], tool: -90, T: 1.5, grasp: true}
+  - {name: lift,       tip: [0.25, 0.05],  tool: -90, T: 1.5}
+  - {name: carry,      tip: [0.05, 0.32],  tool: 0,   tool_free: true, tool_range: [-90, 90], T: 3}
+  - {name: above_slot, tip: [-0.08, 0.15], tool: -90, T: 3}
+  - {name: place,      tip: [-0.08, 0.09], tool: -90, T: 1.5, release: true}
+  - {name: home_back,  tip: [0.15, 0.30],  tool: 0,   tool_free: true, tool_range: [-90, 90], T: 3}
+
+N_seg: 20       # path steps per segment
+smooth_weight: 0.001  # lam: weight of sum |dq|^2 / dt (gentler, slower moves)
+time_weight: 0.2     # rho [N^2 m^2 per s]: cost of one second; null = the T above is fixed.
+                      # Bigger: faster moves (more heat), smaller: slower, gentler moves. Only for the heat objective
+                      # (the lanes now use MinPeak, whose segment times are the T above).
+x_min: -0.08    # [m] tip never further back than this (rearmost carousel cell centre); null: no limit
+                # EXAMPLE = the example place x; put the real cell centre in the shoulder frame here
+z_min: -0.05    # [m] tip never below this (shoulder axis = 0); null: no limit
+
+# Used with model: urdf (2026-11-19). Shoulder frame = shoulder axis of v307_robotis_arm (base_link (225, -43.5, 118) mm),
+# x forward, z up; tool -90 = TCP straight down. The arm there: shoulder -45..+18 deg lean, TCP 194 mm from the wrist.
+# Waypoints are PLACEHOLDERS (reachable, not the real box / carousel cell): drag them in the Edit lane or put the
+# real ones here. w_max, m_puck, N_seg, dynamic, J_r above still apply.
+urdf:
+  measured:           # [m] user's measurement 2026-11-19 (axis to axis); replaces the URDF lengths, masses stay URDF
+    L1: 0.147         # shoulder axis -> elbow axis   (URDF 0.1103)
+    L2: 0.122         # elbow axis -> wrist axis      (URDF 0.1103)
+    grip_tip: 0.205   # wrist axis -> finger tips (user 2026-11-19, was 0.203); L3 = grip_tip - grip_inset = 0.175
+  carousel: {start_deg: 158.8, stop_deg: 338.8, stop_at: above_slot}  # clock motor raw deg (URDF = raw, 12 o'clock at 338.8, user 2026-11-19). The loading cell starts at 6 o'clock,
+                      # turns to 12 (cell centre on +x, toward the arm) and stops by the time the arm is over it
+  # 7 cm box as in box_reach (box_size 205 x 205 x 70, front face base x 0.273 + 20 mm): near edge base x 0.293,
+  # top base z -0.0343 + 0.070; in this frame (shoulder base x 0.2105, z 0.1217 = 156 mm over the ground, user 2026-11-19; LM moved back 7 mm, up 3.7 mm):
+  box: {near_x: 0.0825, size: [0.205, 0.205, 0.070], top_z: -0.0860}
+  puck_size: [0.030, 0.030, 0.060]   # [m] standing prism puck (x, y, height)
+  puck_out: 0.015     # [m] held puck sticks out this far past the finger tips: bottom = tip - 45 mm along the tool (user 2026-11-19: 1.5 cm; was 0.030, 0.012)
+  # Joint limits [URDF deg = motor raw deg, 2026-11-19] of the real robot: measured physical limits 2 deg inside
+  # (= control.yaml arm_min/max_angle). The URDF carries the same; the mesh-collision range in raw is elbow 63..269,
+  # wrist_pitch 51..307. Raw at the geometric zero (L1 up, L2 forward): shoulder 90, elbow 90, wrist_pitch 180.
+  joint_limits_deg:
+    shoulder: [62.4, 199.3]       # physical 60.4..201.3
+    elbow: [66.9, 298.5]          # physical 64.9..300.5
+    wrist_pitch: [83.0, 302.5]    # physical 81.0..304.5
+  lm_slide: 0.0345    # [m] RViz LM: clock-12 alignment LM raw 224.7 deg = slide 34.5 mm = arm plane on the carousel centre (control.yaml LM mapping, 2026-11-19)
+  grip_inset: 0.030   # [m] grip point (puck centre, the tip in this file) inside the finger tips (user: 30 mm)
+  z_min: -0.156   # ground = -156 mm below the shoulder axis (user 2026-11-19) (base_link 34.3 mm above base_footprint)
+  x_min: -0.2646  # rearmost carousel cell centre: base x 0.045955 - 0.100045 = -0.0541, shoulder at 0.2105
+  scenario:
+    - {name: home,       tip: [0.20, 0.15],   tool: 0,   tool_free: true, tool_range: [-180, 179]}
+    - {name: above_pick, from: pick, shoulder: 17, T: 3}   # shoulder-only: pick pose turned 17 deg up (puck bottom ~40 mm over)
+    - {name: pick,       tip: [0.147, -0.0410], tool: -90, T: 1.5, grasp: true}  # puck 65 mm in from the box near edge; grip 45 mm over the box top (-0.0860)
+    - {name: lift,       from: pick, shoulder: 17, T: 1.5}  # out of the box by the shoulder alone
+    - {name: carry,      tip: [0.15, 0.15],   tool: 0,   tool_free: true, tool_range: [-180, 179], T: 3}
+    # slot waypoints: the PUCK BOTTOM centre on the slot axis (x -0.0735), tip = bottom - 60 mm along the tool,
+    # each with the steepest tool the real wrist limit (+136.4) allows: upright from 10 mm in down to the place
+    - {name: above_slot, from: place, shoulder: -30, T: 3}  # shoulder-only: place pose turned 30 deg back (puck bottom centre over the walls)
+    - {name: place,      tip: [-0.0645, 0.0386], tool: -90, T: 1.0, release: true}  # final load point: the highest tip that keeps the tool at -90 (max 0.03868, wrist raw 302.5 limit); bottom 3.6 mm over the floor (-0.0100); let go, the puck drops
+                      # 32 mm out of the 28 mm deep cell; finger tips 2 mm over the walls
+      # clock 12 from the carousel mesh (2026-11-19): cells centred at 30k deg (rib tops at 15 + 30k, measured from the mesh 2026-11-19), r 100.045 mm, cells 34 x 34 (user 2026-11-19; the V307 mesh already has 34 x 34 at r 100), disc r 122.5
+      # (walls r 83 / 117 mm), pocket floor mesh z 0.0201 (was read as 0.0171), wall top 0.0451; carousel axis base x 0.045955 (= shoulder 0.2105 - 64.5 - 100.045), z 0.091554 (cell floor 146 mm over the ground, user 2026-11-19);
+      # shoulder axis base x 0.2105 (user 2026-11-19: shoulder axis to the 12 o'clock cell centre 64.5 mm, +-1.5 mm), z 0.1217 -> cell x -0.0645, floor -0.0100, wall top +0.0150.
+      # The carousel stops at 0 deg so the 0-deg cell is on +x (the loading side). (-15 put a rib there.)
+    # load done -> back out empty, then unload the same cell (carousel brought it back to clock 12) and put the
+    # puck back where it was picked (EXAMPLE drop = the pick spot). Same slot geometry as the load, reversed.
+    - {name: exit_slot,     from: place, shoulder: -30, T: 1.0}   # fingers open, out by the shoulder alone
+    - {name: wait_slot,     from: regrip, shoulder: -30, T: 1.0}  # carousel turns away and back (arm still)
+    - {name: regrip,        tip: [-0.0645, 0.0350], tool: -90, T: 1.5, grasp: true}  # in by the shoulder alone, take the puck off the floor (-0.0100 + 45 mm)
+    - {name: unload_lift,   from: regrip, shoulder: -30, T: 1.5}   # out by the shoulder alone
+    - {name: carry_out,     tip: [0.15, 0.15],   tool: 0,   tool_free: true, tool_range: [-180, 179], T: 3}
+    - {name: above_drop,    from: pick, shoulder: 17, T: 3}
+    - {name: drop,          tip: [0.147, -0.0410], tool: -90, T: 1.5, release: true}  # back on the box floor (in by the shoulder alone)
+    - {name: drop_lift,     from: pick, shoulder: 17, T: 1.5}
+    - {name: home_back,     tip: [0.20, 0.15],   tool: 0,   tool_free: true, tool_range: [-180, 179], T: 3}

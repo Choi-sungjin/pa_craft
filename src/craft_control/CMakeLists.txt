@@ -46,6 +46,10 @@ if(BUILD_TESTING)
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/test_planning_watchdog_integration.py
     ENV CRAFT_CONTROL_BINARY=$<TARGET_FILE:control_master>
     TIMEOUT 60 GENERATE_RESULT_FOR_RETURN_CODE_ZERO)
+  ament_add_test(test_arm_stream_integration
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/test_arm_stream_integration.py
+    ENV CRAFT_CONTROL_BINARY=$<TARGET_FILE:control_master>
+    TIMEOUT 60 GENERATE_RESULT_FOR_RETURN_CODE_ZERO)
 endif()
 
 ament_package()

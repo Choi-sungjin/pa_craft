@@ -32,7 +32,7 @@
 #include "geometry_msgs/msg/point_stamped.hpp"
 #include "geometry_msgs/msg/transform_stamped.hpp"
 #include "geometry_msgs/msg/twist.hpp"
-#include "tf2_ros/transform_broadcaster.h"
+#include "tf2_ros/transform_broadcaster.hpp"
 
 #include "craft_control/arm_controller.hpp"
 #include "craft_control/contact_detector.hpp"
@@ -387,6 +387,12 @@ public:
     settle_s_ = positive_param("settle_time_s");
     // Acceleration caps of the arm moves (2026-11-14 user: the work steps started and stopped too hard). 0 = off.
     arm_max_accel_ = declare_parameter("arm_max_accel_rad_s2", 0.0);
+    // Stream points (MANIPULATOR UPDATE_PATH) as constant-speed moves of this many ms (firmware STREAM,<ms>; 10..500),
+    // 0 = each point a timed move with ramps (TIME,<duration_s>). Needs the 2026-11-18 lm_arm firmware.
+    arm_stream_direct_ms_ = static_cast<int>(declare_parameter("arm_stream_direct_ms", 0));
+    if (arm_stream_direct_ms_ != 0 && (arm_stream_direct_ms_ < 10 || arm_stream_direct_ms_ > 500)) {
+      throw std::invalid_argument("arm_stream_direct_ms must be 0 or 10..500");
+    }
     lm_max_accel_ = declare_parameter("lm_max_accel_m_s2", 0.0);
     arm_max_speed_ = declare_parameter("arm_max_speed_rad_s", 0.0);
     lm_max_speed_ = declare_parameter("lm_max_speed_m_s", 0.0);
@@ -443,7 +449,13 @@ public:
       throw std::runtime_error("wheel_dock_straight_speed must be >= 0 and wheel_dock_heading_gain > 0");
     }
     lateral_.set_dock_straight(dock_straight_speed, dock_heading_gain);
-    timer_ = create_wall_timer(std::chrono::duration<double>(dt_), [this]() {control_loop();});
+    // Loop timing (2026-11-20, the TODO above): every 10 s one line with the timer period and the loop's own work
+    // time on this machine (mean / p99 / max, and how many periods were over 1.5 dt), steady clock.
+    timer_ = create_wall_timer(std::chrono::duration<double>(dt_), [this]() {
+      const auto start = std::chrono::steady_clock::now();
+      control_loop();
+      note_loop_time(start, std::chrono::steady_clock::now());
+    });
     lookahead_timer_ = create_wall_timer(std::chrono::milliseconds(50), [this]() {
       if (!have_clock_wheel_feedback_) {return;}
       if (const auto point = lateral_.lookahead_point()) {
@@ -919,13 +931,17 @@ private:
       task_result_pub_->publish(task_.result); return; // no re-execution, including terminal tasks
     }
     const bool update = c.operation == TaskCommand::UPDATE_PATH;
+    // UPDATE_PATH of a running MANIPULATOR task (2026-11-18, streamed arm trajectories): new joint targets and travel
+    // time for the same task; the board rewrites each changed goal with that time (a rewrite restarts the timed move).
+    const bool arm_update = update && task_.kind == TaskCommand::MANIPULATOR && c.kind == TaskCommand::MANIPULATOR;
     if (update && (!task_.running() || c.task_id != task_.result.task_id ||
-        task_.kind != TaskCommand::NAVIGATE || c.kind != TaskCommand::NAVIGATE)) {
+        (!arm_update && (task_.kind != TaskCommand::NAVIGATE || c.kind != TaskCommand::NAVIGATE)))) {
       // Late updates after completion cannot revive an old path.
       if (c.task_id == task_.result.task_id) task_result_pub_->publish(task_.result);
-      else reject(c, "no matching navigation task");
+      else reject(c, "no matching navigation or manipulator task");
       return;
     }
+    if (arm_update && c.revision <= task_.result.revision) return;  // an old or repeated stream point
     if (update && c.revision <= task_.result.revision) {
       if (camera_distance_mode_) {
         const auto &s = c.camera_observation_stamp;
@@ -1003,14 +1019,14 @@ private:
       case TaskCommand::CLOCK: valid = validate_clock_target(c.clock_slot); participants[3] = true; break;
       case TaskCommand::WAIT: valid = std::isfinite(c.duration_s) && c.duration_s >= 0; break;
     }
-    if (update && valid) {
+    if (update && valid && !arm_update) {
       // Planning sends one A*+arc segment (up to a STOP_TURN corner) per task, so a replan around a new
       // obstacle may end the segment at a different corner: only the frame has to match.
       const auto &old = lateral_.target_path();
       valid = !old.poses.empty() && c.path.header.frame_id == old.header.frame_id;
     }
     if (!valid) {
-      if (update) {task_.fail("invalid path update"); task_hold_ = true;}
+      if (update) {task_.fail(arm_update ? "invalid arm update" : "invalid path update"); task_hold_ = true;}
       else reject(c, "invalid task target/calibration");
       return;
     }
@@ -1021,7 +1037,10 @@ private:
       active_task_timeout_s_ = c.kind == TaskCommand::NAVIGATE && c.continuous_tracking && c.duration_s > 0 ?
         c.duration_s : task_timeout_s_;
       arm_stable_at_ = clock_stable_at_ = at;
-    } else task_.result.revision = c.revision;
+    } else {
+      task_.result.revision = c.revision;
+      if (arm_update) task_at_ = at;  // the task timeout counts from the last stream point
+    }
     switch (c.kind) {
       case TaskCommand::NAVIGATE:
         lateral_.set_task_tolerances(c.goal_tolerance, c.tolerance_rad);
@@ -1048,6 +1067,13 @@ private:
         // Position I gains of this move: board axes 1..4 (LM is 0), one IGAIN line each, before its targets. No
         // gains: the board's power-up gains (IGAIN,BOOT), once after any task that set some (and once at start: a
         // board left by an earlier control_master may still hold them).
+        if (arm_update) {  // a stream point keeps the task's gains (no IGAIN lines per point)
+          send_arm_move_time_ = true;
+          arm_stream_point_ = arm_stream_direct_ms_ > 0;
+          if (c.joints.position.size() == 6) set_gripper_target(false, c.joints.position[5]);
+          break;
+        }
+        arm_stream_point_ = false;  // a task's own move: timed (STREAM,0 first if a stream was on)
         arm_gain_lines_.clear();
         for (size_t i = 0; i < c.position_i_gains.size(); ++i) {
           arm_gain_lines_.push_back("IGAIN," + std::to_string(i + 1) + "," + std::to_string(c.position_i_gains[i]));
@@ -1060,6 +1086,7 @@ private:
       case TaskCommand::GRIPPER:
         set_gripper_target(c.close, gripper_open_angle_of(c));
         arm_move_ms_ = 0;  // the gripper alone, at its speed cap (time-based on the arm board)
+        arm_stream_point_ = false;
         arm_tolerance_cdeg_ = -1;  // no TOL line: the arm keeps the last move's tolerance
         arm_gain_lines_.clear();   // nor its I gains
         send_arm_move_time_ = true;
@@ -1067,6 +1094,35 @@ private:
       case TaskCommand::CLOCK: set_clock_target(c.clock_slot); break;
       case TaskCommand::WAIT: wait_duration_ = c.duration_s; break;
     }
+  }
+
+  void note_loop_time(std::chrono::steady_clock::time_point start, std::chrono::steady_clock::time_point end)
+  {
+    if (loop_prev_start_) {
+      loop_periods_ms_.push_back(std::chrono::duration<double, std::milli>(start - *loop_prev_start_).count());
+    }
+    loop_prev_start_ = start;
+    loop_work_ms_.push_back(std::chrono::duration<double, std::milli>(end - start).count());
+    if (!loop_report_at_) {loop_report_at_ = start;}
+    if (start - *loop_report_at_ < std::chrono::seconds(10) || loop_periods_ms_.empty()) {return;}
+    const auto summary = [](std::vector<double> v) {
+      std::sort(v.begin(), v.end());
+      double sum = 0.0;
+      for (const double x : v) {sum += x;}
+      const double p99 = v[std::min(v.size() - 1, static_cast<size_t>(0.99 * static_cast<double>(v.size())))];
+      return std::array<double, 3>{sum / static_cast<double>(v.size()), p99, v.back()};
+    };
+    const auto p = summary(loop_periods_ms_);
+    const auto w = summary(loop_work_ms_);
+    const auto late = std::count_if(loop_periods_ms_.begin(), loop_periods_ms_.end(),
+      [this](double x) {return x > 1.5e3 * dt_;});
+    RCLCPP_INFO(get_logger(),
+      "[loop] %.0f Hz target: period mean %.2f p99 %.2f max %.2f ms, work mean %.2f p99 %.2f max %.2f ms, "
+      "late (>1.5 dt) %ld of %zu",
+      1.0 / dt_, p[0], p[1], p[2], w[0], w[1], w[2], static_cast<long>(late), loop_periods_ms_.size());
+    loop_periods_ms_.clear();
+    loop_work_ms_.clear();
+    loop_report_at_ = start;
   }
 
   void control_loop()
@@ -1111,6 +1167,7 @@ private:
           arm_controller_.set_target(*here);
           arm_gain_lines_.clear();
           arm_move_ms_ = 0;
+          arm_stream_point_ = false;  // the contact stop is a timed move (ramp), also in the middle of a stream
           send_arm_move_time_ = true;
           task_.result.reason = std::string("contact (") +
             (contact_.cause() == ContactDetector::Current ? "shoulder current" : "stall") + ")";
@@ -1192,7 +1249,7 @@ private:
       // The firmware ramps every time-based move up and down over kRampFraction (0.25) of its travel time each, so the
       // peak acceleration is d / (T^2 f (1 - f)). The travel time sent is the longer of the asked one and the one that
       // keeps every axis inside its cap; the firmware still lengthens it for its speed caps.
-      if (send_arm_move_time_ && arm_feedback_fresh && task_.kind == TaskCommand::MANIPULATOR) {
+      if (send_arm_move_time_ && arm_feedback_fresh && task_.kind == TaskCommand::MANIPULATOR && !arm_stream_point_) {
         constexpr double kRamp = 0.25 * (1.0 - 0.25);  // keep equal to firmware CraftMotorFirmware.h kRampFraction
         double need_s = 0.0;
         if (arm_max_accel_ > 0.0) {
@@ -1221,10 +1278,16 @@ private:
           contact_.start(contact_ratio_, need_ms / 1000.0);  // its windows are shares of the move time
         }
       }
+      // A stream point: STREAM,<ms> instead of TIME; anything else: STREAM,0 then TIME. Sent with every move, not
+      // tracked: the board ends a stream on its own when its watchdog holds, and the same STREAM again costs it
+      // nothing (it rewrites the profile only for a new point time). Firmware older than 2026-11-18 ignores it.
       if (send_arm_move_time_ && arm_feedback_fresh && arm_gain_lines_.empty() &&
         (arm_tolerance_cdeg_ < 0 ||
          arm_lm_serial_->write_line("TOL," + std::to_string(arm_tolerance_cdeg_))) &&
-        arm_lm_serial_->write_line("TIME," + std::to_string(arm_move_ms_)))
+        (arm_stream_point_ ?
+          arm_lm_serial_->write_line("STREAM," + std::to_string(arm_stream_direct_ms_)) :
+          (arm_lm_serial_->write_line("STREAM,0") &&
+           arm_lm_serial_->write_line("TIME," + std::to_string(arm_move_ms_)))))
       {
         send_arm_move_time_ = false;
       }
@@ -1419,6 +1482,8 @@ private:
   craft_control::LateralController lateral_;
   double max_wheel_ = 0.0;
   double dt_ = 0.02;        // control period [s] = 1 / control_hz
+  std::optional<std::chrono::steady_clock::time_point> loop_prev_start_, loop_report_at_;  // note_loop_time
+  std::vector<double> loop_periods_ms_, loop_work_ms_;
   double max_accel_ = 0.0;  // [m/s^2] speed-up cap of the forward command
   double drive_v_ = 0.0;    // forward speed of the last wheel command [m/s]
   double wheel_radius_ = 0.0;
@@ -1491,6 +1556,8 @@ private:
   std::vector<std::string> arm_gain_lines_;  // IGAIN lines of the next MANIPULATOR task, sent before TOL/TIME
   bool arm_gains_modified_ = true;  // the board may hold gains other than its power-up ones
   int arm_move_ms_ = 0;
+  int arm_stream_direct_ms_ = 0;   // control.yaml arm_stream_direct_ms (0: stream points are timed moves)
+  bool arm_stream_point_ = false;  // the pending move is a stream point
   double arm_max_accel_ = 0.0, lm_max_accel_ = 0.0, lm_m_per_rad_ = 0.0, contact_ratio_ = 0.0,
     arm_max_speed_ = 0.0, lm_max_speed_ = 0.0;
   using ContactDetector = craft_control::ContactDetector<craft_control::kArmMotors>;

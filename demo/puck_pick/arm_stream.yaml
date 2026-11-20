@@ -1,0 +1,28 @@
+# arm_stream.py settings (2026-11-18). Per-joint lists: [slide mm, shoulder deg, elbow deg, wrist_pitch deg, tool_roll deg]
+# (speeds per second). Everything is turned into URDF units (m, rad) on load.
+hz: 20                 # stream points per second
+point_travel_s: 0.10   # travel time of each point (TIME); > 1/hz so a point is rewritten before it arrives
+                       # (control.yaml arm_stream_direct_ms > 0: points are constant-speed moves of that many ms
+                       # instead, set it to 1.5-2x 1000 / hz, e.g. 80 at 20 Hz)
+
+start_tol: [3.0, 3.0, 3.0, 3.0, 3.0]        # refuse to start when the arm is further than this from the first point
+abort:     [15.0, 10.0, 10.0, 10.0, 10.0]   # stop when a joint trails the reference by more than this
+limit_margin: [1.0, 1.0, 1.0, 1.0, 1.0]     # commands stay this far inside the URDF limits
+
+# Breakaway kick: measure with --measure-kick <joint> --dir +1 / -1 at a few poses and put the typical lead here.
+# 0 = no kick on that joint (the slide never gets one). NOT MEASURED YET: all 0 until the user's measurement.
+kick_pos: [0.0, 0.0, 0.0, 0.0, 0.0]   # moving toward + (URDF)
+kick_neg: [0.0, 0.0, 0.0, 0.0, 0.0]   # moving toward -
+still:   [1.0, 0.5, 0.5, 0.5, 0.5]    # a joint slower than this counts as standing still (per second)
+lag_min: [0.5, 0.1, 0.1, 0.1, 0.1]    # kick only a joint trailing the reference by more than this
+speed_window_s: 0.15   # measured speed over this window (one encoder tick per 50 ms is already 1.8 deg/s)
+tau_s: 0.15            # once it moves the kick fades with this time constant
+end_off_s: 0.4         # no kick in the last seconds: the move ends on the reference
+
+# --measure-kick (rotary joints only)
+creep:     [0.0, 0.5, 0.5, 0.5, 0.5]    # target creep speed (per second)
+breakaway: [0.0, 0.15, 0.15, 0.15, 0.15]  # this much measured motion = it broke away
+creep_max: [0.0, 5.0, 5.0, 5.0, 5.0]    # give up after creeping this far
+
+# --dry-run only: assumed stiction band per joint [deg] of the simulated plant (NOT robot data; slide unused)
+dry_dead_deg: [0.0, 0.6, 0.4, 0.3, 0.3]

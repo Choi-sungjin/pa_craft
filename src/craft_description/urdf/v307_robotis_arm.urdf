@@ -1,0 +1,116 @@
+<?xml version="1.0"?>
+<!-- v307_full_robot: make_urdf_usd.py가 생성(V303 통합본 + 상단 D435 실측 43.6도). SI 단위. -->
+<!-- V307 몸체 + ROBOTIS OpenMANIPULATOR-X 팔 링크, 카메라 없음. scripts/make_robotis_arm_urdf.py로 생성 -->
+<robot name="v307_full_robot">
+  <link name="base_link">
+    <inertial><origin xyz="0.0265994983 -0.00416343274 0.143001453" rpy="0 0 0"/><mass value="4.928111"/><inertia ixx="0.128475757" ixy="0.00310746603" ixz="0.0297249215" iyy="0.136089625" iyz="-0.00291734888" izz="0.081745089"/></inertial>
+    <visual><origin xyz="0.048 0 0" rpy="0 0 0"/><geometry><mesh filename="package://craft_description/meshes/visual/robotis_arm/base_link.stl"/></geometry><material name="base_link_mat"><color rgba="0.93 0.36 0.1 1"/></material></visual>
+    <collision><origin xyz="0.048 0 0" rpy="0 0 0"/><geometry><mesh filename="package://craft_description/meshes/collision/robotis_arm/base_link.stl"/></geometry></collision>
+  </link>
+  <link name="slide_link">
+    <inertial><origin xyz="0.0146031475 -0.000185518595 0.0107615661" rpy="0 0 0"/><mass value="0.180426"/><inertia ixx="6.46258835e-05" ixy="6.54442244e-07" ixz="-1.22292275e-05" iyy="8.8552421e-05" iyz="1.25846815e-06" izz="8.39891282e-05"/></inertial>
+    <visual><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://craft_description/meshes/visual/slide_link.stl"/></geometry><material name="slide_link_mat"><color rgba="0.12 0.6 0.29 1"/></material></visual>
+    <collision><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://craft_description/meshes/collision/slide_link.stl"/></geometry></collision>
+  </link>
+  <link name="shoulder_link">
+    <inertial><origin xyz="-0.00022413279 0.00038929816 0.11045959" rpy="0 0 0"/><mass value="0.132746"/><inertia ixx="0.00025155057" ixy="-1.155955e-08" ixz="2.6874417e-07" iyy="0.00024230292" iyz="-1.2764155e-06" izz="3.0654178e-05"/></inertial>
+    <visual><origin xyz="0 0 0" rpy="0 -0 -3.58979303e-09"/><geometry><mesh filename="package://craft_description/meshes/visual/robotis_arm/shoulder_link.stl"/></geometry><material name="robotis_frame_mat"><color rgba="0.75 0.75 0.78 1"/></material></visual>
+    <collision><origin xyz="0 0 0" rpy="0 -0 -3.58979303e-09"/><geometry><mesh filename="package://craft_description/meshes/collision/robotis_arm/shoulder_link.stl"/></geometry></collision>
+  </link>
+  <link name="elbow_link">
+    <inertial><origin xyz="0.08920959 0.00038929816 0.00022413279" rpy="0 0 0"/><mass value="0.132746"/><inertia ixx="3.0654178e-05" ixy="-1.2764155e-06" ixz="-2.6874417e-07" iyy="0.00024230292" iyz="1.155955e-08" izz="0.00025155057"/></inertial>
+    <visual><origin xyz="0 0 0" rpy="0 -0 -3.58979303e-09"/><geometry><mesh filename="package://craft_description/meshes/visual/robotis_arm/elbow_link.stl"/></geometry><material name="robotis_frame_mat"><color rgba="0.75 0.75 0.78 1"/></material></visual>
+    <collision><origin xyz="0 0 0" rpy="0 -0 -3.58979303e-09"/><geometry><mesh filename="package://craft_description/meshes/collision/robotis_arm/elbow_link.stl"/></geometry></collision>
+  </link>
+  <link name="wrist_pitch_link">
+    <inertial><origin xyz="0.0527721135 -0.0110430454 0.0010291429" rpy="0 0 0"/><mass value="0.106950"/><inertia ixx="4.07280297e-05" ixy="7.12437612e-06" ixz="-7.54690775e-07" iyy="6.12364003e-05" iyz="1.06765531e-07" izz="8.01961669e-05"/></inertial>
+    <visual><origin xyz="0 0 0" rpy="0 -0 3.14159265"/><geometry><mesh filename="package://craft_description/meshes/visual/robotis_arm/wrist_pitch_link.stl"/></geometry><material name="wrist_pitch_link_mat"><color rgba="0.6 0.6 0.6 1"/></material></visual>
+    <collision><origin xyz="0 0 0" rpy="0 -0 3.14159265"/><geometry><mesh filename="package://craft_description/meshes/collision/robotis_arm/wrist_pitch_link.stl"/></geometry></collision>
+  </link>
+  <link name="tool_roll_link">
+    <inertial><origin xyz="0.0633232688 0.0107649027 0.00439792271" rpy="0 0 0"/><mass value="0.185754"/><inertia ixx="0.000108639397" ixy="6.61842098e-06" ixz="9.41784129e-07" iyy="0.000104458058" iyz="4.72304585e-07" izz="9.54443864e-05"/></inertial>
+    <visual><origin xyz="0 0 0" rpy="0 -0 3.14159265"/><geometry><mesh filename="package://craft_description/meshes/visual/tool_roll_link.stl"/></geometry><material name="tool_roll_link_mat"><color rgba="0.6 0.6 0.6 1"/></material></visual>
+    <collision><origin xyz="0 0 0" rpy="0 -0 3.14159265"/><geometry><mesh filename="package://craft_description/meshes/collision/robotis_arm/tool_roll_link.stl"/></geometry></collision>
+  </link>
+  <link name="jaw_upper_link">
+    <inertial><origin xyz="-0.0100757218 -0.00932025313 -3.78063716e-07" rpy="0 0 0"/><mass value="0.033720"/><inertia ixx="9.71968369e-06" ixy="2.79876498e-06" ixz="3.81660979e-10" iyy="2.35547227e-05" iyz="3.71560373e-10" izz="1.8544007e-05"/></inertial>
+    <visual><origin xyz="0 0 0" rpy="0 -0 3.14159265"/><geometry><mesh filename="package://craft_description/meshes/visual/robotis_arm/jaw_upper_link.stl"/></geometry><material name="jaw_upper_link_mat"><color rgba="0.6 0.6 0.6 1"/></material></visual>
+    <collision><origin xyz="0 0 0" rpy="0 -0 3.14159265"/><geometry><mesh filename="package://craft_description/meshes/collision/robotis_arm/jaw_upper_link.stl"/></geometry></collision>
+  </link>
+  <link name="jaw_lower_link">
+    <inertial><origin xyz="-0.0100671292 0.00932468131 5.30458247e-07" rpy="0 0 0"/><mass value="0.033752"/><inertia ixx="9.72314475e-06" ixy="-2.80212392e-06" ixz="-4.37566695e-10" iyy="2.35671712e-05" iyz="3.36421148e-10" izz="1.85567673e-05"/></inertial>
+    <visual><origin xyz="0 0 0" rpy="0 -0 3.14159265"/><geometry><mesh filename="package://craft_description/meshes/visual/robotis_arm/jaw_lower_link.stl"/></geometry><material name="jaw_lower_link_mat"><color rgba="0.6 0.6 0.6 1"/></material></visual>
+    <collision><origin xyz="0 0 0" rpy="0 -0 3.14159265"/><geometry><mesh filename="package://craft_description/meshes/collision/robotis_arm/jaw_lower_link.stl"/></geometry></collision>
+  </link>
+  <link name="carousel_link">
+    <inertial><origin xyz="-8.65118615e-07 4.18767866e-08 0.0180728442" rpy="0 0 0"/><mass value="0.462981"/><inertia ixx="0.00191875563" ixy="1.1861596e-08" ixz="-1.52921136e-09" iyy="0.00191874242" iyz="3.46095429e-10" izz="0.00375982099"/></inertial>
+    <visual><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://craft_description/meshes/visual/carousel_link.stl"/></geometry><material name="carousel_link_mat"><color rgba="0.93 0.36 0.1 1"/></material></visual>
+    <collision><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://craft_description/meshes/collision/carousel_link.stl"/></geometry></collision>
+  </link>
+  <link name="front_left_wheel_link">
+    <inertial><origin xyz="-8.51716159e-07 0.000573335072 1.61791874e-07" rpy="0 0 0"/><mass value="0.034646"/><inertia ixx="1.39365668e-05" ixy="5.22891579e-10" ixz="-3.01227733e-09" iyy="2.5863253e-05" iyz="6.30380469e-09" izz="1.39378743e-05"/></inertial>
+    <visual><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://craft_description/meshes/visual/front_left_wheel_link.stl"/></geometry><material name="front_left_wheel_link_mat"><color rgba="0.6 0.6 0.6 1"/></material></visual>
+    <collision><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://craft_description/meshes/collision/front_left_wheel_link.stl"/></geometry></collision>
+  </link>
+  <link name="front_right_wheel_link">
+    <inertial><origin xyz="1.51977778e-06 -0.000573954923 -3.17608958e-06" rpy="0 0 0"/><mass value="0.034646"/><inertia ixx="1.39406688e-05" ixy="-6.62953286e-09" ixz="2.61855567e-10" iyy="2.58633473e-05" iyz="-3.3966145e-10" izz="1.39338108e-05"/></inertial>
+    <visual><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://craft_description/meshes/visual/front_right_wheel_link.stl"/></geometry><material name="front_right_wheel_link_mat"><color rgba="0.6 0.6 0.6 1"/></material></visual>
+    <collision><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://craft_description/meshes/collision/front_right_wheel_link.stl"/></geometry></collision>
+  </link>
+  <link name="rear_left_wheel_link">
+    <inertial><origin xyz="8.62417446e-07 0.000573321985 -2.74013001e-07" rpy="0 0 0"/><mass value="0.034646"/><inertia ixx="1.39366064e-05" ixy="-5.20314191e-10" ixz="-2.96081123e-09" iyy="2.586332e-05" iyz="-6.30133135e-09" izz="1.39378951e-05"/></inertial>
+    <visual><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://craft_description/meshes/visual/rear_left_wheel_link.stl"/></geometry><material name="rear_left_wheel_link_mat"><color rgba="0.6 0.6 0.6 1"/></material></visual>
+    <collision><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://craft_description/meshes/collision/rear_left_wheel_link.stl"/></geometry></collision>
+  </link>
+  <link name="rear_right_wheel_link">
+    <inertial><origin xyz="-1.54544912e-06 -0.000573947305 3.19833355e-06" rpy="0 0 0"/><mass value="0.034646"/><inertia ixx="1.39406539e-05" ixy="6.62647216e-09" ixz="2.44942251e-10" iyy="2.58633623e-05" iyz="3.42700833e-10" izz="1.3933837e-05"/></inertial>
+    <visual><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://craft_description/meshes/visual/rear_right_wheel_link.stl"/></geometry><material name="rear_right_wheel_link_mat"><color rgba="0.6 0.6 0.6 1"/></material></visual>
+    <collision><origin xyz="0 0 0" rpy="0 0 0"/><geometry><mesh filename="package://craft_description/meshes/collision/rear_right_wheel_link.stl"/></geometry></collision>
+  </link>
+  <joint name="lm_slide" type="prismatic"><parent link="base_link"/><child link="slide_link"/><origin xyz="0.1755 -0.0345 0.10195" rpy="0 0 0"/><axis xyz="0 1 0"/>
+    <limit lower="-0.0507" upper="0.1041" effort="60.0" velocity="0.0513"/>
+    <dynamics damping="0.01" friction="2.0"/></joint>
+  <joint name="shoulder" type="revolute"><parent link="slide_link"/><child link="shoulder_link"/><origin xyz="0.035 0 0.01975" rpy="0 -1.57079633 -0"/><axis xyz="0 1 0"/>
+    <limit lower="1.0891" upper="3.4784" effort="3.0" velocity="8.06"/>
+    <dynamics damping="0.01" friction="0.05"/></joint>
+  <joint name="elbow" type="revolute"><parent link="shoulder_link"/><child link="elbow_link"/><origin xyz="0 0 0.147" rpy="0 1.57079633 -0"/><axis xyz="0 -1 0"/>
+    <limit lower="1.1677" upper="5.2098" effort="3.0" velocity="8.06"/>
+    <dynamics damping="0.01" friction="0.05"/></joint>
+  <joint name="wrist_pitch" type="revolute"><parent link="elbow_link"/><child link="wrist_pitch_link"/><origin xyz="0.122 0 0" rpy="3.14159265 1.2246468e-16 3.14159265"/><axis xyz="0 -1 0"/>
+    <limit lower="1.4487" upper="5.2796" effort="3.0" velocity="8.06"/>
+    <dynamics damping="0.01" friction="0.05"/></joint>
+  <joint name="tool_roll" type="revolute"><parent link="wrist_pitch_link"/><child link="tool_roll_link"/><origin xyz="0.0430566601 0 1.43402885e-05" rpy="0 -0 0"/><axis xyz="0.997583329 0 0.0694802318"/>
+    <limit lower="-6.2919" upper="4.6844" effort="3.0" velocity="8.06"/>
+    <dynamics damping="0.01" friction="0.05"/></joint>
+  <joint name="jaw_upper" type="prismatic"><parent link="tool_roll_link"/><child link="jaw_upper_link"/><origin xyz="0.103910877 -2.87908755e-09 -0.0138137884" rpy="1.57079645 0.0695341865 3.14159256"/><axis xyz="0 -1 0"/>
+    <limit lower="-0.011" upper="0.02" effort="20.0" velocity="0.08"/>
+  </joint>
+  <joint name="jaw_lower" type="prismatic"><parent link="tool_roll_link"/><child link="jaw_lower_link"/><origin xyz="0.100992794 2.54878703e-09 0.0280847175" rpy="1.57079645 0.0695341865 3.14159256"/><axis xyz="0 1 0"/>
+    <limit lower="-0.011" upper="0.02" effort="20.0" velocity="0.08"/>
+  </joint>
+  <joint name="carousel" type="continuous"><parent link="base_link"/><child link="carousel_link"/><origin xyz="0.045955 0 0.091554" rpy="0 -0 0.370009801"/><axis xyz="0 0 1"/>
+    <limit effort="3.0" velocity="3.0"/>
+    <dynamics damping="0.01" friction="0.05"/></joint>
+  <joint name="front_left_wheel" type="continuous"><parent link="base_link"/><child link="front_left_wheel_link"/><origin xyz="0.146 0.144 0" rpy="0 0 0"/><axis xyz="0 1 0"/>
+    <limit effort="3.0" velocity="8.06"/>
+    <dynamics damping="0.01" friction="0.02"/></joint>
+  <joint name="front_right_wheel" type="continuous"><parent link="base_link"/><child link="front_right_wheel_link"/><origin xyz="0.146 -0.144 0" rpy="0 0 0"/><axis xyz="0 1 0"/>
+    <limit effort="3.0" velocity="8.06"/>
+    <dynamics damping="0.01" friction="0.02"/></joint>
+  <joint name="rear_left_wheel" type="continuous"><parent link="base_link"/><child link="rear_left_wheel_link"/><origin xyz="-0.05 0.144 0" rpy="0 0 0"/><axis xyz="0 1 0"/>
+    <limit effort="3.0" velocity="8.06"/>
+    <dynamics damping="0.01" friction="0.02"/></joint>
+  <joint name="rear_right_wheel" type="continuous"><parent link="base_link"/><child link="rear_right_wheel_link"/><origin xyz="-0.05 -0.144 0" rpy="0 0 0"/><axis xyz="0 1 0"/>
+    <limit effort="3.0" velocity="8.06"/>
+    <dynamics damping="0.01" friction="0.02"/></joint>
+  <link name="base_footprint"/>
+  <joint name="base_footprint_joint" type="fixed"><parent link="base_link"/><child link="base_footprint"/><origin xyz="0 0 -0.034346" rpy="0 0 0"/></joint>
+  <link name="front_laser"/>
+  <joint name="front_laser_joint" type="fixed"><parent link="base_link"/><child link="front_laser"/><origin xyz="0.23867 2e-05 0.0567" rpy="0 0 0"/></joint>
+  <link name="rear_laser"/>
+  <joint name="rear_laser_joint" type="fixed"><parent link="base_link"/><child link="rear_laser"/><origin xyz="-0.06767 0 0.0507" rpy="0 -0 3.14159265"/></joint>
+  <link name="imu_link"/>
+  <joint name="imu_link_joint" type="fixed"><parent link="base_link"/><child link="imu_link"/><origin xyz="0.0125 0.0895 0.03512" rpy="0 0 0"/></joint>
+  <link name="tcp"/>
+  <joint name="tcp_joint" type="fixed"><parent link="tool_roll_link"/><child link="tcp"/><origin xyz="0.146644784 -4.49724339e-09 0.0102133474" rpy="0 0.0695362563 -3.14159265"/></joint>
+</robot>

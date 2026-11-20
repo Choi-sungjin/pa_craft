@@ -10,6 +10,8 @@ one timed move each (taught poses, clock not turned).
 --planning --box NAME: route steps through planning_master; lying wheel pauses become 0.28 m reverse / re-dock.
 --collect: fresh two-puck survey, standing first then nearest; dispatch standing/lying pick.
 --find: a standing puck anywhere between cells 8 and 2: upper cam -> wait pose -> gripper cam fix -> pick -> load.
+--pick-160mm: model-based pick on a 70 mm-high surface, 160 mm ahead of the shoulder axis. Stops after closing.
+--pick-190mm: model-based pick 190 mm ahead of the shoulder axis, then teach-based load into slot 12.
 --standcal --cell N (2, 5, 8): calibration for the upper-cam -> gripper-cam correction, writes stand_cal.json.
 --goto cell --cell N: from where the arm is now (e.g. over another cell) straight to cell N's pick wait pose, one move.
 --yaw (with --stand --cell N or --goto cell): then the gripper cam reads the prism's yaw and the jaws turn to it (tool_roll).
@@ -22,12 +24,14 @@ Press Enter before every step; Ctrl+C sends STOP and hold.
 Usage:  source ~/craft/install/setup.bash && python3 ~/craft/demo/puck_pick/execute.py [--unload | --dice | --lying | --goto nominal|via] [--dry-run]
 Delete with: rm -rf ~/craft/demo
 """
+import csv
 import json
 import math
 import os
 import sys
 import threading
 import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import numpy as np
@@ -84,13 +88,17 @@ BIGBRO_SLOT = BIGBRO_SLOTS[0]
 # box places are their slide positions [m] in raw degrees again (box centre = LM mid travel 594.1).
 # 2026-11-13: re-set by hand, this is now the nominal pose: DYNAMIXEL Wizard positions, LM the guide-side reading (checkarm 561.4,
 # Wizard 201.7 + 1 turn); tool_roll Wizard 360 = 0.0 (limit -175..175). Was [548.3, 84.9, 100.1, 16.8, 90.0, 94.0].
-NOMINAL_RAW_DEG = [561.4, 53.9, 178.0, 58.4, 0.0, 73.1]
+# 2026-11-19 user: new nominal pose after the reassembly (gripper kept). Was [561.4, 53.9, 178.0, 58.4, 0.0, 73.1].
+# 2026-11-20: LM motor re-mounted (user, robot): clock 12 = LM -709.2 (was 224.7), ends -1486.7 (away) / -74.4 (motor).
+# The other raw LM degrees below shifted by -1270.6 from the 561.4 nominal they were taught at.
+# 2026-11-20: nominal arm angles from the user's current motor readings.
+NOMINAL_RAW_DEG = [-709.2, 64.9, 216.5, 211.0, 1.1, 73.1]
 # Via pose between the nominal pose and any work, both ways. Shoulder, elbow, wrist_pitch given by hand
 # (2026-11-06); LM the old via - nominal difference on the new nominal; tool_roll and gripper as the nominal pose
 # (they must not move); LM = nominal (858.3 since 2026-11-06, was 829.7, 940.8). Was [1030.6, 83.4, 101.2, 114.2, 91.8, 149.6].
 # 2026-11-13: re-set with teacharm jog (teach.yaml p12, LM held at the new nominal 561.4) next to the new nominal pose.
 # Was [548.3, 92.5, 182.9, 104.6, 90.0, 141.9].
-VIA_RAW_DEG = [561.4, 93.3, 177.6, 61.3, -0.4, 73.1]
+VIA_RAW_DEG = [-709.2, 93.3, 177.6, 61.3, -0.4, 73.1]
 # Carrying a puck out of the clock (sis2 8, dice): the 2026-11-06 via (wrist folded, tool_roll 90), LM as the via.
 # The new via above stands the tool up: on the way from over the slot the puck ends rose to 0.535 m and hit the
 # structure (2026-11-13, user); through this pose they stay under 0.402 m (FK, 60 mm puck) and tool_roll does not turn.
@@ -104,16 +112,26 @@ CARRY_SHOULDER_OUT_DEG = 5.0
 # stored puck, 28 mm down from its top. Lift: gripped and lifted clear of the slot. The gripper values are what the
 # readings showed; the moves leave the gripper alone (GRIPPER steps open / close it). tool_roll set to exactly 0 / 90
 # (read 1.0 / 91.1).
-PICK_VIA_RAW_DEG = [548.2, 121.8, 97.0, 17.1, 0.0, 134.3]  # jog-taught grasp_via 15:51; LM as the approach (was 872.0)
+PICK_VIA_RAW_DEG = [-722.4, 121.8, 97.0, 17.1, 0.0, 134.3]  # jog-taught grasp_via 15:51; LM as the approach (was 872.0)
 # grasp wrist +0.5 deg on the robot (2026-11-07; was 132.46)
-PRE_GRASP_RAW_DEG = [548.2, 92.06, 118.9, 132.96, 90.0, 90.0]  # re-taught 2026-11-06 evening (92.7, 116.0, 132.2, roll
+PRE_GRASP_RAW_DEG = [-722.4, 92.06, 118.9, 132.96, 90.0, 90.0]  # re-taught 2026-11-06 evening (92.7, 116.0, 132.2, roll
                                                               # read 1.1), wrist -2 deg toward the carousel centre, then
                                                               # 3 mm straight up, tool angle kept (URDF model)
-PICK_LIFT_RAW_DEG = [548.2, 104.2, 137.8, 146.3, 0.0, 168.4]  # jog-taught grasp_ascend 16:00; LM as the approach (was 871.9)
+PICK_LIFT_RAW_DEG = [-722.4, 104.2, 137.8, 146.3, 0.0, 168.4]  # jog-taught grasp_ascend 16:00; LM as the approach (was 871.9)
 # Travel time per sis2 step [s] (time-based profile, firmware 2026-11-06: the LM and arm joints of a step start and
 # arrive together). Not listed or 0: as fast as the speed caps allow (69 deg/s arm, 41 gripper, 28 mm/s LM; 2026-11-07), the farthest
 # joint decides. A time shorter than the caps allow is stretched to them.
 SLOW_SECONDS = {}  # step label -> time [s], filled from the real start pose in main() for the nominal <-> via moves
+PICK160_MOTION = 'stand fixed pick: MinPeak path to grasp'
+PICK160_NOMINAL_JOINT_TOL = math.radians(20.0)
+# Forward face of the rear 2020 crossmember, relative to the shoulder axis.
+PICK160_PROFILE_FRONT_X = -0.2468
+PICK160_CLEARANCE = 0.005
+# 2026-11-20 pick160_vertical_ref: raw 105.2 / 101.3 / 99.2 deg gives physical vertical.
+# At that pose the uncorrected model pitch is -81.69 deg.
+PICK160_PITCH_OFFSET = math.radians(-8.31)
+# With the gripper vertical, the measured tip clearance was 5 mm versus the 15 mm target.
+PICK160_GRASP_Z_FIX = 0.010
 GOTO_DEG_S = 10.0  # (user 2026-11-14 "speed up": was 5.2) into the nominal pose: joint speed [deg/s] (the speed cap is 69), the farthest joint decides
 VIA_DEG_S = 20.0  # (user 2026-11-14 "speed up": was 12) moves to a via pose: faster (wrist swings of 100+ deg took 20 s at 5.2), still time-based
 STAND_VIA_DEG_S = 40.0  # standing pick / load via moves (user 2026-11-15 "too slow": lift -> carry via swings the wrist 206 deg, 10.3 s at 20)
@@ -146,9 +164,9 @@ STEP_SECONDS = {
 # 2 mm up, tool angle kept, then 10 mm more (it still pressed into the box). Offsets from the straight-up pose
 # (2026-11-06 evening; the earlier 1044.1, 110.3, 261.7, -64.8 used the old elbow/shoulder offsets and went ~37 mm too
 # far; then 99.8, 275.0, -62.1 pressed).
-PLACE_RAW_DEG = [593.2, 99.5, 269.3, -68.1, 90.0]
+PLACE_RAW_DEG = [-677.4, 99.5, 269.3, -68.1, 90.0]
 # 20 mm straight over it (30 over the earlier place; model), tool angle kept: come down from here, open, go back up.
-PLACE_ABOVE_RAW_DEG = [593.2, 99.9, 256.6, -80.3, 90.0]
+PLACE_ABOVE_RAW_DEG = [-677.4, 99.9, 256.6, -80.3, 90.0]
 # After the release the jaws turn 90 deg off the puck (as the clock load does, sis1 back 1) before going up.
 PLACE_RELEASE_ROLL_RAW_DEG = 0.0
 # Dice (--dice [N], 2026-11-07): the stored pucks of the clock one after the other onto the box as dice face N (1-6,
@@ -187,7 +205,7 @@ DICE_ROWS = {
     'middle': {0: [97.45, 257.61, -70.73], 40: [100.38, 237.77, -87.65], 75: [100.36, 215.89, -102.05]},
     'near': {0: [84.62, 274.57, -68.02], 40: [86.61, 257.32, -83.27], 75: [89.31, 231.59, -102.3]},
 }
-DICE_COLS_LM_RAW_DEG_TAUGHT = {'left': 141.3, 'centre': 593.35, 'right': 1045.4}
+DICE_COLS_LM_RAW_DEG_TAUGHT = {'left': -1129.3, 'centre': -677.25, 'right': -225.2}
 DICE_ROWS_1107_1417 = {
     'far': {0: [128.65, 212.37, -95.9], 40: [119.75, 210.33, -98.83], 75: [110.2, 212.18, -97.54]},
     'middle': {0: [103.7, 263.61, -69.61], 40: [106.61, 234.35, -95.95], 75: [97.07, 227.14, -101.71]},
@@ -198,7 +216,7 @@ DICE_ROWS_0329 = {
     'middle': {0: [107.02, 258.68, -71.22], 40: [110.62, 227.68, -98.61], 75: [100.79, 222.06, -103.07]},
     'near': {0: [88.49, 281.42, -67.01], 40: [90.36, 255.07, -91.49], 75: [84.93, 237.75, -105.24]},
 }
-DICE_COLS_LM_RAW_DEG_0329 = {'left': 142.0, 'centre': 548.3, 'right': 1046.2}
+DICE_COLS_LM_RAW_DEG_0329 = {'left': -1128.6, 'centre': -722.3, 'right': -224.4}
 # Placement error as formulas (2026-11-07 run sis3 6 choi, six pucks, measured on the box; the box is not quite flat
 # and a released puck can shift, ~1 mm). x = toward the LM motor, y = away from the LM, both from where the puck was
 # aimed [mm]; xc = aimed puck centre toward the LM motor from the LiDAR centre [mm]; t = (row ahead - 112.5) / 60
@@ -218,7 +236,7 @@ DICE_GRID_MM = 60.0
 DICE_COL_STEPS = {'left': -1, 'centre': 0, 'right': 1}  # robot left = away from the LM motor
 # sis3 cal away|mid|motor: three pucks (far, middle, near) at an LM end / the LM middle with no ex correction, to
 # re-measure ex (ey is in the rows, so y shows what is left). The columns are 50 mm apart: one per run.
-DICE_CAL_LM_RAW_DEG = {'away': 142.0, 'mid': 594.1, 'motor': 1046.2}
+DICE_CAL_LM_RAW_DEG = {'away': -1128.6, 'mid': -676.5, 'motor': -224.4}
 DICE_PLACE_ROLL_RAW_DEG = 0.0  # jaws close left-right over the box
 # Pips as (row, column), the picture seen from behind the robot: top row = far. 2 and 3 on the far-left / near-right
 # diagonal. Put down column by column from the robot's left, far to near in each, so the held puck never passes over a
@@ -251,10 +269,10 @@ DICE_SLOTS = [12, 1, 2, 3, 4, 5]
 # limit there), 40 mm up leaning 14 deg (fingertip 12 mm over the puck tops; the jaws cover the top 28 mm).
 # tool_roll stays at the via pose's 90 the whole pick (2026-11-06 night: coming straight down, the jaws need no turn;
 # was 0). The roll turns about the tool axis, so the waypoints' positions do not change with it.
-PICK_MID_RAW_DEG = [548.2, 88.23, 137.1, 146.83, 90.0]
-PICK_ABOVE_RAW_DEG = [548.2, 98.87, 140.13, 146.5, 90.0]
+PICK_MID_RAW_DEG = [-722.4, 88.23, 137.1, 146.83, 90.0]
+PICK_ABOVE_RAW_DEG = [-722.4, 98.87, 140.13, 146.5, 90.0]
 # The pose the descent starts from: wrist_pitch 1.5 deg more than computed (2026-11-06 night, on the robot).
-PICK_DESCEND_FROM_RAW_DEG = [548.2, 98.87, 140.13, 148.0, 90.0]
+PICK_DESCEND_FROM_RAW_DEG = [-722.4, 98.87, 140.13, 148.0, 90.0]
 PICK_OPEN_GRIPPER_DEG = 94.0  # full open going in to the stored puck (2026-11-07; was 145.5, 134.3, 90, 152.9). The arm
                               # board's gripper takes 70 % of that move's time (firmware kTimeScale): open before the arm arrives
 # Back toward the nominal pose the wrist_pitch arrives first, then the elbow (2026-11-05: the elbow must not finish
@@ -1365,6 +1383,165 @@ def find_steps(current_slide=None, start=None):
     ] + stand_load_tail(start)
 
 
+def fixed_pick_steps(distance_mm):
+    """MinPeak from nominal to a standing prism at the given shoulder-relative distance."""
+    import shoulder_path as sp
+    import urdf_arm as ua
+
+    cfg = yaml.safe_load((HERE / 'shoulder_path.yaml').read_text())
+    arm_cfg = cfg['urdf']
+    inset = arm_cfg['grip_inset']
+    model, info = ua.params(grip_inset=inset)
+    model, info = ua.measured(model, info, **arm_cfg['measured'], grip_inset=inset)
+    delta = info['delta'] + PICK160_PITCH_OFFSET
+    axes = ('shoulder', 'elbow', 'wrist_pitch')
+    sh, el, wr = (np.radians(arm_cfg['joint_limits_deg'][axis]) - ua.RAW_ZERO[axis] for axis in axes)
+    model['q_min'] = np.array([-sh[1], el[0] - math.pi / 2, wr[0] + delta])
+    model['q_max'] = np.array([-sh[0], el[1] - math.pi / 2, wr[1] + delta])
+    model['w_max'] = np.radians(cfg['w_max'])
+    model['J_r'] = float(cfg['J_r'])
+
+    nominal_geom = [math.radians(raw) - ua.RAW_ZERO[axis] for raw, axis in zip(NOMINAL_RAW_DEG[1:4], axes)]
+    nominal = ua.to_model(*nominal_geom, delta)
+    grasp_z = arm_cfg['box']['top_z'] + inset + arm_cfg['puck_out'] + PICK160_GRASP_Z_FIX
+    grasp_x = distance_mm / 1000.0
+    grasps = sp.ik_all((grasp_x, grasp_z), model, tool=-math.pi / 2)
+    # Escape above the carousel before enforcing the rear profile boundary.
+    via_angle = math.radians(17.0)
+    c, s = math.cos(via_angle), math.sin(via_angle)
+    via_tip = (grasp_x * c - grasp_z * s, grasp_x * s + grasp_z * c)
+    vias = sp.ik_all(via_tip, model, tool=via_angle - math.pi / 2)
+    escape_time, pick_time = (14.0, 6.0) if distance_mm == 190 else (16.0, 8.0)
+    feasible = []
+    for via, _, _ in vias:
+        escape = sp.solve_path(nominal, via, model, T=escape_time, N=32, z_min=grasp_z,
+                               dynamic=cfg['dynamic'], z_max=0.335, z_max_x_slope=1.0, z_max_x_start=-0.225)
+        if not escape['success']:
+            continue
+        for grasp, _, _ in grasps:
+            pick = sp.solve_path(via, grasp, model, T=pick_time, N=16, z_min=grasp_z,
+                                 x_min=PICK160_PROFILE_FRONT_X + PICK160_CLEARANCE, dynamic=cfg['dynamic'])
+            if not pick['success']:
+                continue
+            via_time = escape['t'][-1]
+            times = np.r_[escape['t'], via_time + pick['t'][1:]]
+            joints = np.vstack([escape['path'], pick['path'][1:]])
+            try:
+                check_pick160_clearance(sp, ua, model, info, delta, axes, times, joints, via_time)
+            except ValueError as exc:
+                print(f'MinPeak candidate rejected: {exc}')
+                continue
+            feasible.append((max(escape['peak'], pick['peak']), times, joints, len(escape['t']) - 1))
+    if not feasible:
+        raise RuntimeError('no MinPeak path through nominal via passed the gripper clearance checks')
+    peak, times, joints, via_idx = min(feasible, key=lambda candidate: candidate[0])
+    name = PICK160_MOTION
+    path = []
+    for q in joints[1:]:
+        raw = ua.raw_from_geom(dict(zip(axes, ua.to_urdf(q, delta))))
+        path.append(teach.raw_to_target([NOMINAL_RAW_DEG[0], *[math.degrees(raw[axis]) for axis in axes],
+                                         NOMINAL_RAW_DEG[4], 0.0])[:5])
+    SLOW_SECONDS[name] = np.diff(times).tolist()
+    print(f'MinPeak {distance_mm} mm: {len(path)} waypoints through nominal via, '
+          f'{times[-1]:g} s planned, peak {peak:.3f} N m')
+    print(f'Tool roll held at nominal {NOMINAL_RAW_DEG[4]:g} deg raw throughout pick')
+    steps = [
+        ('stand fixed pick: open gripper full', TaskCommand.GRIPPER, False),
+        (name, TaskCommand.MANIPULATOR, path),
+        ('stand fixed pick: close gripper (grasp)', TaskCommand.GRIPPER, True),
+    ]
+    if distance_mm == 190:
+        # First lift clear of the box to the existing preparation pose.
+        # Then use the two 2026-11-20 taught poses in the user's order.
+        lift_name = 'stand fixed load: lift clear of the box'
+        prepare_name = 'stand fixed load: to taught preparation (p34)'
+        place_name = 'stand fixed load: to taught release pose (pick190_load12_ref)'
+        SLOW_SECONDS[lift_name] = [2.5]
+        SLOW_SECONDS[prepare_name] = [8.0]
+        SLOW_SECONDS[place_name] = [2.5]
+        prepare = taught_target('p34')
+        place = taught_target('pick190_load12_ref')
+        # The forward transfer starts outside this region. The limit applies from p34 through release.
+        arm_control = yaml.safe_load(teach.CONTROL_YAML.read_text())['control_master']['ros__parameters']
+        directions = np.array(arm_control['arm_joint_directions'][:3])
+        offsets = np.array(arm_control['arm_joint_offsets'][:3])
+        geom_zeros = np.array([ua.RAW_ZERO[axis] for axis in axes])
+        load_poses = np.linspace(prepare[1:4], place[1:4], 101)
+        max_x = max(sp.x_tip(ua.to_model(*(pose * directions + offsets - geom_zeros), delta), model)
+                    for pose in load_poses)
+        if max_x > 0.030:
+            raise RuntimeError(f'slot 12 approach exceeds TCP x limit of +30 mm (max {max_x * 1000:+.1f} mm)')
+        print(f'Slot 12 approach: TCP x max {max_x * 1000:+.1f} mm (limit +30 mm)')
+        steps.extend([
+            (lift_name, TaskCommand.MANIPULATOR, path[via_idx - 1]),
+            (f'stand fixed load: clock to slot {LOAD_SLOT}', TaskCommand.CLOCK, LOAD_SLOT),
+            (prepare_name, TaskCommand.MANIPULATOR, prepare),
+            (place_name, TaskCommand.MANIPULATOR, place),
+            ('stand fixed load: open gripper in slot', TaskCommand.GRIPPER, math.radians(RELEASE_GRIPPER_DEG)),
+        ])
+    return steps
+
+
+def check_pick160_clearance(sp, ua, model, info, delta, axes, times, joints, via_time):
+    """Check the gripper collision envelope in the shoulder x-z plane before enabling motion."""
+    from scipy.spatial import ConvexHull
+
+    root = ET.parse(ua.URDF)
+    shape = np.dtype([('normal', '<f4', 3), ('points', '<f4', (3, 3)), ('attribute', '<u2')])
+    meshes = {}
+    for link in ('tool_roll_link', 'jaw_upper_link', 'jaw_lower_link'):
+        collision = root.find(f"./link[@name='{link}']/collision")
+        origin = collision.find('origin')
+        filename = collision.find('geometry/mesh').get('filename').removeprefix('package://craft_description/')
+        vertices = np.fromfile(ua.URDF.parents[1] / filename, dtype=shape, offset=84)['points']
+        meshes[link] = np.unique(vertices.reshape(-1, 3), axis=0) @ ua._rpy(*ua._v(origin.get('rpy'))).T + ua._v(origin.get('xyz'))
+
+    # Shoulder-frame envelopes from the URDF meshes, plus the existing 70 mm box placement.
+    # Project onto x-z and ignore y overlap conservatively, including possible LM start offsets.
+    carousel_x = (-0.2870, -0.0421)
+    upper_mounts = [((-0.2878, -0.2218), 0.4165), ((-0.2578, -0.1886), 0.4335)]
+    box_x = (0.0825, 0.2875)
+    margin = PICK160_CLEARANCE
+    pitch_correction = ua._axis_rot(np.array([0.0, -1.0, 0.0]), PICK160_PITCH_OFFSET)
+    for t in np.linspace(0.0, times[-1], round(times[-1] * 20) + 1):
+        q = np.array([np.interp(t, times, axis) for axis in joints.T])
+        geom = dict(zip(axes, ua.to_urdf(q, delta)))
+        geom['tool_roll'] = math.radians(NOMINAL_RAW_DEG[4])
+        envelope = []
+        for jaw in (-0.011, 0.020):
+            poses = ua.fk(info['joints'], dict(geom, jaw_upper=jaw, jaw_lower=jaw))
+            roll, _ = poses['tool_roll_link']
+            origin = poses['tcp'][1] - info['grip_shift'] * (roll @ info['joints']['tool_roll']['axis'])
+            for link, vertices in meshes.items():
+                rot, pos = poses[link]
+                envelope.append(((vertices @ rot.T + pos - origin) @ pitch_correction.T)[:, [0, 2]])
+        vertices = np.vstack(envelope) + [sp.x_tip(q, model), sp.z_tip(q, model)]
+        hull = vertices[ConvexHull(vertices).vertices]
+        edges = np.roll(hull, -1, axis=0)
+
+        def z_in_x_range(bounds):
+            lo, hi = bounds[0] - margin, bounds[1] + margin
+            heights = list(hull[(hull[:, 0] >= lo) & (hull[:, 0] <= hi), 1])
+            for x in (lo, hi):
+                cross = (hull[:, 0] < x) != (edges[:, 0] < x)
+                a, b = hull[cross], edges[cross]
+                heights.extend(a[:, 1] + (x - a[:, 0]) * (b[:, 1] - a[:, 1]) / (b[:, 0] - a[:, 0]))
+            return heights
+
+        if t >= via_time and hull[:, 0].min() < PICK160_PROFILE_FRONT_X + margin:
+            raise ValueError(f'rear profile clearance at {t:.2f} s')
+        if min(z_in_x_range(carousel_x), default=math.inf) < 0.0150 + margin:
+            raise ValueError(f'carousel clearance at {t:.2f} s')
+        for bounds, underside in upper_mounts:
+            top = max(z_in_x_range(bounds), default=-math.inf)
+            if top > underside - margin:
+                raise ValueError(f'upper mount clearance at {t:.2f} s '
+                                 f'(TCP x={sp.x_tip(q, model):+.3f}, z={sp.z_tip(q, model):+.3f}; '
+                                 f'gripper top={top:+.3f} m)')
+        if min(z_in_x_range(box_x), default=math.inf) < -0.0860 + margin:
+            raise ValueError(f'box clearance at {t:.2f} s')
+
+
 def _set_pose(steps, i, prefix, q):
     j = next(j for j in range(i + 1, len(steps)) if steps[j][0].startswith(prefix))
     steps[j] = (steps[j][0], steps[j][1], [list(q)])
@@ -1983,8 +2160,9 @@ def camera_run(command, **kwargs):
 
 
 class Runner(Node):
-    def __init__(self):
+    def __init__(self, fixed_pick_mm=None):
         super().__init__('puck_pick_execute')
+        self.fixed_pick_mm = fixed_pick_mm
         self.planned = '--planning' in sys.argv
         self.puck_pubs = {role: self.create_publisher(PuckObservationArray, '/perception/pucks/picker_' + name, 10)
                           for role, name in [('uppercam', 'upper'), ('d435', 'grip')]}
@@ -2018,17 +2196,19 @@ class Runner(Node):
         if self.camera_leased:
             self.camera_pause[self.camera_leased].publish(Bool(data=True))
 
-    def send(self, kind, arg, seconds=0.0, tolerance=0.0, i_gains=None, contact=0.0):
+    def send(self, kind, arg, seconds=0.0, tolerance=0.0, i_gains=None, contact=0.0, revision=1):
         if self.planned:
             deadline = time.monotonic() + 5
             while self.planning_state != 'Run.AwaitRequest':
                 if self.planning_state in ('Fault', 'Ready') or time.monotonic() >= deadline:
                     raise RuntimeError(f'planning cannot accept a pick step: {self.planning_state}')
                 time.sleep(0.02)
-        self.task_id += 1
+        if revision == 1:
+            self.task_id += 1
         c = TaskCommand()
         c.header.stamp = self.get_clock().now().to_msg()
-        c.task_id, c.revision, c.operation, c.kind = self.task_id, 1, TaskCommand.EXECUTE, kind
+        c.task_id, c.revision, c.kind = self.task_id, revision, kind
+        c.operation = TaskCommand.EXECUTE if revision == 1 else TaskCommand.UPDATE_PATH
         if kind == TaskCommand.MANIPULATOR:
             c.duration_s = float(seconds)  # travel time (time-based profile); 0 = the speed caps
             c.tolerance_rad = float(tolerance)  # arrival tolerance [motor rad]; 0 = control.yaml (0.5 deg)
@@ -2044,18 +2224,136 @@ class Runner(Node):
             c.clock_slot = int(arg)
         elif kind == TaskCommand.NAVIGATE and self.planned:
             c.header.frame_id, c.speed = arg
-        self.result = None
+        if revision == 1:
+            self.result = None
         self.cmd.publish(c)
         return self.task_id
 
-    def wait(self, task_id, timeout=35.0):
+    def wait(self, task_id, timeout=35.0, revision=0):
         t = time.time()
         while time.time() - t < timeout:
             r = self.result
-            if r is not None and r.task_id == task_id and r.status not in (TaskResult.RUNNING, TaskResult.STOPPING):
+            if (r is not None and r.task_id == task_id and r.revision >= revision
+                    and r.status not in (TaskResult.RUNNING, TaskResult.STOPPING)):
                 return STATUS.get(r.status, str(r.status)), r.reason
             time.sleep(0.05)
         return 'TIMEOUT', 'no terminal result'
+
+    def stream_pick(self, path):
+        run_dir = HERE / 'runs' / time.strftime(f'pick{self.fixed_pick_mm}_%m%d_%H%M%S')
+        run_dir.mkdir(parents=True, exist_ok=True)
+        log_path = run_dir / 'arm_stream.csv'
+        print(f'   arm log: {log_path}')
+        with log_path.open('x', newline='') as log:
+            writer = csv.writer(log)
+            axes = ('lm', 'shoulder', 'elbow', 'wrist_pitch', 'tool_roll')
+            writer.writerow(['elapsed_s', 'phase', 'feedback_stamp_ns',
+                             *[f'{axis}_{kind}_raw_deg' for kind in ('ref', 'cmd', 'measured', 'error') for axis in axes],
+                             'ref_tool_pitch_deg', 'encoder_model_tool_pitch_deg'])
+            return self.stream_pick_logged(path, writer)
+
+    def stream_pick_logged(self, path, writer):
+        from arm_stream import load_cfg
+
+        cfg = load_cfg()
+        period = 1.0 / cfg['hz']
+        lead = cfg['point_travel_s']
+        tolerance = math.radians(1.0)
+        control_cfg = yaml.safe_load(teach.CONTROL_YAML.read_text())['control_master']['ros__parameters']
+        motor_rad_per_unit = np.array([control_cfg['lm_motor_direction'] / control_cfg['lm_meters_per_rad'],
+                                       *control_cfg['arm_joint_directions']])
+        motor_offset = np.array([control_cfg['lm_motor_offset'], *control_cfg['arm_joint_offsets']])
+        knots = np.r_[0.0, np.cumsum(SLOW_SECONDS[PICK160_MOTION])]
+        nominal = np.asarray(nominal_pose()[:5])
+        feedback_stamp = None
+
+        def feedback():
+            nonlocal feedback_stamp
+            msg = self.joints
+            if msg is None:
+                raise RuntimeError('no arm feedback during MinPeak stream')
+            feedback_stamp = msg.header.stamp.sec * 10**9 + msg.header.stamp.nanosec
+            age = self.get_clock().now().nanoseconds - feedback_stamp
+            joints = dict(zip(msg.name, msg.position))
+            if not 0 <= age <= 500_000_000 or not all(n in joints and math.isfinite(joints[n]) for n in ARM):
+                raise RuntimeError('stale or invalid arm feedback during MinPeak stream')
+            return np.array([joints[n] for n in ARM])
+
+        start = feedback()
+        if np.any(np.abs(start - nominal) > [0.010, *([PICK160_NOMINAL_JOINT_TOL] * 4)]):
+            raise RuntimeError('arm left the nominal start tolerance before streaming')
+        points = np.vstack([nominal, path])
+        # LM may start up to 10 mm off nominal. Blend that offset out over the first two seconds.
+        points[:, 0] += (start[0] - nominal[0]) * np.maximum(1.0 - knots / 2.0, 0.0)
+
+        def reference(t):
+            return np.array([np.interp(t, knots, axis) for axis in points.T])
+
+        def raw_deg(target):
+            return np.degrees(target * motor_rad_per_unit + motor_offset)
+
+        grasp_raw = raw_deg(points[-1])
+
+        def model_pitch(raw):
+            shoulder, elbow, wrist = raw[1:4] - grasp_raw[1:4]
+            return -90.0 - shoulder + elbow + wrist
+
+        def record(elapsed, phase, ref, cmd, actual):
+            ref_raw, cmd_raw, actual_raw = map(raw_deg, (ref, cmd, actual))
+            writer.writerow([elapsed, phase, feedback_stamp, *ref_raw, *cmd_raw, *actual_raw,
+                             *(actual_raw - ref_raw), model_pitch(ref_raw), model_pitch(actual_raw)])
+
+        revision = 1
+        first_target = reference(period)
+        record(0.0, 'start', points[0], first_target, start)
+        task_id = self.send(TaskCommand.MANIPULATOR, first_target, lead, tolerance)
+        ack_deadline = time.monotonic() + 1.0
+        while self.result is None or self.result.task_id != task_id:
+            if time.monotonic() >= ack_deadline:
+                raise RuntimeError('control did not acknowledge the MinPeak stream')
+            time.sleep(0.01)
+        t0 = time.monotonic()
+        next_send = t0 + period
+        while True:
+            time.sleep(max(0.0, next_send - time.monotonic()))
+            tick = time.monotonic()
+            elapsed = tick - t0
+            result = self.result
+            if result is not None and result.task_id == task_id:
+                if result.status not in (TaskResult.RUNNING, TaskResult.SUCCEEDED):
+                    return STATUS.get(result.status, str(result.status)), result.reason
+                if result.status == TaskResult.SUCCEEDED and result.revision == revision:
+                    revision = 0  # control settled early, so the following target needs a fresh task
+            measured = feedback()
+            ref = reference(elapsed)
+            cmd = reference(elapsed + lead)
+            if np.any(np.abs(measured - ref) > cfg['abort']):
+                record(elapsed, 'tracking_abort', ref, cmd, measured)
+                raise RuntimeError('arm tracking error exceeded the MinPeak stream limit')
+            record(elapsed, 'stream', ref, cmd, measured)
+            final = elapsed >= knots[-1]
+            revision += 1
+            task_id = self.send(TaskCommand.MANIPULATOR, cmd,
+                                max(lead, 0.3) if final else lead, tolerance, revision=revision)
+            if final:
+                status, reason = self.wait(task_id, timeout=5.0, revision=revision)
+                if status != 'SUCCEEDED':
+                    return status, reason
+                deadline = time.monotonic() + 0.5
+                while True:
+                    measured = feedback()
+                    error = (measured - points[-1]) * motor_rad_per_unit
+                    if np.all(np.abs(error) <= tolerance) or time.monotonic() >= deadline:
+                        break
+                    time.sleep(0.02)
+                errors = ' / '.join(f'{math.degrees(e):+.2f}°' for e in error)
+                record(time.monotonic() - t0, 'final', points[-1], points[-1], measured)
+                print(f'   final motor errors (LM / shoulder / elbow / wrist / roll): {errors}')
+                print(f'   final tool pitch estimated from encoders: {model_pitch(raw_deg(measured)):+.2f}° (target -90°)')
+                if np.any(np.abs(error) > tolerance):
+                    return 'FAILED', 'final motor error exceeds 1 deg'
+                return status, reason
+            next_send = max(next_send + period, tick + period)
 
     def drive(self, reverse):
         box = sys.argv[sys.argv.index('--box') + 1]
@@ -2186,6 +2484,8 @@ DESCEND_PIECE_S = 1.0  # [s] each pose of a several-pose 'pick: descend' (3 pose
 
 def seconds_text(name):
     v = SLOW_SECONDS.get(name)
+    if name == PICK160_MOTION:
+        return f'{sum(v):g} s (streamed)'
     return ' + '.join(f'{x:.1f}' for x in v) + ' s' if v else (f'{step_seconds(name):g} s' if step_seconds(name) else '')
 
 
@@ -2560,6 +2860,12 @@ def run_steps(node, steps):
             print(f'   holding {HOLD_BEFORE_CLOSE_S:g} s at the grasp pose with the jaws open (take the photo now)')
             gripzero_step('look')
             time.sleep(HOLD_BEFORE_CLOSE_S)
+        if name == PICK160_MOTION:
+            status, reason = node.stream_pick(arg)
+            print(f'   -> {status} {reason}')
+            if status != 'SUCCEEDED':
+                return False
+            continue
         if kind == STANDFIND:
             ok, reason = find_step(steps, i, arg)
             print(f'   -> {"SUCCEEDED" if ok else "FAILED"} {reason}')
@@ -2771,8 +3077,8 @@ def run_steps(node, steps):
             while not node.grasped and time.monotonic() < grasp_deadline:
                 time.sleep(0.01)
             grasped_at_close = node.grasped
-            if node.planned and not grasped_at_close:
-                print('mission pick: no confirmed grasp; stopping')
+            if (node.planned or getattr(node, 'fixed_pick_mm', None) == 190) and not grasped_at_close:
+                print('no confirmed grasp; stopping before loading')
                 return False
             if name.startswith('bigbro pick: close'):
                 # A colour frame of the closed jaws, kept for looking at afterwards (2026-11-14: pucks were not held and
@@ -2814,7 +3120,7 @@ def go_home(node, start, lying):
         node.stop()
         return
     now = dict(zip(node.joints.name, node.joints.position))
-    slide = min(max(now["slide_joint"], -0.0430), 0.0627)
+    slide = min(max(now["slide_joint"], -0.0505), 0.1039)  # control LM limits as slide (2026-11-20)
     rise = [plan_pose()(20)[1:]]
     if lying:
         g = yaml.safe_load(open(HERE / 'plan_lying.yaml'))['puck_grasp_urdf']
@@ -2858,13 +3164,26 @@ def main():
                                  [('to the nominal pose', TaskCommand.MANIPULATOR, nominal_pose())]
                                  if goto == 'nominal' else out_to_via(nominal_pose()) + (
                                      [('to the nominal pose', TaskCommand.MANIPULATOR, nominal_pose())] if goto == 'basic' else []))
+    fixed_pick_mm = next((mm for mm in (160, 190) if f'--pick-{mm}mm' in sys.argv), None)
+    if fixed_pick_mm is not None:
+        option = f'--pick-{fixed_pick_mm}mm'
+        if set(sys.argv[1:]) - {option, '--dry-run'}:
+            print(f'{option} only accepts --dry-run as an additional option')
+            return 1
+        try:
+            fixed_steps = fixed_pick_steps(fixed_pick_mm)
+        except RuntimeError as exc:
+            print(exc)
+            return 1
+        make_steps = lambda *args: fixed_steps
+        unload = True
     steps = make_steps() if make_steps is steps_from_plan else stage(make_steps(), None)
     for name, kind, arg in steps:
         print(f'  {name:45s}', describe(kind, arg), seconds_text(name))
     if dry:
         return 0
     rclpy.init()
-    node = Runner()
+    node = Runner(fixed_pick_mm)
     threading.Thread(target=rclpy.spin, args=(node,), daemon=True).start()
     try:
         t = time.time()
@@ -2882,9 +3201,9 @@ def main():
         now = dict(zip(node.joints.name, node.joints.position))
         slide = now['slide_joint']
         print(f'LM now: slide {slide:+.4f} m (nominal pose {nominal_pose()[0]:+.4f})')
-        if not -0.045 <= slide <= 0.064:  # LM min 97.6 deg = -43.0 mm since 2026-11-15
+        if not -0.0530 <= slide <= 0.1060:  # LM -1484.7..-76.4 deg = slide -50.6..+103.9 mm since 2026-11-20 (+2 mm slack)
             print('LM position is outside the calibrated range (wrong start position?). Run checkarm; aborting'); return 1
-        slide = min(max(slide, -0.0430), 0.0627)
+        slide = min(max(slide, -0.0505), 0.1039)
         limits = plan.Chain(plan.URDF).limits
         outside = [n for n in ARM[1:] if not limits(n)[0] <= now[n] <= limits(n)[1]]
         if outside:  # control clamps these into the limits, so the first move pulls them in
@@ -2901,6 +3220,9 @@ def main():
         # pose (2026-11-14: basic refused after a stopped gripaxis). With every joint inside its limits the way back
         # (out_to_via: shoulder, then elbow / LM / roll, then wrist) is the reverse of the way out.
         joint_tol = math.radians(90.0) if goto is None or outside else math.radians(400.0)
+        if fixed_pick_mm is not None:
+            lm_tol = 0.010
+            joint_tol = PICK160_NOMINAL_JOINT_TOL
         off = [f'{n} {(now[n] - t) * 1000:+.1f} mm' if n == 'slide_joint' else f'{n} {math.degrees(now[n] - t):+.1f} deg'
                for n, t in zip(ARM, start) if abs(now[n] - t) > (lm_tol if n == 'slide_joint' else joint_tol)]
         if off:

@@ -147,7 +147,7 @@ control_master:
     # OpenCR must accept/report unwrapped motor radians (e.g. 12 -> 7 commands -5*pi/6).
     clock_slot_count: 12
     clock_slot_angle: 0.5235987755982988  # [motor rad/slot] 30 degrees
-    clock_zero_angle: 0.479966  # [motor rad] 27.5 degrees, slot 12 at the loading guide (2026-11-16 user, checkwheel; was 104.6 (11-14), 153.4 earlier on 11-14, 75.4 (11-11), 164.4, 135.2, 45.4, 44.8, 73.9, 166.4)
+    clock_zero_angle: 5.738643  # [motor rad] 328.8 degrees, slot 12 at the loading guide (2026-11-20 user; was 338.8)
     # Firmware clock zero_tick stays 0: apply this offset here only.
     # Recheck physical alignment after a motor power cycle/multi-turn reset.
     clock_direction: 1.0  # +1: CCW motor rotation increases slot numbers; -1: reverse
@@ -163,8 +163,10 @@ control_master:
     # Rounded inward to 4 decimals: ControlMaster sends '%.4f', and the firmware rejects a whole
     # frame if any value falls outside its limits, so limits must be exactly representable.
     # The lying-puck grasp (URDF elbow 196.4, wrist -135.1 deg) stays inside these limits.
-    arm_min_angle: [0.8657, 0.7209, -1.8448, -3.0543]
-    arm_max_angle: [3.1415, 5.3092, 2.5848, 4.7124]  # tool_roll 270 deg (2026-11-15, was 3.0543 = 175; firmware kBootCenters)
+    # 2026-11-19 user re-measured physical limits [motor deg] (reassembly, axes unchanged): LM -507.2..960.5, shoulder 60.4..201.3,
+    # elbow 64.9..300.5, wrist_pitch 81.0..304.5, tool_roll -362.5..270.4, gripper -53.1..231.5 (open 82.5). 2-degree margin inside (user 2026-11-19, was 5).
+    arm_min_angle: [1.0891, 1.1677, 1.4487, -6.2919]  # 62.4, 66.9, 83.0, -360.5 deg (was 0.8657, 0.7209, -1.8448, -3.0543)
+    arm_max_angle: [3.4784, 5.2098, 5.2796, 4.6844]  # 199.3, 298.5, 302.5, 268.4 deg (was 3.1415, 5.3092, 2.5848, 4.7124); tool_roll past one turn: firmware kBootCenters
 
     # Rotational part of /ik_solution; ControlMaster routes slide_joint to LmController.
     arm_ik_joint_names: [shoulder_joint, elbow_joint, wrist_pitch_joint, tool_roll_joint]
@@ -196,6 +198,12 @@ control_master:
     arm_max_accel_rad_s2: 0.0  # off: rolled back to 1d6226a (user 2026-11-14; was 60 deg/s^2)
     lm_max_speed_m_s: 0.0  # off: rolled back to 1d6226a (user 2026-11-14; was 28 mm/s)
     lm_max_accel_m_s2: 0.0  # off: rolled back to 1d6226a (user 2026-11-14; was 50 mm/s^2)
+    # Streamed arm points (demo/puck_pick/arm_stream.py, 2026-11-18): 0 = every point a timed move with 25 % ramps
+    # (TIME), 10..500 = every point reached at constant speed in this many ms (firmware STREAM; lm_arm firmware of
+    # 2026-11-18 needed; older firmware ignores STREAM and times each point with the last TIME). Make it 1.5-2x the
+    # stream period (arm_stream.yaml hz 20 = 50 ms -> 80): with exactly the period a late point means stop-and-go,
+    # with a little more the next point always arrives while the last is still moving (review 2026-11-18).
+    arm_stream_direct_ms: 0
     arm_angle_tolerance: 0.008726646259971648  # [motor rad] 0.5 degree per joint, matches firmware lm_arm (was 1, before that 2: up to ~9 mm TCP height at the grasp)
 
     # Independent LM controller: target displacement [m] -> motor angle [rad].
@@ -208,17 +216,21 @@ control_master:
     # the URDF slide limits.
     # Before: measured 579.6 to 1511.3 degrees (2026-11-05, guide moved; was -399.4 to 509.2, -391.8 to 527.5).
     # 5-degree margin below. Keep equal to firmware/lm_arm/config.h.
-    lm_min_angle: 1.7035  # [motor rad] 97.6 degrees (user measured 2026-11-15, slide -43.0 mm; was 2.4645 = 141.2 from the 11-07 end 136.2)
-    lm_max_angle: 18.2735  # [motor rad] 1047.0 degrees, 4 decimals rounded inward (was 26.2898 = 1506.3)
+    # 2026-11-20 (robot, LM motor re-mounted): LM physical -1486.7 (away)..-74.4 (motor end) deg, clock 12 at -709.2.
+    # 2-degree margin, 4 decimals rounded inward. (2026-11-19: -507.2..960.5, clock 12 224.7.)
+    lm_min_angle: -25.9129  # [motor rad] -1484.7 degrees = slide -50.6 mm (2026-11-20; was -8.8174 = -505.2)
+    lm_max_angle: -1.3335  # [motor rad] -76.4 degrees = slide +103.9 mm (2026-11-20; was 16.7289 = 958.5)
     # Motor raw + and URDF slide_joint + (axis -X) both move the carriage toward the LM motor.
     lm_motor_direction: 1.0
     # The earlier reported 317.2-degree zero was withdrawn; do not use it.
     # Slide zero stays 63.3 mm from the motor end (URDF slide origin): 1511.3 deg - 63.3 mm
     # (2026-11-05; was 509.2 deg - 63.3 mm = -54.97 deg, before that -11.6 deg). 2026-11-07: 1052.0 deg - 63.3 mm.
-    lm_motor_offset: 8.441551859979706  # [motor rad] 483.67 degrees at slide position zero (2026-11-07; was 933.10)
+    # Zero from the carousel (2026-11-19 model): clock 12 (now LM -709.2 deg) = URDF slide +34.5 mm, lm_slide origin
+    # y -34.5 mm. Ends -> slide -50.8 / +104.1 mm (URDF lm_slide limits). 2026-11-20 re-mount: was -1.567430 = -89.81.
+    lm_motor_offset: -17.867060  # [motor rad] -1023.71 degrees at slide position zero (2026-11-20; was -1.567430, 8.441552)
     # Measured 0.102 m travel (rail 164 mm - carriage 62 mm) over 915.8 degrees of motor rotation (2026-11-07, belt
     # re-tensioned; was 931.7 with the belt slipping at the idler, 2026-11-05; before that 908.6, 0.108 m over 919.3).
-    lm_meters_per_rad: 0.006381491057364487  # [m/motor rad]; zero disables conversion (was 0.006272587217274227)
+    lm_meters_per_rad: 0.006285086  # [m/motor rad] 0.161 m / 1467.7 deg (2026-11-19; was 0.006381491, 0.006272587); zero disables conversion
     lm_angle_tolerance: 0.008726646259971648  # [motor rad] 0.5 degree = ~0.06 mm carriage, matches firmware lm_arm (was 2)
 
     # Gripper uses a separate Bool command: true=close/grasp, false=open/release.
@@ -228,11 +240,12 @@ control_master:
     # 5-degree margin inside the measured -53.1 to 234 degrees; grasp is detected by current,
     # so the close target need not reach the hard stop. Original: min -0.9267698328089891,
     # max/close 4.084070449666731 [rad].
-    gripper_min_angle: -0.8395  # -48.1 degrees, 4 decimals rounded inward
-    gripper_max_angle: 3.9968  # 229 degrees, 4 decimals rounded inward
-    gripper_open_angle: 1.6406  # 94 degrees, full open. A GRIPPER open task may carry joints {gripper: rad} to open
+    # 2026-11-19 user: -53.1..231.5 deg, open 82.5 deg.
+    gripper_min_angle: -0.8918  # -51.1 degrees, 4 decimals rounded inward (2026-11-19, 2-degree margin; was -0.8395)
+    gripper_max_angle: 4.0055  # 229.5 degrees, 4 decimals rounded inward (2026-11-19, 2-degree margin; was 3.9968 = 229)
+    gripper_open_angle: 1.4399  # 82.5 degrees, full open (2026-11-19; was 1.6406 = 94). A GRIPPER open task may carry joints {gripper: rad} to open
                                 # less (sis1 clock release 147.9 deg, demo/puck_pick/execute.py)
-    gripper_close_angle: 3.9968  # 229 degrees (= gripper_max_angle)
+    gripper_close_angle: 4.0055  # 229.5 degrees (= gripper_max_angle)
     # Confirmed raw + closes/grasps; raw - opens.
     gripper_mapping_confirmed: true
     gripper_angle_tolerance: 0.03490658503988659  # [motor rad] 2 degrees, same as every motor
