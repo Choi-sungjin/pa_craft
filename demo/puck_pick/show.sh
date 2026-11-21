@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Throwaway demo: plan the puck pick and play it in RViz (no hardware). Delete with: rm -rf ~/craft/demo
 # show.sh --lying: puck on its side, gripped on its long axis (plan_lying.yaml)
-# show.sh --sis1:  the whole sis1 run (pick, load into clock slot 12, back), from execute.py's steps
-# show.sh --sis2:  the sis2 run (take the puck out of the clock with the jog-taught poses), execute.py's steps
+# show.sh --sis1:  the whole sis1 run (pick, load into clock slot 12, back), from puck_execute's steps
+# show.sh --sis2:  the sis2 run (take the puck out of the clock with the jog-taught poses), puck_execute's steps
 set -e
 cd "$(dirname "$(readlink -f "$0")")"
 WS=$(cd ../.. && pwd)
 source /opt/ros/lyrical/setup.bash
-# show.sh --sis1: the whole sis1 step list (execute.py) as one loop, step name on top (sis1_sim.py)
+# show.sh --sis1: the whole sis1 step list (puck_execute) as one loop, step name on top (sis1_sim.py)
 if [ "$1" = --sis1 ]; then
   /usr/bin/python3 -I plan.py
   (source "$WS/install/setup.bash" && /usr/bin/python3 sis1_sim.py)

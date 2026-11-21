@@ -273,6 +273,38 @@ void log_entry(CameraContext &ctx,const std::string &key,const Json &value) {
 std::string upper_capture(CameraContext &ctx,const std::string &prefix,int timeout=60) {
   auto r=capture(ctx,{camera_bin("upper_puck").string(),"--save",(save_dir(ctx)/(prefix+timestamp("%H%M%S"))).string()},timeout); return r.out;
 }
+std::vector<policy::Candidate> calibrated_upper_pucks(CameraContext &ctx,bool save) {
+  std::vector<std::string> command{camera_bin("upper_puck").string()};
+  if(options.has("--upper-snap"))command.insert(command.end(),{"--snap",options.value("--upper-snap")});
+  else if(save)command.insert(command.end(),{"--save",(save_dir(ctx)/("upper_pick_"+timestamp("%H%M%S"))).string()});
+  const auto result=capture(ctx,command,30);
+  if(result.returncode!=0)throw std::runtime_error("upper cam failed: "+result.err);
+  auto pucks=policy::candidates(result.out);
+  for(auto &puck:pucks) {
+    const double ahead=puck.ahead,lateral=puck.lateral;
+    if(puck.posture=="standing") {
+      // Affine fit to the 25 measured positions in runs/upper_box_grid_20261122/labels.csv.
+      // Fit in LiDAR-relative mm using the flush, centered box: base_link x=242.774 mm
+      // at its near face, y=+102.5 mm at its left corner.
+      puck.ahead=1.04976232*ahead+.0144964156*lateral-22.2582664;
+      puck.lateral=.00985249960*ahead+.982152955*lateral+.129596468;
+    } else {
+      puck.ahead=ahead+1.0;
+      puck.lateral=lateral+4.18;
+    }
+    puck.distance=std::hypot(257.67+puck.ahead,.02+puck.lateral);
+  }
+  return pucks;
+}
+const Chain &current_arm() {
+  static const Chain model(current_arm_urdf_path(),"tcp");
+  return model;
+}
+Eigen::Vector2d upper_base_xy(const policy::Candidate &puck) {
+  const auto laser=current_arm().origin("front_laser_joint");
+  constexpr double lidar_front_offset_m=.019;
+  return {laser.x()+lidar_front_offset_m+puck.ahead/1000.,laser.y()+puck.lateral/1000.};
+}
 void replace_pose(Steps &steps,std::size_t i,const std::string &prefix,const Pose &q) {
   for(std::size_t j=i+1;j<steps.size();++j) if(steps[j].name.rfind(prefix,0)==0) { steps[j].arg=Path{q}; return; }
   throw std::runtime_error("missing future step " + prefix);
@@ -290,6 +322,21 @@ std::optional<std::array<double,4>> find_grip_capture(CameraContext &ctx,const s
   for(int k=0;k<2;++k) { std::vector<std::string> cmd{camera_bin("grip_yaw").string()}; cmd.insert(cmd.end(),extra.begin(),extra.end()); cmd.insert(cmd.end(),{"--save",(save_dir(ctx)/(prefix+timestamp("%H%M%S"))).string()}); auto r=capture(ctx,cmd,30); auto text=r.out+r.err; std::cout<<"   "<<detector_line(text,": YAW ")<<'\n'; auto shot=parse_standing(text); if(shot)return shot; }
   return std::nullopt;
 }
+}
+int locate_upper_pucks() {
+  CameraContext camera;
+  const auto pucks=calibrated_upper_pucks(camera,false);
+  if(pucks.empty()) {
+    std::cerr<<"upper cam: no confident puck detected on the box\n";
+    return 1;
+  }
+  for(const auto &puck:pucks) {
+    const Eigen::Vector2d xy=upper_base_xy(puck)*1000.;
+    std::cout<<puck.cls<<" ("<<puck.posture<<"): base_link x="<<fmt(xy.x(),1,false,true)
+      <<" mm, y="<<fmt(xy.y(),1,true,true)<<" mm; LiDAR front +"
+      <<fmt(puck.ahead,1,false,true)<<" mm\n";
+  }
+  return 0;
 }
 policy::Candidate survey_pick(CameraContext &ctx) {
   std::optional<int> expected; if(options.has("--expected-pucks")) expected=options.integer("--expected-pucks",0);
@@ -329,8 +376,217 @@ policy::Candidate redock_for_reach(CameraContext &ctx, const policy::Candidate &
   if(!ctx.node->drive(box,false,shift/1000.)) throw std::runtime_error("re-dock: dock failed");
   ctx.target.reset(); return survey_pick(ctx);
 }
+namespace {
+const std::vector<std::string> current_joints={"lm_slide","shoulder","elbow","wrist_pitch","tool_roll"};
+
+Pose checked_raw_target(const Pose &raw) {
+  const auto limits=teach::motor_limits();
+  for(std::size_t axis=0;axis<5;++axis) {
+    const auto [lo,hi]=limits.at(axis);
+    const double radians=raw.at(axis)*M_PI/180.;
+    if(!(lo<=radians&&radians<=hi))throw std::runtime_error(current_joints[axis]+" exceeds control motor limits");
+  }
+  auto with_gripper=raw;
+  with_gripper.push_back(0.);
+  return first5(teach::raw_to_target(with_gripper));
+}
+
+struct IkCandidate {
+  Pose command;
+  Eigen::Vector3d arm;
+  double moment;
+};
+
+double current_pick_slide(const Chain &model,double y) {
+  // The controller's slide decreases toward robot left (+base_link y).
+  const double slide=-model.origin("lm_slide").y()-model.origin("shoulder").y()-y;
+  const auto [lo,hi]=model.limits("lm_slide");
+  if(!(lo<=slide&&slide<=hi))throw std::runtime_error("v307 LM is out of reach");
+  return slide;
+}
+
+std::vector<IkCandidate> current_pick_candidates(const Chain &model,const Eigen::Vector3d &target,
+    const Pose &reference,double tool_pitch_deg,double payload=0.) {
+  const Eigen::Vector3d shoulder=model.origin("lm_slide")+model.origin("shoulder");
+  const double l1=model.origin("elbow").norm(),l2=model.origin("wrist_pitch").norm();
+  constexpr double grip_len=.205-.030;
+  const double slide=current_pick_slide(model,target.y());
+  const double tool=tool_pitch_deg*M_PI/180.;
+  const double wrist_x=target.x()-shoulder.x()-grip_len*std::cos(tool);
+  const double wrist_z=target.z()-shoulder.z()-grip_len*std::sin(tool);
+  const double cosine=(wrist_x*wrist_x+wrist_z*wrist_z-l1*l1-l2*l2)/(2.*l1*l2);
+  if(std::abs(cosine)>1.)throw std::runtime_error("v307 TCP is out of reach");
+  const double vertical_offset=M_PI/2.-(reference[2]-reference[1]+reference[3]);
+  const auto params=teach::control_params();
+  const double lm_raw=params["lm_motor_offset"].as<double>()+
+    params["lm_motor_direction"].as<double>()*slide/params["lm_meters_per_rad"].as<double>();
+  // Gravitational moment coefficients [kg m] from urdf_arm.params/measured for the current v307.
+  // The payload term follows shoulder_path.with_payload / M_of.
+  constexpr double upper_mass_moment=.08712260273414,forearm_mass_moment=.05578368823414;
+  constexpr double tool_mass_moment=.035927207782534,gripper_com_m=.119597648886254;
+  std::vector<IkCandidate> candidates;
+  for(double elbow:{-std::acos(cosine),std::acos(cosine)}) {
+    const double upper=std::atan2(wrist_z,wrist_x)-std::atan2(l2*std::sin(elbow),l1+l2*cosine);
+    const double forearm=upper+elbow;
+    const Eigen::Vector3d arm{M_PI-upper,M_PI+elbow,tool-forearm+M_PI-vertical_offset};
+    Pose q{lm_raw,arm[0],arm[1],arm[2],reference[4]};
+    bool inside=true;
+    for(std::size_t axis=1;axis<q.size();++axis) {
+      const auto [lo,hi]=model.limits(current_joints[axis]);
+      inside=inside&&lo<=q[axis]&&q[axis]<=hi;
+    }
+    if(!inside)continue;
+    for(double &value:q)value*=180./M_PI;
+    const double moment=9.81*std::abs((upper_mass_moment+payload*l1)*std::cos(upper)+
+      (forearm_mass_moment+payload*l2)*std::cos(forearm)+
+      (tool_mass_moment+payload*gripper_com_m)*std::cos(tool));
+    try {candidates.push_back({checked_raw_target(q),arm,moment});}
+    catch(const std::runtime_error &) {continue;}
+  }
+  if(candidates.empty())throw std::runtime_error("v307 IK branches exceed joint or motor limits");
+  return candidates;
+}
+
+Path best_ik(const std::vector<std::vector<IkCandidate>> &waypoints,
+             const std::function<bool(const IkCandidate &,const IkCandidate &)> &transition) {
+  // shoulder_path.choose_ik(mode='peak'), with feasibility checked between samples.
+  struct Cost {double peak,sum; std::size_t previous;};
+  auto score=[](const Cost &cost){return cost.peak+1e-6*cost.sum;};
+  std::vector<std::vector<Cost>> costs(waypoints.size());
+  for(const auto &candidate:waypoints.front())costs.front().push_back({candidate.moment,candidate.moment,0});
+  for(std::size_t k=1;k<waypoints.size();++k)
+    for(const auto &candidate:waypoints[k]) {
+      const double inf=std::numeric_limits<double>::infinity();
+      Cost best{inf,inf,0};
+      for(std::size_t j=0;j<waypoints[k-1].size();++j) {
+        const auto &prior=costs[k-1][j];
+        const auto &previous=waypoints[k-1][j];
+        if(!std::isfinite(prior.peak)||!transition(previous,candidate))continue;
+        const double travel=(candidate.arm-previous.arm).norm();
+        Cost cost{std::max(prior.peak,candidate.moment),prior.sum+candidate.moment+.05*travel,j};
+        if(score(cost)<score(best))best=cost;
+      }
+      costs[k].push_back(best);
+    }
+  const auto &last=costs.back();
+  const auto best=std::min_element(last.begin(),last.end(),
+    [&](const Cost &a,const Cost &b){return score(a)<score(b);});
+  if(best==last.end()||!std::isfinite(best->peak))throw std::runtime_error("no connected BestIK preparation path");
+  auto index=static_cast<std::size_t>(best-last.begin());
+  Path targets(waypoints.size());
+  for(std::size_t k=waypoints.size();k-->0;) {
+    targets[k]=waypoints[k][index].command;
+    index=costs[k][index].previous;
+  }
+  return targets;
+}
+
+}
 CameraStepResult find_step(CameraContext &ctx,Steps &steps,std::size_t i,const Json &arg) {
   const auto what=arg.at("what").get<std::string>();
+  if(what=="v307_grip_sample") {
+    // A new dataset starts with depth frames and joint feedback at the actual v307 observation pose.
+    ctx.run_dir=here()/"runs"/("v307_grip_"+timestamp("%m%d_%H%M%S"));
+    const auto prefix=(save_dir(ctx)/"observation").string();
+    const auto feedback=ctx.node?ctx.node->joints():std::nullopt;
+    if(!feedback)return {false,"no joint feedback at the gripper-camera observation pose"};
+    auto result=capture(ctx,{camera_bin("grip_yaw").string(),"--posture","standing","--no-yaw","--save",prefix},30);
+    std::ofstream metadata(ctx.run_dir/"observation.json");
+    metadata<<Json{{"upper",ctx.find},{"joint_names",feedback->name},{"joint_positions",feedback->position},
+      {"detector_output",result.out},{"detector_error",result.err},{"detector_exit_code",result.returncode}}.dump(2);
+    metadata.close();
+    if(!metadata)return {false,"could not save gripper-camera observation metadata"};
+    if(result.returncode!=0)return {false,"gripper camera failed; capture details in "+ctx.run_dir.string()};
+    return {true,"gripper-camera sample saved to "+ctx.run_dir.string()+"; fine correction still requires the new dataset"};
+  }
+  if(what=="upper_only") {
+    const auto found=calibrated_upper_pucks(ctx,true);
+    if(found.size()!=1||found.front().posture!="standing")
+      return {false,"upper cam: expected one confirmed standing puck on the box"};
+    const auto &puck=found.front();
+    const double ahead=puck.ahead;
+    const double lateral=puck.lateral;
+    if(ahead<C.at("FIND_AHEAD_RANGE_MM")[0].get<double>()||ahead>number("MAX_REACH")*1000.)
+      return {false,"upper cam: puck is outside the experimental forward range"};
+    std::string location=puck.cls+": "+fmt(ahead,1,false,true)+" mm ahead, "+
+      fmt(lateral,1,true,true)+" mm sideways, yaw 0 deg";
+    try {
+      const auto &model=current_arm();
+      auto reference=taught_target("pick160_vertical_ref");
+      reference.push_back(0.);
+      auto raw=teach::target_to_raw(reference);
+      for(double &value:raw)value*=M_PI/180.;
+      // Same box height, 30 mm grip point, 15 mm stick-out and 10 mm height correction as the 160 mm experiment.
+      const double floor=model.origin("base_footprint_joint").z();
+      const double z=floor+.070+.030+.015+.010;
+      const auto xy=upper_base_xy(puck);
+      const Eigen::Vector3d grasp{xy.x(),xy.y(),z};
+      const auto samples=YAML::LoadFile((here()/"plan_upper_transit.yaml").string())["raw_deg"].as<Path>();
+      if(samples.empty())throw std::runtime_error("missing nominal escape samples");
+      Path transit;
+      const auto nominal_roll_raw=values("NOMINAL_RAW_DEG").at(4);
+      raw[4]=nominal_roll_raw*M_PI/180.;
+      for(auto sample:samples) {
+        sample.at(4)=nominal_roll_raw;
+        transit.push_back(checked_raw_target(sample));
+      }
+      const double nominal_slide=nominal_pose()[0];
+      const double target_slide=current_pick_slide(model,grasp.y());
+      for(std::size_t k=0;k<transit.size();++k) {
+        const double fraction=static_cast<double>(k+1)/transit.size();
+        transit[k][0]=nominal_slide+fraction*(target_slide-nominal_slide);
+      }
+
+      const Eigen::Vector3d shoulder=model.origin("lm_slide")+model.origin("shoulder");
+      const double l1=model.origin("elbow").norm(),l2=model.origin("wrist_pitch").norm();
+      const double pitch_offset=M_PI/2.-(raw[2]-raw[1]+raw[3]);
+      auto tool_position=[&](const Eigen::Vector3d &arm,double slide,double length) -> Eigen::Vector3d {
+        const double upper=M_PI-arm[0],forearm=arm[1]-arm[0];
+        const double tool=forearm+arm[2]-M_PI+pitch_offset;
+        return {shoulder.x()+l1*std::cos(upper)+l2*std::cos(forearm)+length*std::cos(tool),
+          -shoulder.y()-slide,shoulder.z()+l1*std::sin(upper)+l2*std::sin(forearm)+length*std::sin(tool)};
+      };
+      const auto &last_raw=samples.back();
+      const Eigen::Vector3d last_arm{last_raw[1]*M_PI/180.,last_raw[2]*M_PI/180.,last_raw[3]*M_PI/180.};
+      const auto entry=tool_position(last_arm,transit.back()[0],.175);
+      const Eigen::Vector3d preparation=grasp+Eigen::Vector3d(0.,0.,.045);
+      std::vector<std::vector<IkCandidate>> waypoints{{{transit.back(),last_arm,0.}}};
+      constexpr int sample_count=12; // Six seconds at the stream's half-second waypoint spacing.
+      for(int k=1;k<=sample_count;++k) {
+        const Eigen::Vector3d position=entry+(preparation-entry)*(static_cast<double>(k)/sample_count);
+        auto &candidates=waypoints.emplace_back();
+        for(const double pitch:{-90.,-85.,-80.,-75.,-73.,-70.,-65.,-60.}) {
+          try {
+            auto solved=current_pick_candidates(model,position,raw,pitch);
+            candidates.insert(candidates.end(),solved.begin(),solved.end());
+          } catch(const std::runtime_error &) {continue;}
+        }
+        if(candidates.empty())throw std::runtime_error("no v307 IK candidate along the preparation path");
+      }
+      const auto tail=best_ik(waypoints,[&](const IkCandidate &a,const IkCandidate &b){
+        // The existing BestIK arm speed is 15 deg/s; the stream emits 0.5 s waypoints.
+        if((b.arm-a.arm).cwiseAbs().maxCoeff()>7.5*M_PI/180.||std::abs(b.command[0]-a.command[0])>.014)
+          return false;
+        for(int k=0;k<=4;++k) {
+          const double t=k/4.;
+          const auto tip=tool_position(a.arm+(b.arm-a.arm)*t,a.command[0]+(b.command[0]-a.command[0])*t,.205);
+          if(tip.z()<floor+.070+.060+.003)return false;
+        }
+        return true;
+      });
+      transit.insert(transit.end(),tail.begin()+1,tail.end());
+      const auto &observe=transit.back();
+      location+="; BestIK preparation path "+std::to_string(sample_count)+" waypoints";
+      auto escape=std::find_if(steps.begin()+static_cast<std::ptrdiff_t>(i+1),steps.end(),
+        [](const Step &step){return step.name=="arm: BestIK to pick preparation";});
+      if(escape==steps.end())throw std::runtime_error("missing nominal escape step");
+      escape->arg=transit;
+      ctx.find={{"ahead_mm",ahead},{"lateral_mm",lateral},{"observation_target",observe}};
+    } catch(const std::exception &error) {
+      return {false,location+"; v307 pick plan rejected: "+error.what()};
+    }
+    return {true,location+" (v307)"};
+  }
   if(what=="upper") {
     std::vector<policy::Candidate> found; policy::Candidate chosen;
     if(ctx.target) chosen=*ctx.target;

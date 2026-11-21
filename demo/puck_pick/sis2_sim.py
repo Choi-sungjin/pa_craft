@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Throwaway demo: the sis2 step list (execute.unload_steps, staged as a real run from the nominal pose) as frames
+"""Throwaway demo: the sis2 step list (puck_execute --unload, staged as a real run from the nominal pose) as frames
 for show.py -> sis2_sim.yaml. The jog-taught clock poses (grasp_via, grasp_approach, grasp_ascend) as the URDF and
 control.yaml offsets see them; the puck starts in the jaws' place at the grasp approach pose and rides along from
 the close step. Same motion model as sis1_sim.py (joints move linearly at the profile speeds and arrive together).
@@ -11,11 +11,10 @@ from pathlib import Path
 import numpy as np
 import yaml
 
-import execute as ex
+from executor_preview import preview
 import plan
-import teach
 from craft_interfaces.msg import TaskCommand
-from sis1_sim import ARM_SPEED, HOLD, HZ, LM_SPEED, jaw, quat
+from sis1_sim import ARM, ARM_SPEED, HOLD, HZ, LM_SPEED, jaw, quat
 
 HERE = Path(__file__).resolve().parent
 
@@ -25,13 +24,13 @@ def main():
     a = dict(p['assume'])
     ctrl = yaml.safe_load(open(plan.CONTROL_YAML))['control_master']['ros__parameters']
     ch = plan.Chain(plan.URDF)
-    tcp = lambda qv: ch.fk(dict(zip(ex.ARM, qv)))
-    start = ex.nominal_pose()
-    steps = ex.stage(ex.unload_steps(start[0], start), start[:5])
+    tcp = lambda qv: ch.fk(dict(zip(ARM, qv)))
+    report = preview('--unload')
+    start, steps = report['nominal'], report['steps']
 
     # The stored puck: in the jaws at the grasp approach pose, its top grasp_depth (28 mm) above the fingertips,
     # its axis along the tool.
-    T = tcp(teach.raw_to_target(ex.PRE_GRASP_RAW_DEG)[:5])
+    T = tcp(report['stored_grasp'])
     x, d, z = T[:3, 0], T[:3, 1], T[:3, 2]
     tip = T[:3, 3] + a['finger_beyond_tcp'] * d
     puck_world = tip + (a['puck_height'] / 2 - 0.028) * d
@@ -49,7 +48,7 @@ def main():
             if held is not None:
                 Tp = tcp(qv) @ held
                 puck_world, puck_rot = Tp[:3, 3], Tp[:3, :3]
-            joints = {k: float(v) for k, v in zip(ex.ARM, qv)}
+            joints = {k: float(v) for k, v in zip(ARM, qv)}
             joints['jaw_upper_joint'] = float(jv)
             frames.append({'joints': joints, 'puck': [float(v) for v in puck_world],
                            'puck_quat': quat(puck_rot), 'label': label})

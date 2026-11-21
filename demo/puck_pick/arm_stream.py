@@ -24,7 +24,7 @@ Usage (robot commands are run by the user):
   ... --dry-run                                                         no ROS: simulate a joint with stiction
 Every run writes runs/stream_MMDD_HHMMSS/log.csv (t, ref, cmd, measured, shoulder current).
 Run it with control only, not with planning_master: it sends /planning/hold False and its own task IDs like
-execute.py does without --planned, and a planning task arriving mid-stream would replace the arm task.
+puck_execute does without --planned, and a planning task arriving mid-stream would replace the arm task.
 """
 import csv
 import math
@@ -67,15 +67,10 @@ def load_cfg():
 
 def named_pose(name):
     """'nominal' | 'via' | 'carry_via' | a teach.yaml name -> [slide, shoulder, elbow, wrist, roll] URDF."""
-    argv, sys.argv = sys.argv, sys.argv[:1]
-    try:
-        import execute
-        import teach
-    finally:
-        sys.argv = argv
-    fixed = {'nominal': execute.nominal_pose, 'via': execute.via_pose, 'carry_via': execute.carry_via_pose}
-    if name in fixed:
-        return np.array(fixed[name]()[:5], float)
+    import teach
+    from executor_preview import preview
+    if name in ('nominal', 'via', 'carry_via'):
+        return np.array(preview('--goto', 'nominal')[name][:5], float)
     entries = {e['name']: e for e in yaml.safe_load(open(HERE / 'teach.yaml'))}
     return np.array(teach.raw_to_target(entries[name]['raw_deg'])[:5], float)
 
@@ -242,7 +237,7 @@ class Streamer:
                 self.spin(0.05)
             print('STOP sent')
         except Exception as e:  # the context is gone: say so instead of hiding it
-            print(f'STOP could NOT be sent ({e}): stop the arm with execute.py --stop or the e-stop')
+            print(f'STOP could NOT be sent ({e}): stop the arm with the e-stop')
 
     def close(self):
         self.node.destroy_node()

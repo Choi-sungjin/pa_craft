@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Throwaway demo: the whole sis1 step list (execute.steps_from_plan) as frames for show.py -> sis1_sim.yaml.
+"""Throwaway demo: the whole sis1 step list (puck_execute) as frames for show.py -> sis1_sim.yaml.
 
 Each MANIPULATOR step moves every joint linearly from the previous target at the hardware profile speeds (arm
 ~41 deg/s, LM ~28 mm/s), so joints arrive together here (on the robot each arrives on its own profile). The puck
@@ -14,12 +14,13 @@ from pathlib import Path
 import numpy as np
 import yaml
 
-import execute as ex
+from executor_preview import preview
 import plan
 from craft_interfaces.msg import TaskCommand
 
 HERE = Path(__file__).resolve().parent
 HZ = 20
+ARM = plan.Chain.NAMES
 ARM_SPEED = math.radians(41.2)  # [rad/s] profile velocity 30 x 0.229 rpm
 LM_SPEED = 0.028  # [m/s] LM profile velocity 180
 HOLD = 10  # frames between steps
@@ -50,7 +51,8 @@ def main():
     a = p['assume']
     ctrl = yaml.safe_load(open(plan.CONTROL_YAML))['control_master']['ros__parameters']
     ch = plan.Chain(plan.URDF)
-    steps = ex.steps_from_plan(start[0], start)
+    steps = preview()['steps']
+    steps[-1][2] = [start]
 
     q = np.array(start, dtype=float)
     j = a['jaw_grip']
@@ -60,7 +62,7 @@ def main():
     frames = []
 
     def tcp(qv):
-        return ch.fk(dict(zip(ex.ARM, qv)))
+        return ch.fk(dict(zip(ARM, qv)))
 
     def emit(qv, jv, label, n=1):
         nonlocal puck_world, puck_rot
@@ -68,7 +70,7 @@ def main():
             if held is not None:
                 T = tcp(qv) @ held
                 puck_world, puck_rot = T[:3, 3], T[:3, :3]
-            joints = {k: float(v) for k, v in zip(ex.ARM, qv)}
+            joints = {k: float(v) for k, v in zip(ARM, qv)}
             joints['jaw_upper_joint'] = float(jv)
             frames.append({'joints': joints, 'puck': [float(v) for v in puck_world],
                            'puck_quat': quat(puck_rot), 'label': label})

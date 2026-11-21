@@ -377,9 +377,9 @@ drive + LiDAR measurement of a box step.
 
 ### Calibrated puck pick integration (2026-11-15)
 
-`mission:=true` also starts `puck_picker.py`. A `PickPuck` action now waits for the
+`mission:=true` also starts `puck_picker`. A `PickPuck` action now waits for the
 actual executor result; it no longer succeeds after the skeleton delay.
-The adapter runs `demo/puck_pick/execute.py --planning --slot N --box NAME --auto`.
+The adapter runs `puck_execute --planning --slot N --box NAME --auto`.
 `planning_master` owns all control task IDs, the hold heartbeat, watchdogs and STOP.
 The executor sends one correlated request at a time on `/planning/pick_step` and
 waits for `/planning/pick_step_result`. Arm durations, tolerances, gains and taught
@@ -408,7 +408,7 @@ nominal, and planning in `Run.AwaitRequest`:
 
 ```bash
 source ~/craft/install/setup.bash
-python3 ~/craft/demo/puck_pick/execute.py --planning --lie --cell 5 --pick --box S1 --slot 12 --auto
+ros2 run craft_planning puck_execute --planning --lie --cell 5 --pick --box S1 --slot 12 --auto
 ```
 
 Without `--planning`, the experimental executor retains its manual wheel pauses.
@@ -417,7 +417,7 @@ Without `--planning`, the experimental executor retains its manual wheel pauses.
 Mission configuration: `drive_only: true` still skips picks. For a collection run,
 set it to false and set `pick_modes` to one entry per collected slot in visiting
 order: `collect`, `find`, `lie2`, or `lie5`. Omit the list for automatic `collect` everywhere (standing first, then nearest).
-The adapter's `executor_path` parameter defaults to `~/craft/demo/puck_pick/execute.py`;
+The adapter's `executor_path` parameter defaults to the installed `puck_execute` executable;
 its `log_dir` defaults to `~/craft_mission_logs/picks` and each request has a log.
 `pick_timeout_s` bounds the mission pick; adapter `timeout_s` defaults to 600 s.
 
@@ -483,7 +483,7 @@ second. A missing/extra detection or unknown prism posture triggers one rescan,
 then fails instead of violating priority. A highest-priority target out of calibrated
 reach also fails; it is never silently skipped in favour of another puck.
 
-`execute.py --collect --planning --box S1 --slot 1 --expected-pucks 2 --auto`
+`puck_execute --collect --planning --box S1 --slot 1 --expected-pucks 2 --auto`
 executes one policy-selected pick; use slot 2 / expected-pucks 1 for the second.
 The mission supplies these values automatically. `--find` also uses the ranking
 policy for standing candidates; `--lie --cell` remains the explicit teaching mode.

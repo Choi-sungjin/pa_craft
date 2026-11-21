@@ -74,9 +74,11 @@ def direct_mode(binary):
         h.pump(lambda: not h.status.held, hold=False)
         arm = h.arm
         arm.feedback[6] = 1
-        h.task_pub.publish(arm_cmd(301, 1, [.05, .2, .3, .4, .5], duration=0.1))
-        h.pump(lambda: 301 in h.results and arm.times and arm.times[-1] == 100, hold=False)
         n_t, n_s = len(arm.times), len(arm.streams)
+        opening = arm_cmd(301, 1, [.05, .2, .3, .4, .5], duration=0.1)
+        opening.header.frame_id = 'arm_stream'
+        h.task_pub.publish(opening)
+        h.pump(lambda: 301 in h.results and len(arm.streams) > n_s and arm.streams[-1] == 50, hold=False)
         for rev, sh in enumerate([.21, .22, .23], start=2):
             h.task_pub.publish(arm_cmd(301, rev, [.05, sh, .3, .4, .5], TaskCommand.UPDATE_PATH, 0.1))
             h.run_for(.06, hold=False)
@@ -106,7 +108,13 @@ def main():
     h = None
     try:
         base.FakeBoard = RecordingBoard  # Harness builds its boards from base.FakeBoard
-        h = base.Harness(binary)
+        popen = base.subprocess.Popen
+        try:
+            base.subprocess.Popen = lambda args, **kw: popen(
+                list(args) + ['-p', 'arm_stream_direct_ms:=0'], **kw)
+            h = base.Harness(binary)
+        finally:
+            base.subprocess.Popen = popen
         h.pump(lambda: h.status is not None and h.status.ready and h.status.stopped, hold=True)
         h.pump(lambda: not h.status.held, hold=False)
         arm = h.arm

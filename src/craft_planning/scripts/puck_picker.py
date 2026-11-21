@@ -7,10 +7,10 @@ import os
 from pathlib import Path
 import signal
 import subprocess
-import sys
 import time
 
 import rclpy
+from ament_index_python.packages import get_package_prefix
 from rclpy.node import Node
 from std_msgs.msg import String
 
@@ -18,7 +18,8 @@ from std_msgs.msg import String
 class Picker(Node):
     def __init__(self):
         super().__init__('puck_picker')
-        self.executor_path = Path(self.declare_parameter('executor_path', str(Path.home() / 'craft/demo/puck_pick/execute.py')).value)
+        executor = Path(get_package_prefix('craft_planning')) / 'lib/craft_planning/puck_execute'
+        self.executor_path = Path(self.declare_parameter('executor_path', str(executor)).value)
         self.log_dir = Path(self.declare_parameter('log_dir', str(Path.home() / 'craft_mission_logs/picks')).value)
         self.timeout = float(self.declare_parameter('timeout_s', 600.0).value)
         self.child = None
@@ -51,7 +52,7 @@ class Picker(Node):
                 raise ValueError('picker is busy')
             if not self.executor_path.is_file():
                 raise ValueError(f'executor missing: {self.executor_path}')
-            args = [sys.executable, '-u', str(self.executor_path), '--planning', '--box', box, '--slot', slot, '--auto']
+            args = [str(self.executor_path), '--planning', '--box', box, '--slot', slot, '--auto']
             args += ['--collect'] if mode == 'collect' else ['--find'] if mode == 'find' else ['--lie', '--cell', mode[-1], '--pick']
             if mode == 'collect' and remaining is not None:
                 args += ['--expected-pucks', str(remaining)]

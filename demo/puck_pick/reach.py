@@ -20,7 +20,7 @@ import sys
 import numpy as np
 import yaml
 
-import execute as ex
+LM_BACKLASH = 0.002  # [m], same allowance as puck_execute
 import plan
 
 A = plan.ASSUME
@@ -80,7 +80,7 @@ def spot(x, ahead, box=(0.0, BOX_GAP + BOX[1] / 2), ch=None, ctrl=None):
         q = q[0]
         if plan.motor_bad(q, ctrl):
             return False, f'motor limit {plan.motor_bad(q, ctrl)}', None
-        if not lo <= q['slide_joint'] + ex.LM_BACKLASH <= hi:
+        if not lo <= q['slide_joint'] + LM_BACKLASH <= hi:
             return False, 'LM end', None
         z = ch.fk(q)[:3, 3]
         if np.linalg.norm(z - (grasp + [0, 0, h])) > 1e-4:

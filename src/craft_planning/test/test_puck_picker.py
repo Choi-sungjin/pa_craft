@@ -21,7 +21,8 @@ def picker(tmp_path, monkeypatch):
     rclpy.init()
     node = module.Picker()
     node.log_dir = tmp_path
-    node.executor_path = tmp_path / 'executor.py'
+    node.executor_path = tmp_path / "executor"
+    node.executor_path.touch(mode=0o755)
     results = []
     node.result = lambda *args: results.append(args)
     try:
@@ -44,7 +45,7 @@ def finish(node):
 
 def test_executor_failure_is_not_success_and_slot_mode_pass_through(picker):
     node, results = picker
-    node.executor_path.write_text('import sys\nprint(sys.argv)\nsys.exit(7)\n')
+    node.executor_path.write_text('#!/usr/bin/python3\nimport sys\nprint(sys.argv)\nsys.exit(7)\n')
     node.request(String(data='123 S1 8 lie5'))
     finish(node)
     assert results[0][:2] == ('123', False)
@@ -55,7 +56,7 @@ def test_executor_failure_is_not_success_and_slot_mode_pass_through(picker):
 
 def test_cancel_fails_even_if_child_exits_zero(picker):
     node, results = picker
-    node.executor_path.write_text('import signal,time,sys\nsignal.signal(signal.SIGINT, lambda *_: sys.exit(0))\nprint("ready", flush=True)\ntime.sleep(30)\n')
+    node.executor_path.write_text('#!/usr/bin/python3\nimport signal,time,sys\nsignal.signal(signal.SIGINT, lambda *_: sys.exit(0))\nprint("ready", flush=True)\ntime.sleep(30)\n')
     node.request(String(data='124 S2 12 find'))
     deadline = time.monotonic() + 3
     while 'ready' not in (node.log_dir / 'pick_124.log').read_text():
@@ -75,7 +76,7 @@ def test_invalid_mode_does_not_launch(picker):
 @pytest.mark.parametrize('remaining',(1,2))
 def test_collect_passes_remaining_count_for_fresh_survey(picker,remaining):
     node,results=picker
-    node.executor_path.write_text('import sys\nprint(sys.argv)\n')
+    node.executor_path.write_text('#!/usr/bin/python3\nimport sys\nprint(sys.argv)\n')
     node.request(String(data=f'126 S1 1 collect {remaining}'))
     finish(node)
     assert results[0][:2]==('126',True)

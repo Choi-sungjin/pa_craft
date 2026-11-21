@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Throwaway demo, dice step 3: take the stored pucks out of the clock one by one and stand them on the box as a
-dice face (execute.py --dice N). This file builds the steps and checks them in URDF FK; execute.py runs them.
+dice face (puck_execute --dice N). This file builds the steps and checks them in URDF FK; puck_execute runs them.
 
 Layout (2026-11-06): box 205 x 205 x 70 mm, BOX_GAP ahead of the LiDAR face, centred on the LM centre (BOX_X);
 pips on the 3x3 grid PIP mm apart around the box centre (box quarters are 51.25: the LM does not reach them),
@@ -21,12 +21,21 @@ import sys
 import numpy as np
 import yaml
 
-import execute as ex
+from functools import lru_cache
+from craft_interfaces.msg import TaskCommand
+from executor_preview import preview
 import plan
 import reach
 import teach
 
-M = ex.TaskCommand.MANIPULATOR
+M = TaskCommand.MANIPULATOR
+ARM = plan.Chain.NAMES
+UNLOAD_DEPTH = 0.03
+UNLOAD_ABOVE = 0.06
+RELEASE_GRIPPER_DEG = 147.9
+NO_STAGING = ('arm over the slot', 'straight down to the grasp', 'straight up ', 'descend',
+              'lift the puck', 'put down', 'rise above the puck', 'via pose:', 'via pose (off',
+              'to the nominal pose')
 A = plan.ASSUME
 BOX_X = -0.0125        # box centre: LM centre, 12.5 mm toward the LM motor from the LiDAR centre [m]
 BOX_AHEAD = reach.BOX_GAP + reach.BOX[1] / 2
@@ -44,6 +53,131 @@ CLOCK_GRASP_RAW_DEG = None
 DEFAULT_SLOTS = [1, 2, 3, 4, 5, 6]
 
 
+
+@lru_cache(maxsize=1)
+def fixed_poses():
+    return preview('--goto', 'nominal')
+
+
+def via_pose():
+    return fixed_poses()['via']
+
+
+def close_but_shoulder(a, b, joint_deg=15.0, slide_m=0.005):
+    """True when LM (slide) and the elbow, wrist_pitch and tool_roll of the poses a and b are within joint_deg / slide_m:
+    only the shoulder differs, so the arm can go in one move (2026-11-13, user: the stop-and-go steps looked jerky)."""
+    return abs(a[0] - b[0]) < slide_m and all(abs(a[i] - b[i]) < math.radians(joint_deg) for i in (2, 3, 4))
+
+
+def wrist_first(prev, target, what):
+    """Step: prev with only the wrist_pitch moved to target's (the elbow follows in the next step)."""
+    q = list(prev)
+    q[3] = target[3]
+    return (f'wrist_pitch to {what} first, the rest stays', TaskCommand.MANIPULATOR, q)
+
+
+def out_to_via(prev):
+    """Steps prev -> via pose, the reverse of the way back: the shoulder alone, then the elbow with LM, tool_roll and
+    gripper, then the wrist_pitch alone."""
+    via = via_pose()
+    m = TaskCommand.MANIPULATOR
+    if close_but_shoulder(prev, via):  # one smooth move instead of three stop-and-go ones
+        return [('via pose: one move (only the shoulder moves)', m, via)]
+    shoulder = list(prev[:1]) + [via[1]] + list(prev[2:])
+    elbow = via[:3] + [prev[3]] + via[4:]
+    return [('via pose: shoulder first, the rest stays', m, shoulder),
+            ('via pose: elbow, LM, tool_roll, gripper next (wrist_pitch stays)', m, elbow),
+            ('via pose (off the nominal pose): wrist_pitch last', m, via)]
+
+
+def with_via(steps, start, out=True):
+    """steps with, before the last move to start: the wrist_pitch to the via pose, the via pose, the wrist_pitch to
+    start; and (out) the via pose as the first move. A step's target is a pose or, in steps_from_plan, a list of
+    poses."""
+    via = via_pose()
+    nested = lambda arg: isinstance(arg[0], list)
+    target = lambda arg: arg[-1] if nested(arg) else arg
+    last = max(i for i, (_, kind, arg) in enumerate(steps)
+               if kind == TaskCommand.MANIPULATOR and target(arg) == start)
+    wrap = (lambda q: [q]) if nested(steps[last][2]) else (lambda q: q)
+    prev = next(target(arg) for _, kind, arg in reversed(steps[:last]) if kind == TaskCommand.MANIPULATOR)
+    if all(abs(a - b) < 1e-6 for a, b in zip(prev[:5], via[:5])):  # already comes back through the via pose
+        return [(n, k, wrap(q)) for n, k, q in out_to_via(start)] + steps if out else steps
+    name, kind, wrist = wrist_first(prev, via, 'the via pose')
+    back = ('via pose before the nominal pose', TaskCommand.MANIPULATOR, wrap(via))
+    name2, kind2, wrist2 = wrist_first(via, start, 'the nominal pose')
+    steps = steps[:last] + [(name, kind, wrap(wrist)), back, (name2, kind2, wrap(wrist2))] + steps[last:]
+    if out:
+        steps = [(n, k, wrap(q)) for n, k, q in out_to_via(start)] + steps
+    return steps
+
+
+def below(arm, dz):
+    """arm (shoulder, elbow, wrist_pitch, tool_roll) moved so the TCP goes dz straight down and the
+    tool keeps its angle: Newton on the three parallel pitch joints, URDF FK."""
+    ch = plan.Chain(plan.URDF)
+    names = ARM[1:4]
+    def pose(q):
+        T = ch.fk(dict(zip(names, q), tool_roll_joint=arm[3]))
+        return np.array([T[1, 3], T[2, 3], math.atan2(T[2, 2], T[1, 2])])
+    q = np.array(arm[:3], dtype=float)
+    goal = pose(q) - np.array([0.0, dz, 0.0])
+    for _ in range(50):
+        e = goal - pose(q)
+        e[2] = math.atan2(math.sin(e[2]), math.cos(e[2]))
+        if np.linalg.norm(e) < 1e-7:
+            break
+        J = np.column_stack([(pose(q + h) - pose(q)) / 1e-6 for h in np.eye(3) * 1e-6])
+        q += np.linalg.solve(J, e)
+    else:
+        raise RuntimeError(f'no IK for {dz * 100:.1f} cm below the loading pose')
+    for n, v in zip(names, q):
+        lo, hi = ch.limits(n)
+        if not lo <= v <= hi:
+            raise RuntimeError(f'{n} {math.degrees(v):.1f} deg is outside the URDF limits '
+                               f'{math.degrees(lo):.1f}..{math.degrees(hi):.1f} at {dz * 100:.1f} cm below the loading pose')
+    return [float(v) for v in q] + [arm[3]]
+
+
+def above(arm, dz):
+    """arm with wrist_pitch and tool_roll kept, shoulder/elbow solved so the TCP sits dz straight above.
+    The tool leans by however much shoulder+elbow change (the wrist limit forbids keeping it)."""
+    ch = plan.Chain(plan.URDF)
+    tcp = lambda q: ch.fk(dict(zip(ARM[1:], q)))[1:3, 3]
+    q = np.array(arm, dtype=float)
+    goal = tcp(q) + np.array([0.0, dz])
+    for _ in range(50):
+        e = goal - tcp(q)
+        if np.linalg.norm(e) < 1e-7:
+            break
+        J = np.column_stack([(tcp(q + h) - tcp(q)) / 1e-6 for h in (np.r_[1e-6, 0, 0, 0], np.r_[0, 1e-6, 0, 0])])
+        q[:2] += np.linalg.solve(J, e)
+    else:
+        raise RuntimeError(f'no IK for {dz * 100:.1f} cm above the unload grasp')
+    for n, v in zip(ARM[1:3], q):
+        lo, hi = ch.limits(n)
+        if not lo <= v <= hi:
+            raise RuntimeError(f'{n} {math.degrees(v):.1f} deg is outside the URDF limits at {dz * 100:.1f} cm above')
+    return [float(v) for v in q]
+
+
+def stage(steps, prev):
+    """Elbow first, shoulder last: each MANIPULATOR target (a pose or a path of poses) becomes the pose with the
+    shoulder still at its previous angle, then the pose. prev: the arm pose before steps (None: first not staged)."""
+    out = []
+    for name, kind, arg in steps:
+        if kind != TaskCommand.MANIPULATOR:
+            out.append((name, kind, arg)); continue
+        path = arg if isinstance(arg[0], list) else [arg]
+        poses = []
+        for q in path:
+            mid = [q[0], prev[1]] + q[2:] if prev is not None and not name.startswith(NO_STAGING) else q
+            if mid != q and mid != prev:
+                poses.append(mid)
+            poses.append(q); prev = q
+        out.append((name, kind, poses))
+    return out
+
 def spots(face):
     """Puck centres (x from the LiDAR centre, ahead of the LiDAR face) [m] in put-down order."""
     return sorted(reach.dice_spots(face, BOX_X, BOX_AHEAD, PIP), key=lambda p: (-round(p[0], 4), -p[1]))
@@ -54,7 +188,7 @@ def clock_grasp():
     if CLOCK_GRASP_RAW_DEG is not None:
         t = teach.raw_to_target(CLOCK_GRASP_RAW_DEG)
         return t[0], t[1:5], True
-    return ex.nominal_pose()[0], ex.below(ex.load_pose(), ex.UNLOAD_DEPTH), False
+    return fixed_poses()['nominal'][0], below(fixed_poses()['load'], UNLOAD_DEPTH), False
 
 
 def line(ch, x, ahead, heights):
@@ -65,35 +199,35 @@ def line(ch, x, ahead, heights):
         q = plan.ik_tilted(ch, plan.grasp_at(x, ahead) + [0, 0, h])
         if not q or not plan.inside(ch, q[0]):
             raise RuntimeError(f'no IK {h * 1000:.0f} mm over spot {x * 1000:+.1f}, {ahead * 1000:.1f} mm')
-        out.append([q[0]['slide_joint'] + ex.LM_BACKLASH] + [q[0][n] for n in ex.ARM[1:4]] + [PUT_ROLL])
+        out.append([q[0]['slide_joint'] + reach.LM_BACKLASH] + [q[0][n] for n in ARM[1:4]] + [PUT_ROLL])
     return out
 
 
 def steps(face, slots, current_slide=None, start=None):
-    """execute.py steps for dice face `face`, puck k from clock slot slots[k]."""
+    """puck_execute steps for dice face `face`, puck k from clock slot slots[k]."""
     A['grasp_coverage'] = reach.GRASP_DEPTH / A['puck_height']
     A['shelf_height'] = reach.BOX[2]
     ch = plan.Chain(plan.URDF)
     slide, grasp, _ = clock_grasp()
-    high = ex.above(grasp, ex.UNLOAD_ABOVE)
-    lift = ex.below(grasp, -LIFT)
-    release = math.radians(ex.RELEASE_GRIPPER_DEG)
+    high = above(grasp, UNLOAD_ABOVE)
+    lift = below(grasp, -LIFT)
+    release = math.radians(RELEASE_GRIPPER_DEG)
     downs = np.r_[np.arange(CARRY_ABOVE - DOWN_STEP, RELEASE_ABOVE, -DOWN_STEP), RELEASE_ABOVE]
     s = []
     if current_slide is not None:
-        s.append(('LM to the clock line, arm stays', M, [slide] + ex.via_pose()[1:5]))
+        s.append(('LM to the clock line, arm stays', M, [slide] + via_pose()[1:5]))
     for k, ((x, ahead), slot) in enumerate(zip(spots(face), slots), 1):
         carry = line(ch, x, ahead, [CARRY_ABOVE])[0]
         down = line(ch, x, ahead, downs)
         tag = f'puck {k}/{len(slots)}'
         if k > 1:
             s.append((f'{tag}: LM to the clock line, arm stays', M, [slide] + prev_carry[1:]))
-        s.append((f'{tag}: clock to slot {slot} (loading guide)', ex.TaskCommand.CLOCK, slot))
-        s.append((f'{tag}: open gripper to {ex.RELEASE_GRIPPER_DEG:g} deg', ex.TaskCommand.GRIPPER, release))
-        s.append((f'{tag}: swing back over the slot, {ex.UNLOAD_ABOVE * 100:.0f} cm above the grasp, LM stays', M,
+        s.append((f'{tag}: clock to slot {slot} (loading guide)', TaskCommand.CLOCK, slot))
+        s.append((f'{tag}: open gripper to {RELEASE_GRIPPER_DEG:g} deg', TaskCommand.GRIPPER, release))
+        s.append((f'{tag}: swing back over the slot, {UNLOAD_ABOVE * 100:.0f} cm above the grasp, LM stays', M,
                   [slide] + high))
         s.append((f'straight down to the grasp ({tag}), LM stays', M, [slide] + grasp))
-        s.append((f'{tag}: close gripper (grasp the puck in the clock)', ex.TaskCommand.GRIPPER, True))
+        s.append((f'{tag}: close gripper (grasp the puck in the clock)', TaskCommand.GRIPPER, True))
         s.append((f'straight up {LIFT * 100:.0f} cm out of the slot ({tag}), tool angle kept, LM stays', M,
                   [slide] + lift))
         s.append((f'{tag}: swing to the front, {CARRY_ABOVE * 1000:.0f} mm over the box, jaws left-right, LM stays',
@@ -101,7 +235,7 @@ def steps(face, slots, current_slide=None, start=None):
         s.append((f'{tag}: LM to the spot line ({(x - BOX_X) * 1000:+.1f} mm from the box centre)', M, carry))
         s.append((f'put down ({tag}) at {ahead * 1000:.1f} mm ahead, to {RELEASE_ABOVE * 1000:.0f} mm over the box',
                   M, down))
-        s.append((f'{tag}: open gripper to {ex.RELEASE_GRIPPER_DEG:g} deg (release)', ex.TaskCommand.GRIPPER, release))
+        s.append((f'{tag}: open gripper to {RELEASE_GRIPPER_DEG:g} deg (release)', TaskCommand.GRIPPER, release))
         s.append((f'rise above the puck ({tag})', M, down[-2::-1] + [carry]))
         prev_carry = carry
     if start is not None:
@@ -121,7 +255,7 @@ def check(face, slots, staged):
     prev = None
     centres = spots(face)
     for name, kind, arg in staged:
-        if kind == ex.TaskCommand.GRIPPER:
+        if kind == TaskCommand.GRIPPER:
             if arg is True:
                 held = True
             elif held:
@@ -134,7 +268,7 @@ def check(face, slots, staged):
             if prev is not None and held:
                 for f in np.linspace(0, 1, 21):
                     p = [a + (b - a) * f for a, b in zip(prev, q)]
-                    T = ch.fk(dict(zip(ex.ARM, p[:5])))
+                    T = ch.fk(dict(zip(ARM, p[:5])))
                     d, tcp = T[:3, 1], T[:3, 3] + [0, 0, lift_z]
                     tip = tcp + A['finger_beyond_tcp'] * d
                     side = T[:3, 2]  # jaw closing axis (jaw joints move along tool_roll_link z)
@@ -168,10 +302,10 @@ def main():
     _, _, taught = clock_grasp()
     if not taught:
         print('!! CLOCK_GRASP_RAW_DEG not taught: the clock part uses the old loading pose (dry run only)')
-    start = ex.nominal_pose()
-    s = ex.stage(ex.with_via(steps(face, slots, ex.via_pose()[0], start), start), start)
+    start = fixed_poses()['nominal']
+    s = stage(with_via(steps(face, slots, via_pose()[0], start), start), start)
     for name, kind, arg in s:
-        print(f'  {name:45s}', ex.describe(kind, arg))
+        print(f'  {name:45s}', arg[-1] if kind == M else arg)
     worst, rows = check(face, slots, s)
     print('\nclearance while holding a puck (worst over the joint-linear moves):')
     for k, v in worst.items():

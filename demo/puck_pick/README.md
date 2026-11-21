@@ -6,9 +6,9 @@ planning을 거치지 않고 `/planning/task_command`로 control_master에 직�
     ~/craft/demo/puck_pick/show.sh                          # RViz 미리보기 (하드웨어 없음)
     python3 demo/puck_pick/plan.py                          # IK 계획 -> plan.yaml
     bro   # 터미널 A: 보드 확인 + control
-    sis1  # 터미널 B: 집어서 적재   (execute.py, --dry-run: 단계만 출력)
-    sis2  # 터미널 B: 꺼내서 내려놓기 (execute.py --unload)
-    sis3 N        # 터미널 B: 주사위 N(1-6) 만들기, 단계마다 Enter (execute.py --dice N)
+    sis1  # 터미널 B: 집어서 적재   (puck_execute, --dry-run: 단계만 출력)
+    sis2  # 터미널 B: 꺼내서 내려놓기 (puck_execute --unload)
+    sis3 N        # 터미널 B: 주사위 N(1-6) 만들기, 단계마다 Enter (puck_execute --dice N)
     sis3 N choi   # 한 번에 끝까지 (Enter 없이, Ctrl+C = STOP + hold)
     teacharm      # 자세 jog / 저장 (teach.py, control_master 끈 상태)
 
@@ -29,7 +29,7 @@ clock에 적재된 퍽을 하나씩 꺼내 박스(205×205×70 mm) 위에 주사
   허용 오차 10 mm를 1.1 mm 넘습니다. 가운데 열은 격자점에 맞습니다.
 - 눈 모양은 `DICE_FACES`(위쪽 줄 = 먼 줄)이고, 2와 3은 먼-왼 / 가까운-오 대각선입니다. clock 슬롯 순서는 `DICE_SLOTS` [12, 1, 2, ...]입니다.
 
-**퍽 하나의 순서와 단계별 설정** (`execute.py` `dice_steps`)
+**퍽 하나의 순서와 단계별 설정** (`puck_execute` `dice_steps`)
 
 | 단계 | 허용오차 | I 게인 숄더/엘보/손목/툴롤 | 이동 시간 |
 | --- | --- | --- | --- |
@@ -80,3 +80,16 @@ clock에 적재된 퍽을 하나씩 꺼내 박스(205×205×70 mm) 위에 주사
 
 남은 일: 먼 줄에서 놓는 순간 숄더가 아직 +0.9° 튑니다(조금 누르고 있다는 뜻). 1 mm 더 올려 볼 수 있습니다.
 수렴이 느린 원인 분석(올라갈 때와 내려갈 때의 오버슛, I 와인드업)과 다음 실험은 [NOTES.md](NOTES.md) 5장에 있습니다.
+### 어퍼캠 집기 시나리오
+
+팔을 노미널에 두고 `control`을 켠 상태에서 실행한다. 집기 시나리오의 순서는 어퍼캠 위치 추정, BestIK 하강 전 이동, 그리퍼캠 미동 보정, 집기, 적재다.
+
+현재 실행기는 기록된 노미널 이동에 BestIK가 계산한 준비 자세까지의 이동을 이어 붙인 뒤, 새 그리퍼캠 보정용 샘플을 저장한다. `--prepare-only`는 준비 자세에서 멈춘다. 팔 추종의 기본 요청은 기준 경로 속도의 400%이고, `--arm-speed`로 조절한다. 새 데이터셋을 통한 미동 보정과 집기·적재 연결은 남아 있다.
+
+고정 거리 MinPeak 실험(`--pick-160mm`, `--pick-190mm`)은 C++ 실행기에 이식되지 않았다.
+
+```bash
+cd ~/craft
+source install/setup.bash
+CRAFT_REPO="$PWD" ros2 run craft_planning puck_execute --pick-upper
+```

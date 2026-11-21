@@ -51,39 +51,3 @@ for fraction in (float('nan'), -.01, 1.01):
     else: raise AssertionError('invalid fraction accepted')
 fold.SHOULDER_EARLY_FRACTION = old_fraction
 print(f'{len(cases)} Python/C++ cases passed')
-
-# Exercise the real Python runner without constructing a ROS node or contacting hardware.
-from types import SimpleNamespace
-import time
-import execute as executor
-executor.AUTO = True
-executor.find_step = lambda steps, i, arg: (steps.__setitem__(i+1, (steps[i+1][0], steps[i+1][1], [t])) or True, 'injected camera target')
-original_prepare = fold.prepare_motion
-
-def controlled_prepare(name, start, target, seconds, tolerance, **kwargs):
-    assert target == t and start == q
-    return [(list(start)+[t[5]],seconds,.001,True),(target,seconds,tolerance,False)], ''
-fold.prepare_motion = controlled_prepare
-
-class FakeNode:
-    planned = False
-    grasped = False
-    def __init__(self, stale=False, fail_first=False):
-        ns = 0 if stale else time.time_ns()
-        self.joints = SimpleNamespace(name=list(executor.ARM),position=list(q),
-                         header=SimpleNamespace(stamp=SimpleNamespace(sec=ns//10**9,nanosec=ns%10**9)))
-        self.commands=[]; self.fail_first=fail_first
-    def get_clock(self):
-        return SimpleNamespace(now=lambda: SimpleNamespace(nanoseconds=time.time_ns()))
-    def send(self, kind, target, secs=0, tol=0, gains=None, contact=0):
-        self.commands.append((kind,target,secs,tol,contact));return len(self.commands)
-    def wait(self, handle):
-        return ('FAILED','fake failure') if self.fail_first and handle==1 else ('SUCCEEDED','fake success')
-
-steps = [('standfind 0:',executor.STANDFIND,None),('standfind 2:',executor.TaskCommand.MANIPULATOR,[q])]
-node = FakeNode(); assert executor.run_steps(node, list(steps))
-assert len(node.commands)==2 and node.commands[-1][1]==t and node.commands[0][-1]==0.
-node = FakeNode(fail_first=True); assert not executor.run_steps(node, list(steps)) and len(node.commands)==1
-node = FakeNode(stale=True); assert not executor.run_steps(node, list(steps)) and not node.commands
-fold.prepare_motion = original_prepare
-print('3 fake runner cases passed')

@@ -14,7 +14,6 @@ import math
 import os
 import subprocess
 import sys
-import threading
 import time
 
 import yaml
@@ -23,9 +22,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PP = os.path.normpath(os.path.join(HERE, '..', '..', 'demo', 'puck_pick'))
 sys.path.insert(0, HERE); sys.path.insert(0, PP)
 DRY = '--dry-run' in sys.argv
-sys.argv = [sys.argv[0]]                     # execute.py reads sys.argv at import
 import cam_pick  # noqa: E402
-import execute as ex  # noqa: E402
+from arm_stream import ARM, Streamer  # noqa: E402
+from reach import LM_BACKLASH  # noqa: E402
+from executor_preview import preview  # noqa: E402
 
 OUT = '/tmp/claude-1000/-home-craft-craft/af6c0472-7c9c-4305-9240-a5d754be5799/scratchpad'
 OFFSETS = [(0.0, 0.07), (0.0, -0.07), (0.07, 0.0), (-0.06, 0.05), (0.06, -0.05), (0.0, 0.07)]
@@ -67,7 +67,7 @@ def spots():
         print(f'  spot {len(out) + 1}: x {x * 1000:.0f} y {y * 1000:+.0f} mm, tips {lift * 1000:.0f} mm over the top -> ' + ('ok' if ok else 'unreachable, skipped'))
         if ok:
             g = wp['grasp']
-            out.append([g['slide_joint'] + ex.LM_BACKLASH] + [g[n] for n in ex.ARM[1:]])
+            out.append([g['slide_joint'] + LM_BACKLASH] + [g[n] for n in ARM[1:]])
     return out
 
 
@@ -75,36 +75,54 @@ def main():
     poses = spots()
     if DRY or not poses:
         print(f'{len(poses)} spots planned' + (' (dry run: nothing moved)' if DRY else '')); return
-    import rclpy
-    rclpy.init(); node = ex.Runner(); threading.Thread(target=rclpy.spin, args=(node,), daemon=True).start()
-    t = time.time()
-    while (node.status is None or node.joints is None) and time.time() - t < 5:
-        time.sleep(0.1)
-    time.sleep(2.0)                                   # let the command publisher match control
-    if node.status is None or not node.status.ready:
-        sys.exit('control not ready')
+    from craft_interfaces.msg import ControlStatus
+    fixed = preview('--goto', 'nominal')
+    stream = Streamer()
+    status = None
+
+    def update_status(msg):
+        nonlocal status
+        status = msg
+
+    stream.node.create_subscription(ControlStatus, '/control/status', update_status, 10)
 
     def go(q, seconds, label):
-        st, why = node.wait(node.send(ex.TaskCommand.MANIPULATOR, q, seconds))
-        print(f'  {label}: {st} {why}')
-        if st != 'SUCCEEDED':
-            node.stop(); sys.exit('stopped')
+        stream.send(q, seconds, first=True)
+        deadline = time.monotonic() + seconds + 10
+        while time.monotonic() < deadline:
+            stream.spin(0.05)
+            state, reason = stream.state()
+            if state in ('NONE', 'RUNNING', 'STOPPING'):
+                continue
+            print(f'  {label}: {state} {reason}')
+            if state == 'SUCCEEDED':
+                return
+            raise RuntimeError(f'{label}: {state} {reason}')
+        raise RuntimeError(f'{label}: timed out')
 
-    via = ex.via_pose()[:5]
-    go(via, 6.0, 'to the via pose')
-    first = poses[0]
-    go([first[0], via[1]] + first[2:], MOVE_S, 'LM and arm over spot 1, shoulder held')
-    for k, q in enumerate(poses):
-        go(q, MOVE_S, f'spot {k + 1}')
-        time.sleep(1.0)
-        r = subprocess.run(['/usr/bin/python3', os.path.join(HERE, 'handeye.py'), 'capture', 'auto'], capture_output=True, text=True)
-        print('   ' + ' | '.join(l for l in r.stdout.splitlines() if 'tags' in l or 'no tag' in l))
-    last = poses[-1]
-    go([last[0], via[1]] + last[2:], MOVE_S, 'shoulder up (the rest held)')
-    go(via, MOVE_S, 'to the via pose')
-    nom = ex.nominal_pose()
-    go(nom, 12.0, 'to the nominal pose (slow)')
-    node.destroy_node(); rclpy.shutdown()
+    try:
+        stream.spin(5.0)
+        if status is None or not status.ready or status.fault or stream.joints is None:
+            raise RuntimeError('control not ready')
+        via = fixed['via'][:5]
+        go(via, 6.0, 'to the via pose')
+        first = poses[0]
+        go([first[0], via[1]] + first[2:], MOVE_S, 'LM and arm over spot 1, shoulder held')
+        for k, q in enumerate(poses):
+            go(q, MOVE_S, f'spot {k + 1}')
+            stream.spin(1.0)
+            result = subprocess.run(['/usr/bin/python3', os.path.join(HERE, 'handeye.py'), 'capture', 'auto'],
+                                    capture_output=True, text=True)
+            print('   ' + ' | '.join(line for line in result.stdout.splitlines() if 'tags' in line or 'no tag' in line))
+        last = poses[-1]
+        go([last[0], via[1]] + last[2:], MOVE_S, 'shoulder up (the rest held)')
+        go(via, MOVE_S, 'to the via pose')
+        go(fixed['nominal'][:5], 12.0, 'to the nominal pose (slow)')
+    except (RuntimeError, KeyboardInterrupt):
+        stream.stop()
+        raise
+    finally:
+        stream.close()
 
 
 if __name__ == '__main__':

@@ -125,13 +125,9 @@ if(BUILD_TESTING)
 
   add_test(NAME puck_execute_parity COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/test/puck_execute_parity.py $<TARGET_FILE:puck_execute_math_cli>)
-  add_test(NAME puck_legacy_parity COMMAND ${Python3_EXECUTABLE}
-    ${CMAKE_CURRENT_SOURCE_DIR}/test/puck_legacy_parity.py $<TARGET_FILE:puck_legacy_cli>)
-  add_test(NAME puck_camera_parity COMMAND ${Python3_EXECUTABLE}
-    ${CMAKE_CURRENT_SOURCE_DIR}/test/puck_camera_parity.py $<TARGET_FILE:puck_camera_cli>)
   add_test(NAME puck_cli_checks COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/test/puck_cli_checks.py $<TARGET_FILE:puck_execute>)
-  set_tests_properties(puck_execute_parity puck_legacy_parity puck_camera_parity puck_cli_checks PROPERTIES TIMEOUT 180)
+  set_tests_properties(puck_execute_parity puck_cli_checks PROPERTIES TIMEOUT 180)
   find_package(ament_cmake_gtest REQUIRED)
   foreach(module state_machine path_planner_cpp arm_planner planning_config grasp_region dice_demo mission_logic mission_fsm)
     ament_add_gtest(test_${module} test/test_${module}.cpp)
@@ -148,7 +144,6 @@ if(BUILD_TESTING)
     APPEND_ENV PYTHONPATH=${CMAKE_INSTALL_PREFIX}/${PYTHON_INSTALL_DIR})
   ament_add_pytest_test(test_box_detector test/test_box_detector.py
     APPEND_ENV PYTHONPATH=${CMAKE_INSTALL_PREFIX}/${PYTHON_INSTALL_DIR})
-  ament_add_pytest_test(test_pick_dispatch test/test_pick_dispatch.py TIMEOUT 60)
   ament_add_pytest_test(test_pick_policy test/test_pick_policy.py TIMEOUT 30)
   ament_add_pytest_test(test_puck_picker test/test_puck_picker.py TIMEOUT 30)
   ament_add_pytest_test(test_planning_master_integration test/test_planning_master_integration.py

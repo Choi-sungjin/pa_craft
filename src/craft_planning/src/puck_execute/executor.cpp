@@ -21,8 +21,38 @@ std::string input_line() {
   return "q";
 }
 bool starts(const std::string &s,const std::string &prefix) { return s.rfind(prefix,0)==0; }
+constexpr auto preparation_step="arm: BestIK to pick preparation";
+double requested_arm_speed() {
+  return options.real("--arm-speed",400.);
+}
+double preparation_waypoint_seconds(const Path &path) {
+  double spacing=.5*100./requested_arm_speed();
+  // Servo profile velocity units from lm_arm/config.h, in rad/s or m/s.
+  constexpr double velocity_unit=.229*2.*M_PI/60.;
+  constexpr double arm_limit=50.*velocity_unit;
+  const double lm_limit=180.*velocity_unit*teach::control_params()["lm_meters_per_rad"].as<double>();
+  auto previous=first5(nominal_pose());
+  for(const auto &pose:path) {
+    spacing=std::max(spacing,std::abs(pose.at(0)-previous[0])/lm_limit);
+    for(std::size_t axis=1;axis<5;++axis)
+      spacing=std::max(spacing,std::abs(pose.at(axis)-previous[axis])/arm_limit);
+    previous=pose;
+  }
+  return spacing;
+}
 std::vector<std::string> arm_names() { return {"slide_joint","shoulder_joint","elbow_joint","wrist_pitch_joint","tool_roll_joint"}; }
 Steps generate(std::optional<double> slide={},std::optional<Pose> start={}) {
+  if(options.has("--pick-upper")) {
+    auto placeholder=start.value_or(nominal_pose());
+    Steps steps={
+      {"pick: locate standing puck at nominal",STANDFIND,{{"what","upper_only"}}},
+      {"pick: open gripper full",TC::GRIPPER,false},
+      {preparation_step,TC::MANIPULATOR,placeholder},
+    };
+    if(!options.has("--prepare-only"))
+      steps.push_back({"pick: record gripper-camera sample at preparation",STANDFIND,{{"what","v307_grip_sample"}}});
+    return steps;
+  }
   if(options.has("--goto")) {
     const auto g=options.value("--goto");
     if(g=="cell") { auto s=stand_steps(slide,start);s.erase(std::remove_if(s.begin(),s.end(),[](const Step &x){return starts(x.name,"stand 0");}),s.end());return s; }
@@ -42,7 +72,16 @@ Steps generate(std::optional<double> slide={},std::optional<Pose> start={}) {
   if(options.has("--lying"))return lying_steps_from_plan(slide,start);
   return steps_from_plan(slide,start);
 }
-void show(const Steps &s) { for(const auto &x:s)std::cout<<"  "<<x.name<<"  "<<describe(x.kind,x.arg)<<" "<<seconds_text(x.name)<<'\n'; }
+void show(const Steps &s) {
+  for(const auto &x:s) {
+    auto duration=seconds_text(x.name);
+    if(x.name==preparation_step) {
+      const auto path=path_arg(x.arg);
+      duration=fmt(path.size()*preparation_waypoint_seconds(path),1,false,true)+" s";
+    }
+    std::cout<<"  "<<x.name<<"  "<<describe(x.kind,x.arg)<<" "<<duration<<'\n';
+  }
+}
 TC command(int kind,const Json &target,double secs,double tol,const std::vector<int32_t> &gains,double contact) {
   TC c;c.kind=kind;
   if(kind==TC::MANIPULATOR) { c.duration_s=secs;c.tolerance_rad=tol;c.position_i_gains.assign(gains.begin(),gains.end());c.speed=contact;auto q=target.get<Pose>();c.joints.name=arm_names();if(q.size()==6)c.joints.name.push_back("gripper");c.joints.position=q; }
@@ -89,6 +128,16 @@ bool run_steps(Runner &node,CameraContext &camera,Steps &steps) {
     if(kind==TC::MANIPULATOR && (starts(name,"bigbro pick: move 1")||starts(name,"bigbro pick: move 2")||starts(name,"bigbro fix"))) {auto p=path_arg(arg);for(auto &q:p)q[4]=0.;arg=p;}
     std::vector<Json> targets;
     if(kind==TC::MANIPULATOR)for(const auto &q:path_arg(arg))targets.emplace_back(q);else targets.push_back(arg);
+    if(name==preparation_step) {
+      const auto path=path_arg(arg);
+      const auto spacing=preparation_waypoint_seconds(path);
+      std::cout<<"   arm speed "<<requested_arm_speed()<<"%, "<<path.size()*spacing<<" s planned\n";
+      const auto [status,reason]=node.stream_arm(arm_names(),first5(nominal_pose()),path,spacing);
+      std::cout<<"   -> "<<status<<" "<<reason<<'\n';
+      if(status!="SUCCEEDED")return false;
+      last_manipulator_target=path.back();
+      continue;
+    }
     for(std::size_t k=0;k<targets.size();++k) {
       double tol=step_tolerance(name),secs=step_seconds(name,static_cast<int>(k));
       if(kind==TC::MANIPULATOR && name.find("the vertical line")!=std::string::npos && k+1<targets.size())tol=number("VIA_TOLERANCE_DEG")*M_PI/180.;
@@ -131,7 +180,7 @@ bool run_steps(Runner &node,CameraContext &camera,Steps &steps) {
         while(!node.grasped().value_or(false) && !is_interrupted() && std::chrono::steady_clock::now()<grasp_deadline)
           std::this_thread::sleep_for(10ms);
         grasped_at_close=node.grasped().value_or(false);
-        if(node.planned() && !grasped_at_close){std::cout<<"mission pick: no confirmed grasp; stopping\n";return false;}
+        if(node.planned() && !grasped_at_close){std::cout<<"no confirmed grasp; stopping\n";return false;}
         if(starts(name,"bigbro pick: close")){auto [shot_ok,shot]=gripzero_step(camera,"look");(void)shot_ok;std::cout<<"   gripper cam: "<<shot<<'\n';auto bad=held_bad(camera,name,shot,steps,i);if(!bad.empty()){std::cout<<"   -> "<<bad<<": letting it go and stopping before the clock\n";node.wait(node.send(command(TC::GRIPPER,false,0,0,{},0)));for(std::size_t j=i+1;j<steps.size();++j)if(steps[j].name.find("pick: ascend")!=std::string::npos){auto q=path_arg(steps[j].arg).back();node.wait(node.send(command(TC::MANIPULATOR,q,0,0,step_i_gains(""),0)));break;}return false;}if(!grasped_at_close){std::cout<<"   -> the gripper reports no grasp: not carrying on to the clock\n";return false;}}
         if(camera.learn_ref && grasped_at_close)learn_reference(camera);
       }
@@ -152,10 +201,72 @@ void go_home(Runner &node,CameraContext &camera,const Pose &start,bool lying) {
 }
 int execute_main(const Options &opts) {
   configure(opts); interrupted.store(false);
+  if(options.has("--arm-speed")&&!options.has("--pick-upper"))
+    throw std::runtime_error("--arm-speed requires --pick-upper");
+  if(options.has("--locate-upper")) {
+    if(opts.args.size()!=1 &&
+       (opts.args.size()!=3||!options.has("--upper-snap")||options.value("--upper-snap").rfind("--",0)==0))
+      throw std::runtime_error("use --locate-upper [--upper-snap PREFIX]");
+    return locate_upper_pucks();
+  }
+  const bool upper_pick=options.has("--pick-upper");
+  if(options.has("--prepare-only")&&!upper_pick)throw std::runtime_error("--prepare-only requires --pick-upper");
+  if(options.has("--pick-110mm"))throw std::runtime_error("use --pick-upper for the single puck scenario");
+  if(options.has("--json") && !options.has("--dry-run"))
+    throw std::runtime_error("--json requires --dry-run");
+  if(options.has("--pick-160mm") || options.has("--pick-190mm") || options.has("--pick-130mm"))
+    throw std::runtime_error("Fixed-distance pick is unavailable in the C++ executor");
+  if(options.has("--upper-snap") && (!upper_pick || !options.has("--dry-run")))
+    throw std::runtime_error("--upper-snap requires --pick-upper --dry-run");
+  if(upper_pick) {
+    for(std::size_t i=0;i<options.args.size();++i) {
+      const auto &arg=options.args[i];
+      if(arg=="--arm-speed") {
+        if(i+1==options.args.size()||options.args[i+1].rfind("--",0)==0)
+          throw std::runtime_error("--arm-speed requires a percentage");
+        ++i;
+        continue;
+      }
+      if(arg=="--upper-snap") {
+        if(i+1==options.args.size() || options.args[i+1].rfind("--",0)==0)
+          throw std::runtime_error("--upper-snap requires a capture prefix");
+        ++i;
+        continue;
+      }
+      if(arg!="--pick-upper" && arg!="--dry-run" && arg!="--auto" && arg!="--json" && arg!="--prepare-only")
+        throw std::runtime_error("--pick-upper accepts --prepare-only, --arm-speed PERCENT, --auto or --dry-run [--upper-snap PREFIX]");
+    }
+    const auto arm_speed=requested_arm_speed();
+    if(!std::isfinite(arm_speed)||arm_speed<1.||arm_speed>400.)
+      throw std::runtime_error("--arm-speed must be between 1 and 400 percent");
+  }
   if(options.has("--planning")&&options.has("--lie")&&!options.has("--box"))throw std::runtime_error("--planning --lie requires --box NAME");
-  auto steps=generate();
+  const bool json=options.has("--json");
+  auto steps=json?generate(via_pose()[0],nominal_pose()):generate();
+  if(upper_pick && options.has("--dry-run") && options.has("--upper-snap")) {
+    CameraContext camera;
+    const auto [ok,message]=find_step(camera,steps,0,steps.front().arg);
+    (json?std::cerr:std::cout)<<message<<'\n';
+    if(!ok)return 1;
+  }
+  if(upper_pick && options.has("--dry-run") && !options.has("--upper-snap")) {
+    std::cout<<"Use --upper-snap PREFIX to calculate pick poses offline.\n";
+    return 0;
+  }
   if(options.has("--goto") || options.has("--lie") || options.has("--find") || options.has("--collect") || options.has("--standcal") || options.has("--stand") || options.has("--gripzero") || options.has("--gripcal") || options.has("--bigbro") || options.has("--dice") || options.has("--unload") || options.has("--lying")) steps=stage(std::move(steps));
-  show(steps);
+  if(json) {
+    Json report={{"nominal",nominal_pose()},{"via",via_pose()},{"carry_via",carry_via_pose()},
+      {"load",load_pose()},
+      {"stored_grasp",first5(teach::raw_to_target(values("PRE_GRASP_RAW_DEG")))},
+      {"steps",Json::array()}};
+    for(const auto &step:steps){
+      auto arg=step.kind==TC::MANIPULATOR?Json(path_arg(step.arg)):step.arg;
+      report["steps"].push_back(Json::array({step.name,step.kind,arg}));
+    }
+    std::cout<<report.dump()<<'\n';
+    return 0;
+  }
+  if(!upper_pick || options.has("--dry-run"))show(steps);
   if(options.has("--dry-run"))return 0;
   rclcpp::init(0,nullptr,rclcpp::InitOptions(),rclcpp::SignalHandlerOptions::None);std::signal(SIGINT,on_signal);std::signal(SIGTERM,on_signal);
   auto node=std::make_shared<Runner>(options.has("--planning"));rclcpp::executors::SingleThreadedExecutor spin;spin.add_node(node);
@@ -170,21 +281,27 @@ int execute_main(const Options &opts) {
     std::map<std::string,double> current;for(std::size_t i=0;i<std::min(joints->name.size(),joints->position.size());++i)current[joints->name[i]]=joints->position[i];
     Pose now;for(const auto &name:arm_names()){if(!current.count(name))throw std::runtime_error("missing arm joint "+name);now.push_back(current[name]);}
     double slide=now[0];auto start=nominal_pose();std::cout<<"LM now: slide "<<slide<<" m (nominal pose "<<start[0]<<")\n";
-    if(slide<-.045||slide>.064){std::cout<<"LM position is outside the calibrated range (wrong start position?). Run checkarm; aborting\n";cleanup();return 1;}
-    slide=std::clamp(slide,-.043,.0627);std::vector<std::string> outside;
+    if(!upper_pick && (slide<-.045||slide>.064)){std::cout<<"LM position is outside the calibrated range (wrong start position?). Run checkarm; aborting\n";cleanup();return 1;}
+    if(!upper_pick)slide=std::clamp(slide,-.043,.0627);
+    std::vector<std::string> outside;
     for(std::size_t i=1;i<5;++i){auto [lo,hi]=chain().limits(arm_names()[i]);if(now[i]<lo||now[i]>hi)outside.push_back(arm_names()[i]);}
     bool go=options.has("--goto");double lm_tol=(!go||options.has("--lm-tol-mm"))?number("LM_START_TOL"):1.;double joint_tol=(!go||!outside.empty()?90.:400.)*M_PI/180.;
-    for(std::size_t i=0;i<5;++i)if(std::abs(now[i]-start[i])>(i==0?lm_tol:joint_tol)){std::cout<<"!! too far from the nominal pose ("<<arm_names()[i]<<"): move it closer by hand; aborting\n";cleanup();return 1;}
+    if(upper_pick)joint_tol=pick_start_joint_tolerance_rad;
+    for(std::size_t i=0;i<5;++i) {
+      const bool too_far=i==0&&upper_pick ? !pick_start_lm_ok(now[i],start[i])
+        : std::abs(now[i]-start[i])>(i==0?lm_tol:joint_tol);
+      if(too_far){std::cout<<"!! too far from the nominal pose ("<<arm_names()[i]<<"): move it closer by hand; aborting\n";cleanup();return 1;}
+    }
     CameraContext camera;camera.node=node.get();
     if(options.has("--find")&&!options.has("--dry-run"))camera.run_dir=here()/"runs"/("find_"+[] {std::time_t t=std::time(nullptr);std::tm local{};localtime_r(&t,&local);char b[32];std::strftime(b,sizeof(b),"%m%d_%H%M%S",&local);return std::string(b);}());
     bool collect=options.has("--collect");if(collect){auto target=redock_for_reach(camera,survey_pick(camera));C["POLICY_TARGET"]=target.record();if(target.posture=="lying"){int cell=std::abs(C["ROW_AHEAD_MM"]["far"].get<double>()-number("UPPER_AHEAD_BIAS_MM")-target.ahead)<=std::abs(C["ROW_AHEAD_MM"]["middle"].get<double>()-number("UPPER_AHEAD_BIAS_MM")-target.ahead)?2:5;options.set("--cell",std::to_string(cell));if(!options.has("--pick"))options.args.push_back("--pick");if(!options.has("--lie"))options.args.push_back("--lie");}}
-    bool unload=options.has("--unload")||options.has("--stand")||options.has("--lie")||options.has("--standcal")||options.has("--find")||collect||options.has("--dice")||options.has("--bigbro")||options.has("--gripcal")||options.has("--gripzero");
+    bool unload=upper_pick||options.has("--unload")||options.has("--stand")||options.has("--lie")||options.has("--standcal")||options.has("--find")||collect||options.has("--dice")||options.has("--bigbro")||options.has("--gripcal")||options.has("--gripzero");
     steps=generate(via_pose()[0],start);
     if(!go){if(!unload)steps=with_via(std::move(steps),start);else {auto via=via_pose();bool atvia=true;for(std::size_t i=0;i<5;++i)if(std::abs(now[i]-via[i])>=(i==0?.001:.5*M_PI/180.))atvia=false;if(atvia){std::cout<<"already at the via pose: the move out to it is skipped\n";steps.erase(std::remove_if(steps.begin(),steps.end(),[](const Step &s){return starts(s.name,"sis2 1:")||starts(s.name,"dice 0:")||starts(s.name,"bigbro 0:")||starts(s.name,"stand 0: to");}),steps.end());}}}
     else if(options.value("--goto")=="nominal") {if(!close_but_shoulder(now,start))steps.insert(steps.begin(),wrist_first(now,start,"the nominal pose"));}
     else if(options.value("--goto")!="cell") {steps=out_to_via(now);if(options.value("--goto")=="basic"){auto via=via_pose();if(!close_but_shoulder(via,start))steps.push_back(wrist_first(via,start,"the nominal pose"));steps.push_back({"to the nominal pose",TC::MANIPULATOR,start});}}
-    if(unload||go||options.has("--lying"))steps=stage(std::move(steps),now);
-    smooth_steps(steps,now,start);show(steps);
+    if((unload||go||options.has("--lying"))&&!upper_pick)steps=stage(std::move(steps),now);
+    if(!upper_pick){smooth_steps(steps,now,start);show(steps);}
     bool automatic=options.has("--auto")||(std::find(options.args.begin(),options.args.end(),"choi")!=options.args.end() || std::find(options.args.begin(),options.args.end(),"auto")!=options.args.end());
     if(automatic){std::cout<<"\nAUTO (choi): every step runs without asking. Keep a hand on the 12 V power; Ctrl+C = STOP + hold.\n";if(!go)for(int i=3;i>0&&!interrupted.load();--i){std::cout<<"  starting in "<<i<<" s ...\n";std::this_thread::sleep_for(1s);}}
     else std::cout<<"\nKeep a hand on the 12 V power. Enter = run step, q + Enter = quit.\n\n";

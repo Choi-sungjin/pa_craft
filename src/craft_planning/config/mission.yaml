@@ -42,7 +42,7 @@ mission_master:
     # true (user 2026-11-12, no arm for now): skip every arm action. The upper-cam barcode is still read (2026-11-14), then the
     # robot drives up to S1..S6, then L1..L3, then home. false = the full mission (pick, place, verify).
     drive_only: true
-    # Real pick adapter (puck_picker.py -> execute.py --planning). One mode per slot in collection order.
+    # Real pick adapter (puck_picker -> puck_execute --planning). One mode per slot in collection order.
     # Omit pick_modes for automatic standing-first, nearest-first collection (fresh survey per pick).
     # Explicit find/lie2/lie5 modes remain available for calibration experiments.
     # pick_modes: [lie2, lie5, find, find, find, find, find, find, find, find, find, find]

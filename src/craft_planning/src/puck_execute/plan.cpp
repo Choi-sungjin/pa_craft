@@ -50,6 +50,10 @@ fs::path control_yaml() {
   return source_override() ? ws() / "src/craft_control/config/control.yaml"
                            : share("craft_control") / "config/control.yaml";
 }
+fs::path current_arm_urdf_path() {
+  const auto directory = source_override() ? ws() / "src/craft_description" : share("craft_description");
+  return directory / "urdf/v307_robotis_arm.urdf";
+}
 fs::path camera_data_dir() {
   if (const char *d = std::getenv("CRAFT_CAMERA_DATA_DIR")) return fs::path(d);
   if (const char *d = std::getenv("CRAFT_REPO")) return fs::path(d) / "tools/realsense_check";
@@ -105,7 +109,7 @@ Eigen::Matrix4d axis_motion(const Eigen::Vector3d &axis, const std::string &kind
 }
 }  // namespace
 
-Chain::Chain(const fs::path &urdf) {
+Chain::Chain(const fs::path &urdf, const std::string &tip) {
   const auto model = urdf::parseURDFFile(urdf.string());
   if (!model) throw std::runtime_error("cannot read URDF " + urdf.string());
   std::map<std::string, std::string> parent_of_child, joint_of_child;
@@ -133,7 +137,8 @@ Chain::Chain(const fs::path &urdf) {
     j_[j.name] = j;
   }
   std::vector<Joint> rev;
-  for (std::string link = "tool_tcp"; joint_of_child.count(link); link = parent_of_child[link]) rev.push_back(j_[joint_of_child[link]]);
+  for (std::string link = tip; joint_of_child.count(link); link = parent_of_child[link]) rev.push_back(j_[joint_of_child[link]]);
+  if (rev.empty()) throw std::runtime_error("missing TCP chain for " + tip);
   chain_.assign(rev.rbegin(), rev.rend());
 }
 

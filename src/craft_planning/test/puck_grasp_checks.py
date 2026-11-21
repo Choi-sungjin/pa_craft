@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-"""Pure offline S1 regressions: actual held_check/run_steps with injected observations/transport.
+"""Pure offline S1 regressions: held_check with injected observations.
 
 No ROS node, camera, serial device or hardware publisher is created.
 """
 import ast
 import contextlib
-import importlib.util
 import io
 import json
 from pathlib import Path
-import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -44,54 +42,6 @@ class HeldCriterion(unittest.TestCase):
                         with contextlib.redirect_stdout(out):
                             env['held_check']('offline')
                         self.assertIn('HELD ' + expected, out.getvalue())
-
-
-class CloseOrdering(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        sys.path.insert(0, str(ROOT / 'demo/puck_pick'))
-        prior = sys.argv
-        sys.argv = ['execute.py', '--find', '--auto', '--dry-run']
-        try:
-            spec = importlib.util.spec_from_file_location('s1_execute', ROOT / 'demo/puck_pick/execute.py')
-            cls.module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(cls.module)
-        finally:
-            sys.argv = prior
-
-    def test_delayed_true_and_missing_grasp(self):
-        e = self.module
-        for delay, result, expected in [(0., 'SUCCEEDED', True), (.15, 'SUCCEEDED', True),
-                                         (None, 'SUCCEEDED', False), (0., 'FAILED', False)]:
-            with self.subTest(delay=delay, result=result):
-                clock = SimpleNamespace(now=0.)
-                fake_time = SimpleNamespace(monotonic=lambda: clock.now,
-                                            sleep=lambda seconds: setattr(clock, 'now', clock.now + seconds))
-
-                class OfflineRunner:
-                    planned = True
-                    joints = None
-
-                    @property
-                    def grasped(self):
-                        return delay is not None and clock.now >= delay
-
-                    def send(self, *args):
-                        return 1
-
-                    def wait(self, task_id):
-                        return result, 'offline'
-
-                prior_time = e.time
-                e.time = fake_time
-                try:
-                    with contextlib.redirect_stdout(io.StringIO()):
-                        actual = e.run_steps(OfflineRunner(), [('stand pick: close gripper (grasp)',
-                                                               e.TaskCommand.GRIPPER, True)])
-                    self.assertEqual(actual, expected)
-                    self.assertLessEqual(clock.now, .51)
-                finally:
-                    e.time = prior_time
 
 
 if __name__ == '__main__':

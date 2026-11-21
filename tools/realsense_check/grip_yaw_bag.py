@@ -2,7 +2,7 @@
 """Gripper-cam (그립캠, D435 261622073363) bags of a standing puck at known yaws, for the yaw algorithm (2026-11-15).
 
 Arm first at the pre-descend pose over cell 8 (far-centre) and left there:
-  source ~/craft/install/setup.bash && python3 ~/craft/demo/puck_pick/execute.py --stand --cell 8
+  source ~/craft/install/setup.bash && ros2 run craft_planning puck_execute --stand --cell 8
 Then (venv python3: needs pyrealsense2; close the live gripper window, it holds the camera):
   python3 grip_yaw_bag.py [--yaws 0,22.5,45,67.5,90] [--seconds 3] [--out ~/bags/gripyaw_MMDD_HHMM] [--tag cylinder]
 
@@ -66,7 +66,7 @@ def main():
     # depth 640x360 (2026-11-15): at 1280x720 the D435 sees nothing nearer than 26 cm and the prism top is ~22 cm away
     # (848x480: 17 cm, 640x360: 13 cm, 424x240: 8.6 cm min, measured on the gripper cam)
     ap.add_argument('--depth-size', default='640x360')
-    ap.add_argument('--cell', type=int, default=8, help='grid cell the arm waits over (execute.py --stand --cell N)')
+    ap.add_argument('--cell', type=int, default=8, help='grid cell the arm waits over (puck_execute --stand --cell N)')
     ap.add_argument('--tag', default='', help='puck kind etc., kept in meta.json')
     ap.add_argument('--out', default=os.path.expanduser(time.strftime('~/bags/gripyaw_%m%d_%H%M')))
     a = ap.parse_args()
@@ -74,7 +74,7 @@ def main():
     dw, dh = map(int, a.depth_size.split('x'))
     yaws = [float(y) for y in a.yaws.split(',')]
     os.makedirs(a.out, exist_ok=True)
-    meta = dict(recorded=time.strftime('%Y-%m-%d %H:%M:%S'), pose=f'execute.py --stand --cell {a.cell} (pre-descend, tool_roll 90)', cell=a.cell,
+    meta = dict(recorded=time.strftime('%Y-%m-%d %H:%M:%S'), pose=f'puck_execute --stand --cell {a.cell} (pre-descend, tool_roll 90)', cell=a.cell,
                 tag=a.tag, seconds=a.seconds, size=a.size, depth_size=a.depth_size, shots=[])
     k = 0
     while k < len(yaws):

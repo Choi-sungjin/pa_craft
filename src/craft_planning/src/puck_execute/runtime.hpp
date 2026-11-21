@@ -24,6 +24,12 @@ namespace puck::execute {
 // Main signal handler exposes cancellation to transport waits.
 bool is_interrupted();
 
+constexpr double pick_start_lm_max_m=.037;
+constexpr bool pick_start_lm_ok(double slide,double nominal) {
+  return 2.*nominal-pick_start_lm_max_m <= slide && slide <= pick_start_lm_max_m;
+}
+constexpr double pick_start_joint_tolerance_rad = 15. * 3.14159265358979323846 / 180.;
+
 // ROS transport for execute.py's Runner. Spin the node concurrently with calls
 // to send/wait/lease_camera, as the Python program spins on a separate thread.
 class Runner final : public rclcpp::Node {
@@ -33,7 +39,10 @@ class Runner final : public rclcpp::Node {
   explicit Runner(bool planned);
 
   uint64_t send(TaskCommand command);
-  std::pair<std::string, std::string> wait(uint64_t id, double timeout_s = 35.0);
+  std::pair<std::string, std::string> wait(uint64_t id, double timeout_s = 35.0, uint64_t revision = 0);
+  std::pair<std::string, std::string> stream_arm(const std::vector<std::string> &names,
+    const std::vector<double> &start, const std::vector<std::vector<double>> &targets,
+    double waypoint_seconds);
   bool drive(const std::string &box, bool reverse, double shift_m = 0);
   void stop();
   void set_hold(bool value);

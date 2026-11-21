@@ -39,6 +39,7 @@ struct CameraContext {
   std::filesystem::path run_dir;
 };
 using CameraStepResult = std::pair<bool, std::string>;
+int locate_upper_pucks();
 policy::Candidate survey_pick(CameraContext &ctx);
 policy::Candidate redock_for_reach(CameraContext &ctx, const policy::Candidate &chosen);
 CameraStepResult find_step(CameraContext &ctx, Steps &steps, std::size_t i, const Json &arg);

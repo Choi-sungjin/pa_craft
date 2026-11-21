@@ -389,7 +389,10 @@ public:
     arm_max_accel_ = declare_parameter("arm_max_accel_rad_s2", 0.0);
     // Stream points (MANIPULATOR UPDATE_PATH) as constant-speed moves of this many ms (firmware STREAM,<ms>; 10..500),
     // 0 = each point a timed move with ramps (TIME,<duration_s>). Needs the 2026-11-18 lm_arm firmware.
-    arm_stream_direct_ms_ = static_cast<int>(declare_parameter("arm_stream_direct_ms", 0));
+    rcl_interfaces::msg::ParameterDescriptor arm_stream_descriptor;
+    arm_stream_descriptor.read_only = true;
+    arm_stream_direct_ms_ = static_cast<int>(
+      declare_parameter("arm_stream_direct_ms", 0, arm_stream_descriptor));
     if (arm_stream_direct_ms_ != 0 && (arm_stream_direct_ms_ < 10 || arm_stream_direct_ms_ > 500)) {
       throw std::invalid_argument("arm_stream_direct_ms must be 0 or 10..500");
     }
@@ -934,6 +937,12 @@ private:
     // UPDATE_PATH of a running MANIPULATOR task (2026-11-18, streamed arm trajectories): new joint targets and travel
     // time for the same task; the board rewrites each changed goal with that time (a rewrite restarts the timed move).
     const bool arm_update = update && task_.kind == TaskCommand::MANIPULATOR && c.kind == TaskCommand::MANIPULATOR;
+    // The executor marks an arm stream so its opening EXECUTE also uses STREAM.
+    const bool direct_arm_request = c.kind == TaskCommand::MANIPULATOR && c.header.frame_id == "arm_stream";
+    if (direct_arm_request && arm_stream_direct_ms_ == 0) {
+      reject(c, "arm_stream requires nonzero arm_stream_direct_ms");
+      return;
+    }
     if (update && (!task_.running() || c.task_id != task_.result.task_id ||
         (!arm_update && (task_.kind != TaskCommand::NAVIGATE || c.kind != TaskCommand::NAVIGATE)))) {
       // Late updates after completion cannot revive an old path.
@@ -1073,7 +1082,7 @@ private:
           if (c.joints.position.size() == 6) set_gripper_target(false, c.joints.position[5]);
           break;
         }
-        arm_stream_point_ = false;  // a task's own move: timed (STREAM,0 first if a stream was on)
+        arm_stream_point_ = direct_arm_request;
         arm_gain_lines_.clear();
         for (size_t i = 0; i < c.position_i_gains.size(); ++i) {
           arm_gain_lines_.push_back("IGAIN," + std::to_string(i + 1) + "," + std::to_string(c.position_i_gains[i]));

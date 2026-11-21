@@ -203,7 +203,7 @@ control_master:
     # 2026-11-18 needed; older firmware ignores STREAM and times each point with the last TIME). Make it 1.5-2x the
     # stream period (arm_stream.yaml hz 20 = 50 ms -> 80): with exactly the period a late point means stop-and-go,
     # with a little more the next point always arrives while the last is still moving (review 2026-11-18).
-    arm_stream_direct_ms: 0
+    arm_stream_direct_ms: 80
     arm_angle_tolerance: 0.008726646259971648  # [motor rad] 0.5 degree per joint, matches firmware lm_arm (was 1, before that 2: up to ~9 mm TCP height at the grasp)
 
     # Independent LM controller: target displacement [m] -> motor angle [rad].

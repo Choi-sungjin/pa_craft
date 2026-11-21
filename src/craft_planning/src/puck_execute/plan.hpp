@@ -19,6 +19,7 @@ using JointMap = std::map<std::string, double>;
 fs::path here();
 fs::path ws();
 fs::path urdf_path();
+fs::path current_arm_urdf_path();
 fs::path control_yaml();
 fs::path home();
 fs::path state_dir();
@@ -35,7 +36,7 @@ constexpr double ASSUME_TOOL_ROLL = 0.0;
 class Chain {
 public:
   static const std::vector<std::string> NAMES;  // slide, shoulder, elbow, wrist_pitch, tool_roll
-  explicit Chain(const fs::path &urdf);
+  explicit Chain(const fs::path &urdf, const std::string &tip = "tool_tcp");
   std::pair<double, double> limits(const std::string &name) const;
   Eigen::Matrix4d fk(const JointMap &q) const;
   Eigen::Vector3d origin(const std::string &name) const;

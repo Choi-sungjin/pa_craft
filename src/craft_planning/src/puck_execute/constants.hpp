@@ -1,4 +1,4 @@
-// Literal defaults from demo/puck_pick/execute.py, kept separate from runtime YAML/JSON.
+// Executor defaults, kept separate from runtime YAML/JSON.
 // Runtime CLI overrides are applied by configure().
 #pragma once
 #include <nlohmann/json.hpp>
@@ -35,11 +35,11 @@ inline nlohmann::ordered_json default_constants() {
  ],
  "BIGBRO_SLOT": 12,
  "NOMINAL_RAW_DEG": [
-  561.4,
-  53.9,
-  178.0,
-  58.4,
-  0.0,
+  -709.4,
+  64.9,
+  216.5,
+  211.0,
+  1.1,
   73.1
  ],
  "VIA_RAW_DEG": [

@@ -1,7 +1,7 @@
 // Mission adapter for the calibrated executor. No direct control/hold publisher.
 // Request: '<token> <box> <slot> <collect|find|lie2|lie5> [remaining]'; result: '<token> <OK|FAILED> <reason>'.
 // Only one child runs; STOP cancels it and stops planning. Output is retained per request.
-// executor_path: the C++ puck_execute by default; a path ending in .py runs with python3 -u (the old execute.py).
+// executor_path defaults to the installed puck_execute binary.
 #include <fcntl.h>
 #include <signal.h>
 #include <sys/types.h>
@@ -103,7 +103,6 @@ private:
       if (!fs::is_regular_file(executor_path_)) throw std::invalid_argument("executor missing: " + executor_path_);
 
       std::vector<std::string> args;
-      if (fs::path(executor_path_).extension() == ".py") args = {"/usr/bin/python3", "-u"};
       args.insert(args.end(), {executor_path_, "--planning", "--box", box, "--slot", slot, "--auto"});
       if (mode == "collect") args.push_back("--collect");
       else if (mode == "find") args.push_back("--find");
